@@ -3,9 +3,7 @@ name = "dspy-agent-tools"
 version = "0.1.1"
 description = "Add your description here"
 readme = "README.md"
-authors = [
-    { name = "Edward Boswell", email = "thememium@gmail.com" }
-]
+authors = [{ name = "Edward Boswell", email = "thememium@gmail.com" }]
 requires-python = ">=3.13"
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -25,15 +23,15 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "bandit>=1.9.4",
-    "deptry>=0.25.1",
-    "isort>=9.0.1",
-    "poethepoet>=0.48.0",
-    "pytest>=9.1.1",
-    "pytest-cov>=7.1.0",
-    "ruff>=0.16.7",
-    "ty>=0.0.81",
-    "usechange>=0.1.46",
+  "bandit>=1.9.4",
+  "deptry>=0.25.1",
+  "isort>=9.0.1",
+  "poethepoet>=0.48.0",
+  "pytest>=9.1.1",
+  "pytest-cov>=7.1.0",
+  "ruff>=0.16.7",
+  "ty>=0.0.81",
+  "usechange>=0.1.46",
 ]
 
 [tool.deptry]
@@ -57,7 +55,7 @@ exclude = ["**/__pycache__", "**/.venv"]
 # See all rules at: https://docs.astral.sh/ty/reference/rules/
 
 [tool.poe.tasks]
-dev = "uv run dspy_agent_tools"
+dev = "uv run example.py"
 clean-full = "sh -c 'uv run isort . && uv run ruff check . --fix && uv run ruff format . && uv run deptry . && uv run ty check'"
 clean = "sh -c 'uv run isort . && uv run ruff format .'"
 test = "uv run pytest tests/ -v"
