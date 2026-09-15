@@ -3,8 +3,25 @@ name = "dspy-agent-tools"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
+authors = [
+    { name = "Edward Boswell", email = "thememium@gmail.com" }
+]
 requires-python = ">=3.13"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Developers",
+]
+# license = "MIT"
+# license-files = ["LICEN[CS]E*"]
 dependencies = []
+
+[project.scripts]
+dspy_agent_tools = "dspy_agent_tools:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
@@ -22,8 +39,25 @@ dev = [
 [tool.deptry]
 known_first_party = ["dspy_agent_tools"]
 
+[project.urls]
+Homepage = "https://github.com/thememium/dspy-agent-tools"
+Documentation = "https://github.com/thememium/dspy-agent-tools"
+Repository = "https://github.com/thememium/dspy-agent-tools.git"
+Issues = "https://github.com/thememium/dspy-agent-tools/issues"
+Changelog = "https://github.com/thememium/dspy-agent-tools/blob/master/CHANGELOG.md"
+
+[tool.ty]
+
+[tool.ty.src]
+include = ["src", "tests"]
+exclude = ["**/__pycache__", "**/.venv"]
+
+[tool.ty.rules]
+# Ty uses rule = "level" format (error, warn, ignore)
+# See all rules at: https://docs.astral.sh/ty/reference/rules/
+
 [tool.poe.tasks]
-dev = "uv run main.py"
+dev = "uv run dspy_agent_tools"
 clean-full = "sh -c 'uv run isort . && uv run ruff check . --fix && uv run ruff format . && uv run deptry . && uv run ty check'"
 clean = "sh -c 'uv run isort . && uv run ruff format .'"
 test = "uv run pytest tests/ -v"
