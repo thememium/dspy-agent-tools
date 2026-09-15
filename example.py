@@ -10,7 +10,9 @@ print(result[1])
 content = """### Contributor
 Magic test
 """
-result = edit_file(changelog_path, result[1], 9, 10, content)
+result = edit_file(
+    changelog_path, result[1], start_line=9, end_line=10, new_text=content
+)
 print(result)
 
 
