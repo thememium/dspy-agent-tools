@@ -11,14 +11,19 @@ def read_file(path: str) -> tuple[str, str]:
     """
     Read a file and return:
 
-        (content, snapshot)
+        (numbered_content, snapshot)
 
-    Example:
-        content, snapshot = read("app.py")
+    Content is returned with 1-based line numbers prefixed
+    to each line, matching the line numbers edit_file uses.
     """
     content = Path(path).read_text()
+    snapshot = _hash(content)
 
-    return content, _hash(content)
+    numbered = "\n".join(
+        f"{i:>5} | {line}" for i, line in enumerate(content.splitlines(), 1)
+    )
+
+    return numbered, snapshot
 
 
 def write_file(path: str, content: str, snapshot: str | None = None) -> str:
