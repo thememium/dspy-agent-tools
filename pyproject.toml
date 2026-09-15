@@ -12,7 +12,9 @@ classifiers = [
 ]
 # license = "MIT"
 # license-files = ["LICEN[CS]E*"]
-dependencies = []
+dependencies = [
+    "tree-sitter-language-pack>=1.20.0",
+]
 
 [project.scripts]
 dspy_agent_tools = "dspy_agent_tools:main"
