@@ -1,4 +1,5 @@
 import difflib
+import re
 from hashlib import sha256
 from pathlib import Path
 
@@ -29,8 +30,9 @@ def read_file(path: str) -> tuple[str, str]:
 
         (numbered_content, snapshot)
 
-    Content is returned with 1-based line numbers prefixed
-    to each line, matching the line numbers edit_file uses.
+    Content is returned with 1-based line numbers prefixed to each
+    line. The " N | " prefix is display-only: quote text without it
+    when calling edit_file or write_file.
     """
     content = Path(path).read_text()
     snapshot = _hash(content)
@@ -93,7 +95,9 @@ def edit_file(
     most similar block of lines is replaced instead, as long as its
     similarity is at least min_similarity (0.0-1.0). This recovers
     edits whose old text drifted slightly from the real file
-    (whitespace, renamed identifiers, trailing punctuation).
+    (whitespace, renamed identifiers, trailing punctuation). If the
+    agent pasted read_file's " N | " prefixes into old_text, they are
+    stripped automatically before matching.
 
     Returns the new snapshot.
     """
@@ -144,6 +148,24 @@ def _edit_lines(
     return _hash(new_content)
 
 
+_NUMBER_PREFIX = re.compile(r"^\s*\d+ \| ")
+
+
+def _unnumber(text: str) -> str:
+    """
+    Strip read_file's " N | " prefixes from every non-empty line.
+
+    Returns the text unchanged unless every non-empty line carries the
+    prefix, so real content that merely starts with digits and a pipe
+    is never mangled.
+    """
+    lines = text.splitlines()
+    non_empty = [line for line in lines if line.strip()]
+    if not non_empty or not all(_NUMBER_PREFIX.match(line) for line in non_empty):
+        return text
+    return "\n".join(_NUMBER_PREFIX.sub("", line, count=1) for line in lines)
+
+
 def _edit_text(
     path: str, snapshot: str, old_text: str, new_text: str, min_similarity: float
 ) -> str:
@@ -157,6 +179,12 @@ def _edit_text(
     edit_path, content = _checked(path, snapshot)
 
     occurrences = content.count(old_text)
+    if occurrences == 0:
+        # Agent likely pasted read_file's numbered output verbatim.
+        unnumbered = _unnumber(old_text)
+        if unnumbered != old_text:
+            old_text = unnumbered
+            occurrences = content.count(old_text)
     if occurrences > 1:
         raise ValueError(
             f"{path}: {old_text!r} matches {occurrences} times; "
