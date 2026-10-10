@@ -101,8 +101,24 @@ class TestWebSearch:
         web_search("q")
         _, kwargs = fake_ddgs.calls[0]
         assert kwargs["max_results"] == 5
-        assert kwargs["region"] == "wt-wt"
+        assert kwargs["region"] == "us-en"
         assert kwargs["timelimit"] is None
+
+    def test_region_coerced_to_country_language_form(self, fake_ddgs):
+        for raw, expected in [
+            ("us", "us-en"),
+            ("US", "us-en"),
+            ("United States", "us-en"),
+            ("", "us-en"),
+            (None, "us-en"),
+            ("wt-wt", "us-en"),
+            ("US-EN", "us-en"),
+            ("uk-en", "uk-en"),
+            ("de-de", "de-de"),
+        ]:
+            web_search("q", region=raw)
+            _, kwargs = fake_ddgs.calls[-1]
+            assert kwargs["region"] == expected, (raw, kwargs["region"])
 
     def test_empty_results(self, fake_ddgs):
         fake_ddgs.text = lambda *_args, **_kwargs: []
