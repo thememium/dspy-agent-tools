@@ -1,6 +1,8 @@
-def main() -> None:
-    print("Hello from dspy-agent-tools!")
+from .files import edit_file, read_file, write_file
 
-
-if __name__ == "__main__":
-    main()
+__all__ = [
+    # File tools
+    "edit_file",
+    "read_file",
+    "write_file",
+]
