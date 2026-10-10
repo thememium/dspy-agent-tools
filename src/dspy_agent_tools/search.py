@@ -1,7 +1,7 @@
 import re
 import urllib.parse
 
-_REGION_RE = re.compile(r"^[a-z]{2}-[a-z]{2}$")
+_REGION_RE = re.compile(r"^[a-z]{2}-[a-z]{2,3}$")
 
 
 def _normalize_region(region: str | None) -> str:
@@ -11,7 +11,8 @@ def _normalize_region(region: str | None) -> str:
     ``ValueError`` for anything without exactly one dash (e.g. "us",
     "United States", "").  "wt-wt" (the historical ddgs "no region"
     alias) also breaks engines that use the country code as a subdomain,
-    sending requests to wt.wikipedia.org.
+    sending requests to wt.wikipedia.org.  Language codes may be two or
+    three letters (e.g. "hk-tzh", "tw-tzh").
     """
     r = (region or "").strip().lower()
     if r == "wt-wt":

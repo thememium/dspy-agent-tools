@@ -117,6 +117,9 @@ class TestWebSearch:
             ("uk", "us-en"),
             ("uk-en", "uk-en"),
             ("de-de", "de-de"),
+            ("hk-tzh", "hk-tzh"),
+            ("tw-tzh", "tw-tzh"),
+            (" hk-tzh ", "hk-tzh"),
         ]:
             web_search("q", region=raw)
             _, kwargs = fake_ddgs.calls[-1]
