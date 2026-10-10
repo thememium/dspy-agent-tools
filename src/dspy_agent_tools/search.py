@@ -18,8 +18,6 @@ def _normalize_region(region: str | None) -> str:
         return "us-en"
     if _REGION_RE.match(r):
         return r
-    if re.fullmatch(r"[a-z]{2}", r):
-        return f"{r}-en"
     return "us-en"
 
 

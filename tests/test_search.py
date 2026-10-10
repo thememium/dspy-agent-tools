@@ -113,6 +113,8 @@ class TestWebSearch:
             (None, "us-en"),
             ("wt-wt", "us-en"),
             ("US-EN", "us-en"),
+            ("a-b-c", "us-en"),
+            ("uk", "us-en"),
             ("uk-en", "uk-en"),
             ("de-de", "de-de"),
         ]:
