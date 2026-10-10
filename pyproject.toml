@@ -43,6 +43,9 @@ dev = [
 [tool.deptry]
 known_first_party = ["dspy_agent_tools"]
 
+[tool.isort]
+profile = "black"
+
 [project.urls]
 Homepage = "https://github.com/thememium/dspy-agent-tools"
 Documentation = "https://github.com/thememium/dspy-agent-tools"
