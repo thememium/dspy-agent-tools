@@ -118,8 +118,7 @@ def edit_file(
         if start_line is None or end_line is None:
             raise ValueError("start_line and end_line must be given together.")
         return _edit_lines(path, snapshot, start_line, end_line, new_text)
-    if old_text is None:  # unreachable given the mode check; satisfies ty
-        raise ValueError("old_text is required for text replacement.")
+    assert old_text is not None  # guaranteed by the mode check above
     return _edit_text(path, snapshot, old_text, new_text, min_similarity)
 
 
