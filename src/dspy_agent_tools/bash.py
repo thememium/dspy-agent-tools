@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import cast
 
+import rgapi
 from plumbum import local
 
 DEFAULT_TIMEOUT = 300  # seconds
@@ -140,106 +141,293 @@ def bash_exec(
     return _render(output, notices, elapsed)
 
 
-def _run_batched(
-    specs: list[dict[str, str]],
-    build_argv,
-    ok_codes: frozenset[int] = frozenset(),
-    no_match_rc: int | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
-) -> str:
-    """Run one subprocess per spec concurrently; return labeled outputs.
+_RG_TYPE_EXTS = {
+    # rg type names whose canonical extension differs from the name.
+    "clojure": "clj",
+    "elixir": "ex",
+    "erlang": "erl",
+    "golang": "go",
+    "haskell": "hs",
+    "javascript": "js",
+    "kotlin": "kt",
+    "make": "mk",
+    "markdown": "md",
+    "perl": "pl",
+    "protobuf": "proto",
+    "puppet": "pp",
+    "python": "py",
+    "ruby": "rb",
+    "rust": "rs",
+    "shell": "sh",
+    "typescript": "ts",
+    "vimscript": "vim",
+}
 
-    Output is collected sequentially against one overall deadline, so the
-    batch never outlives the timeout even if a single search stalls.
+_NO_VALUE_FLAGS = frozenset(
+    {
+        # no-ops: line numbers are always reported
+        "-n",
+        "--line-number",
+        "--no-heading",
+        "--absolute-path",
+        # case handling
+        "-i",
+        "--ignore-case",
+        "-s",
+        "--case-sensitive",
+        "-S",
+        "--smart-case",
+        # result shape
+        "-l",
+        "--files-with-matches",
+        "-c",
+        "--count",
+        # traversal
+        "--hidden",
+        "--no-ignore",
+        "-L",
+        "--follow",
+        "-u",
+        "-uu",
+        "-uuu",
+    }
+)
+
+
+def _expand_options(options: str) -> list[str]:
+    """Split an option string, splitting "--flag=value" into two tokens."""
+    tokens: list[str] = []
+    for token in options.split():
+        if token.startswith("--") and "=" in token:
+            tokens.extend(token.split("=", 1))
+        else:
+            tokens.append(token)
+    return tokens
+
+
+def _take_value(flag: str, tokens: list[str], i: int) -> tuple[str, int]:
+    """Return (value, next_index) for an option that needs an argument."""
+    if i + 1 >= len(tokens):
+        raise ValueError(f"option {flag} requires a value")
+    return tokens[i + 1], i + 2
+
+
+def _rg_kwargs(options: str, pattern: str) -> tuple[str, dict]:
+    """Translate rg flags into rgapi.rg keyword arguments.
+
+    Returns (pattern, kwargs); pattern is passed through. Raises ValueError
+    for flags with no rgapi equivalent so the caller can surface a notice
+    instead of silently ignoring the request.
     """
-    started = time.monotonic()
-
-    running: list[tuple[str, subprocess.Popen[bytes]]] = []
-    sections: list[str] = []
-    for spec in specs:
-        label = f"{spec.get('pattern', '')} in {spec.get('path', '.')}"
-        try:
-            argv = build_argv(spec)
-            running.append((label, _spawn(argv)))
-        except (KeyError, ValueError, OSError) as exc:
-            sections.append(f"== {label} ==\nError: {exc}")
-
-    deadline = time.monotonic() + timeout
-    for label, proc in running:
-        notices: list[str] = []
-        try:
-            raw, _ = proc.communicate(
-                timeout=deadline - time.monotonic() if timeout > 0 else None
+    kwargs: dict = {}
+    tokens = _expand_options(options)
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if tok in _NO_VALUE_FLAGS:
+            if tok in ("-i", "--ignore-case"):
+                kwargs["case_sensitive"] = False
+            elif tok in ("-s", "--case-sensitive"):
+                kwargs["case_sensitive"] = True
+            elif tok in ("-S", "--smart-case"):
+                kwargs["smart_case"] = True
+            elif tok in ("-l", "--files-with-matches"):
+                kwargs["paths"] = True
+            elif tok in ("-c", "--count"):
+                kwargs["count"] = True
+            elif tok in ("--hidden",):
+                kwargs["hidden"] = True
+            elif tok in ("--no-ignore", "-u", "-uu", "-uuu"):
+                kwargs["ignore"] = False
+                if tok == "-u":
+                    kwargs["hidden"] = True
+            elif tok in ("-L", "--follow"):
+                kwargs["follow_links"] = True
+            continue
+        if tok in (
+            "-w",
+            "--word-regexp",
+            "-x",
+            "--line-regexp",
+            "-F",
+            "--fixed-strings",
+        ):
+            raise ValueError(f"unsupported rg option: {tok}")
+        if tok.startswith("--") or len(tok) == 2:
+            value, i = _take_value(tok, tokens, i - 1)
+        else:
+            value = tok[2:]  # attached short-flag value like "-A3" or "-tpy"
+        if tok in ("-A", "--after-context"):
+            kwargs["after_context"] = int(value)
+        elif tok in ("-B", "--before-context"):
+            kwargs["before_context"] = int(value)
+        elif tok in ("-C", "--context"):
+            kwargs["context"] = int(value)
+        elif tok in ("-t", "--type"):
+            kwargs["ext"] = _RG_TYPE_EXTS.get(value, value)
+        elif tok in ("-T", "--type-not"):
+            kwargs.setdefault("exclude", []).append(
+                f"*.{_RG_TYPE_EXTS.get(value, value)}"
             )
-        except subprocess.TimeoutExpired:
-            pid = proc.pid
-            assert pid is not None  # a process that timed out still has a pid
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-            raw, _ = proc.communicate()
-            notices.append(f"[timed out after {timeout}s and was killed]")
-
-        output = raw.decode(errors="replace")
-        rc = proc.returncode
-        if rc == no_match_rc and not output.strip():
-            output = "No matches.\n"
-        elif rc != 0 and rc not in ok_codes:
-            notices.append(f"[exit code {rc}]")
-        output, cap_notice = _cap(output)
-        if cap_notice is not None:
-            notices.append(cap_notice)
-        section = f"== {label} ==\n" + output.rstrip("\n")
-        if notices:
-            section += "\n\n" + "\n".join(notices)
-        sections.append(section)
-
-    elapsed = time.monotonic() - started
-    return "\n\n".join(sections) + f"\n({elapsed:.1f}s)"
+        elif tok in ("-g", "--glob"):
+            if value.startswith("!"):
+                kwargs.setdefault("exclude", []).append(value[1:])
+            else:
+                kwargs.setdefault("include", []).append(value)
+        elif tok in ("--max-depth",):
+            kwargs["max_depth"] = int(value)
+        else:
+            raise ValueError(f"unsupported rg option: {tok}")
+    return pattern, kwargs
 
 
-def _spawn(argv: list[str]):
-    """Start a process with merged output in its own process group."""
-    return local[argv[0]][tuple(argv[1:])].popen(
-        stderr=subprocess.STDOUT, new_session=True
-    )
+def _fd_kwargs(options: str, pattern: str | None) -> tuple[str | None, dict]:
+    """Translate fd flags into rgapi.fd keyword arguments.
+
+    Returns (pattern, kwargs). With "--glob" the pattern is reinterpreted
+    as an include glob; otherwise it stays a regex matched against file
+    names. Raises ValueError for flags with no rgapi equivalent.
+    """
+    glob_mode = False
+    kwargs: dict = {}
+    tokens = _expand_options(options)
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if tok in ("-H", "--hidden"):
+            kwargs["hidden"] = True
+        elif tok in ("-I", "--no-ignore", "-u"):
+            kwargs["ignore"] = False
+        elif tok in ("-L", "--follow"):
+            kwargs["follow_links"] = True
+        elif tok == "--absolute-path":
+            continue
+        elif tok in ("-g", "--glob"):
+            glob_mode = True
+        else:
+            value, i = _take_value(tok, tokens, i - 1)
+            if tok in ("-t", "--type"):
+                if value == "f":
+                    kwargs["files"], kwargs["dirs"] = True, False
+                elif value == "d":
+                    kwargs["files"], kwargs["dirs"] = False, True
+                else:
+                    raise ValueError(f"unsupported fd type: {value}")
+            elif tok in ("-e", "--extension"):
+                kwargs["ext"] = value
+            elif tok in ("-E", "--exclude"):
+                kwargs.setdefault("exclude", []).append(value)
+            elif tok in ("-d", "--max-depth"):
+                kwargs["max_depth"] = int(value)
+            else:
+                raise ValueError(f"unsupported fd option: {tok}")
+    if glob_mode:
+        kwargs.setdefault("include", []).append(pattern or "**")
+        pattern = None
+    return pattern, kwargs
+
+
+def _search_text(result, no_match: str | None) -> str:
+    """Render an rgapi result with timeout/cap notices, without wall time."""
+    notices: list[str] = []
+    if getattr(result, "stop_reason", None) == "timeout":
+        notices.append("[search timed out; partial results shown]")
+    if isinstance(result, int):
+        text = str(result)  # rg count=True returns a bare count
+    else:
+        text = "\n".join(str(item) for item in result)
+    if no_match is not None and not text.strip():
+        text = no_match
+    text, cap_notice = _cap(text)
+    if cap_notice is not None:
+        notices.append(cap_notice)
+    if notices:
+        text = text.rstrip("\n") + "\n\n" + "\n".join(notices)
+    return text.rstrip("\n")
+
+
+def _search_error(exc: Exception) -> str:
+    """Render a failed search as an "[Error]" body instead of raising."""
+    return f"[Error] {exc}"
+
+
+def _run_search(
+    spec: dict[str, str],
+    default_options: str,
+    parse_kwargs,
+    run,
+    require_pattern: bool = True,
+    no_match: str | None = "No matches.",
+) -> str:
+    """Run one search spec through rgapi and render its section body.
+
+    Raises KeyError/ValueError/OSError for the batch caller to turn into
+    an Error section; bad regexes and unknown flags are caught here and
+    returned as an "[Error]" body instead.
+    """
+    if require_pattern and "pattern" not in spec:
+        raise KeyError("pattern")
+    try:
+        pattern, kwargs = parse_kwargs(
+            spec.get("options", default_options) or "", spec.get("pattern", "")
+        )
+    except ValueError as exc:
+        return _search_error(exc)
+    try:
+        result = run(pattern, kwargs)
+    except ValueError as exc:  # bad regex, unreadable root, ...
+        return _search_error(exc)
+    return _search_text(result, no_match)
 
 
 def bash_ripgrep(pattern: str, path: str = ".", options: str = "-n") -> str:
     """
-    Search file contents with ripgrep and return the matching lines.
+    Search file contents with ripgrep-style matching and return the lines.
 
-    WHAT: Runs `rg` and returns lines matching a regex, prefixed with
-    "file:line:". WHEN: The default tool for finding code, text, symbols,
-    or config inside files. Use bash_find instead when you need file
-    NAMES/paths rather than contents, and bash_exec for anything else.
+    WHAT: Searches files with the rgapi library (ripgrep's matching engine
+    as a Python module, no rg binary needed) and returns lines matching a
+    regex, prefixed with "file:line:". WHEN: The default tool for finding
+    code, text, symbols, or config inside files. Use bash_find instead
+    when you need file NAMES/paths rather than contents, and bash_exec for
+    anything else.
     HOW:
         - pattern (str): a regex, e.g. "def _execute", "TODO|FIXME",
           "error.*timeout".
         - path (str, default "."): file or directory to search; a file
           searches just that file, a directory searches recursively.
-        - options (str, default "-n"): extra rg flags as a single string.
+        - options (str, default "-n"): rg-style flags as a single string.
           Useful ones: "-n -i" (case-insensitive), "-n -t py" (Python
           files only), "-n -l" (just file names), "-n -A 3" (context
-          lines), "-n --no-ignore" (search ignored/hidden files too).
+          lines), "-n -g '!test_*'" (exclude a glob), "-n --no-ignore
+          --hidden" (search ignored/hidden files too).
 
-    Returns the matches, or "No matches." when nothing is found (this is
-    not an error). Non-rg errors (bad regex, missing path) appear as an
-    "[exit code 2]" notice with rg's message.
+    Like ripgrep, hidden files and .gitignore'd paths are skipped by
+    default. Returns the matches, or "No matches." when nothing is found
+    (this is not an error). Bad regexes and unknown options appear as an
+    "[Error]" line instead of raising.
     """
-    output, notices, elapsed, rc = _execute(
-        ["rg", *options.split(), pattern, str(_resolve_existing(path))],
-        ok_codes=frozenset({1}),
-    )
-    if rc == 1 and not output.strip():
-        output = "No matches.\n"
-    return _render(output, notices, elapsed)
+    started = time.monotonic()
+    root = _resolve_existing(path)
+
+    def run(pat: str, kwargs: dict):
+        return rgapi.rg(pat, str(root), timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs)
+
+    try:
+        pattern, kwargs = _rg_kwargs(options, pattern)
+        result = run(pattern, kwargs)
+    except ValueError as exc:
+        return _render(_search_error(exc), [], time.monotonic() - started)
+    return _render(_search_text(result, "No matches."), [], time.monotonic() - started)
 
 
 def bash_ripgrep_batch(searches: list[dict[str, str]]) -> str:
     """
-    Run several ripgrep searches concurrently and return labeled results.
+    Run several ripgrep-style searches and return labeled results.
 
-    WHAT: bash_ripgrep for many patterns at once — all searches run as
-    concurrent processes and the whole batch is capped by one timeout.
+    WHAT: bash_ripgrep for many patterns at once — searches run on Rust
+    threads through rgapi and the whole batch is capped by one timeout.
     WHEN: Use when you have several independent searches (e.g. scanning a
     codebase for multiple symbols before editing); use it instead of
     repeated bash_ripgrep calls to save round trips. For a single search,
@@ -248,79 +436,115 @@ def bash_ripgrep_batch(searches: list[dict[str, str]]) -> str:
         - searches (list[dict]): one dict per search, each with:
             * pattern (str, required): the regex to search for.
             * path (str, default "."): file or directory to search.
-            * options (str, default "-n"): extra rg flags.
+            * options (str, default "-n"): rg-style flags, as in
+              bash_ripgrep.
 
     Results are labeled "pattern in path" sections. A search with no hits
     shows "No matches."; a bad spec or missing path shows an "Error:"
     section instead of failing the whole batch.
     """
+    started = time.monotonic()
+    deadline = time.monotonic() + DEFAULT_TIMEOUT
+    sections: list[str] = []
+    for spec in searches:
+        label = f"{spec.get('pattern', '')} in {spec.get('path', '.')}"
+        try:
+            root = str(_resolve_existing(spec.get("path", ".")))
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            body = _run_search(
+                spec,
+                "-n",
+                _rg_kwargs,
+                lambda pat, kwargs, root=root, remaining_ms=remaining_ms: rgapi.rg(
+                    pat, root, timeout_ms=remaining_ms, **kwargs
+                ),
+            )
+        except (KeyError, ValueError, OSError) as exc:
+            body = f"Error: {exc}"
+        sections.append(f"== {label} ==\n{body}")
 
-    def build(spec: dict[str, str]) -> list[str]:
-        return [
-            "rg",
-            *spec.get("options", "-n").split(),
-            spec["pattern"],
-            str(_resolve_existing(spec.get("path", "."))),
-        ]
-
-    return _run_batched(searches, build, ok_codes=frozenset({1}), no_match_rc=1)
+    elapsed = time.monotonic() - started
+    return "\n\n".join(sections) + f"\n({elapsed:.1f}s)"
 
 
 def bash_find(pattern: str | None = None, path: str = ".", options: str = "") -> str:
     """
-    Find file and directory paths by name using fd.
+    Find file and directory paths by name.
 
-    WHAT: Runs `fd` and returns matching paths under `path`, one per line.
-    WHEN: Use to locate files/directories by name or extension — "where is
-    the config?", "list all .py files", "find test dirs". Use
-    bash_ripgrep instead when matching file CONTENTS, and bash_ls to see
-    just one directory level.
+    WHAT: Finds paths under `path` with the rgapi library (the fd/fdfind
+    walking engine as a Python module, no fd binary needed) and returns
+    them one per line. WHEN: Use to locate files/directories by name or
+    extension — "where is the config?", "list all .py files", "find test
+    dirs". Use bash_ripgrep instead when matching file CONTENTS, and
+    bash_ls to see just one directory level.
     HOW:
-        - pattern (str, optional): fd pattern, a regex by default. Omit or
-          pass "" to list everything under `path`.
+        - pattern (str, optional): regex matched against file names. Omit
+          or pass "" to list everything under `path`.
         - path (str, default "."): root directory of the search.
-        - options (str, default ""): extra fd flags as a single string.
-          Useful ones: "--glob" (treat pattern as a glob like "*.py"),
-          "--type f" (files only), "--type d" (directories only),
-          "--hidden", "--max-depth 2", "--exclude node_modules".
+        - options (str, default ""): fd-style flags as a single string.
+          Useful ones: "-e py" (extension), "-t f" (files only), "-t d"
+          (directories only), "-d 2" (max depth), "-E node_modules"
+          (exclude a glob), "--hidden" and "--no-ignore" (search
+          ignored/hidden paths too).
 
-    fd ignores hidden files and .gitignore'd paths by default; add
-    "--hidden" and/or "--no-ignore" in options to see them.
+    Like fd, hidden files and .gitignore'd paths are skipped by default.
+    A pattern that matches nothing returns empty output (not an error).
     """
-    output, notices, elapsed, _ = _execute(
-        ["fd", *options.split(), pattern or "", str(_resolve_existing(path))]
-    )
-    return _render(output, notices, elapsed)
+    started = time.monotonic()
+    root = _resolve_existing(path)
+
+    def run(pat: str | None, kwargs: dict):
+        return rgapi.fd(root, pat, timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs)
+
+    try:
+        pattern, kwargs = _fd_kwargs(options, pattern or "")
+        result = run(pattern, kwargs)
+    except ValueError as exc:
+        return _render(_search_error(exc), [], time.monotonic() - started)
+    return _render(_search_text(result, no_match=None), [], time.monotonic() - started)
 
 
 def bash_find_batch(searches: list[dict[str, str]]) -> str:
     """
-    Run several fd path lookups concurrently and return labeled results.
+    Run several path lookups and return labeled results.
 
-    WHAT: bash_find for many patterns at once — all lookups run as
-    concurrent processes under one shared timeout. WHEN: Use when you need
-    several independent file listings (e.g. locating every module touched
-    by a plan before editing); prefer bash_find for a single lookup.
+    WHAT: bash_find for many patterns at once — all lookups run through
+    rgapi under one shared timeout. WHEN: Use when you need several
+    independent file listings (e.g. locating every module touched by a
+    plan before editing); prefer bash_find for a single lookup.
     HOW:
         - searches (list[dict]): one dict per lookup, each with:
-            * pattern (str, default ""): fd pattern (regex, or glob with
-              the "--glob" option).
+            * pattern (str, default ""): regex matched against file names.
             * path (str, default "."): root directory of the search.
-            * options (str, default ""): extra fd flags.
+            * options (str, default ""): fd-style flags, as in bash_find.
 
     Results are labeled "pattern in path" sections; a bad spec or missing
     path shows an "Error:" section instead of failing the whole batch.
     """
+    started = time.monotonic()
+    deadline = time.monotonic() + DEFAULT_TIMEOUT
+    sections: list[str] = []
+    for spec in searches:
+        label = f"{spec.get('pattern', '')} in {spec.get('path', '.')}"
+        try:
+            root = str(_resolve_existing(spec.get("path", ".")))
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            body = _run_search(
+                spec,
+                "",
+                _fd_kwargs,
+                lambda pat, kwargs, root=root, remaining_ms=remaining_ms: rgapi.fd(
+                    root, pat or None, timeout_ms=remaining_ms, **kwargs
+                ),
+                require_pattern=False,
+                no_match=None,
+            )
+        except (KeyError, ValueError, OSError) as exc:
+            body = f"Error: {exc}"
+        sections.append(f"== {label} ==\n{body}")
 
-    def build(spec: dict[str, str]) -> list[str]:
-        return [
-            "fd",
-            *spec.get("options", "").split(),
-            spec.get("pattern", ""),
-            str(_resolve_existing(spec.get("path", "."))),
-        ]
-
-    return _run_batched(searches, build)
+    elapsed = time.monotonic() - started
+    return "\n\n".join(sections) + f"\n({elapsed:.1f}s)"
 
 
 def bash_curl(url: str, options: str = "-sSL") -> str:
