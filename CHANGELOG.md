@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.1.4 (2026-10-10)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.3...v0.1.4)
+
+### 🩹 Fixes
+
+- **search**: stop auto‑appending '-en' to two‑letter region codes ([50e6056](https://github.com/thememium/dspy-agent-tools/commit/50e6056cad171a3e35aa1cb4bde8068029680271))
+
+### 💅 Refactors
+
+- **search.py**: extend REGION_RE to allow 3‑letter region codes ([859816a](https://github.com/thememium/dspy-agent-tools/commit/859816ab626f0d0d581e2fcebef9f1322db3bf40))
+- **search**: normalize region codes for DuckDuckGo ([83d8357](https://github.com/thememium/dspy-agent-tools/commit/83d83579705ddec5f1ec1da40c8e9b391cf11d43))
+
+### ✅ Tests
+
+- **search**: update default region logic and add region coercion tests ([dd55208](https://github.com/thememium/dspy-agent-tools/commit/dd552084373db0f1df77ba05b5e34d792cafa9e6))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.3 (2026-10-10)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.2...v0.1.3)
