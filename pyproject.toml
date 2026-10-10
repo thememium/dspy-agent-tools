@@ -10,8 +10,8 @@ classifiers = [
   "Operating System :: OS Independent",
   "Intended Audience :: Developers",
 ]
-# license = "MIT"
-# license-files = ["LICEN[CS]E*"]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
 dependencies = [
   "beautifulsoup4>=4.15.0",
   "ddgs>=9.16.0",
