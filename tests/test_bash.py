@@ -20,6 +20,8 @@ from dspy_agent_tools.bash import (
     bash_fetch,
     bash_find,
     bash_find_batch,
+    bash_glob,
+    bash_glob_batch,
     bash_ls,
     bash_ripgrep,
     bash_ripgrep_batch,
@@ -545,6 +547,111 @@ class TestRunSearch:
 
         body = _run_search({"pattern": "needle"}, "-n", _rg_kwargs, run)
         assert body == "a.py:1:needle"
+
+
+# --- bash_glob ------------------------------------------------------------
+
+
+class TestBashGlob:
+    def test_bare_glob_matches_any_depth(self, tmp_path):
+        (tmp_path / "a.py").write_text("")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "b.py").write_text("")
+        (tmp_path / "c.md").write_text("")
+        result = bash_glob("*.py", path=str(tmp_path))
+        lines = result.splitlines()[:-1]
+        assert sorted(lines) == sorted([str(tmp_path / "a.py"), str(sub / "b.py")])
+
+    def test_anchored_glob_with_separator(self, tmp_path):
+        (tmp_path / "a.py").write_text("")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "b.py").write_text("")
+        result = bash_glob("sub/*.py", path=str(tmp_path))
+        assert str(sub / "b.py") in result
+        assert str(tmp_path / "a.py") not in result
+
+    def test_star_does_not_cross_separator(self, tmp_path):
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "b.py").write_text("")
+        assert "b.py" not in bash_glob("*.py", path=str(tmp_path), options="-d 1")
+
+    def test_output_is_sorted(self, tmp_path):
+        for name in ("c.py", "a.py", "b.py"):
+            (tmp_path / name).write_text("")
+        lines = bash_glob("*.py", path=str(tmp_path)).splitlines()[:-1]
+        assert lines == sorted(lines)
+
+    def test_type_files_only(self, tmp_path):
+        (tmp_path / "f.py").write_text("")
+        (tmp_path / "d.py").mkdir()
+        result = bash_glob("*.py", path=str(tmp_path), options="-t f")
+        assert "f.py" in result
+        assert not result.rstrip().endswith("/d.py")
+
+    def test_gitignore_and_hidden_are_respected(self, tmp_path):
+        (tmp_path / ".gitignore").write_text("ignored_dir/\n")
+        (tmp_path / "kept.py").write_text("")
+        ignored = tmp_path / "ignored_dir"
+        ignored.mkdir()
+        (ignored / "skip.py").write_text("")
+        hidden = tmp_path / ".hiddendir"
+        hidden.mkdir()
+        (hidden / "h.py").write_text("")
+
+        default = bash_glob("*.py", path=str(tmp_path))
+        assert "kept.py" in default
+        assert "ignored_dir" not in default
+        assert ".hiddendir" not in default
+
+        everything = bash_glob(
+            "*.py", path=str(tmp_path), options="--hidden --no-ignore"
+        )
+        assert "ignored_dir/skip.py" in everything
+        assert ".hiddendir/h.py" in everything
+
+    def test_no_matches_returns_empty_output(self, tmp_path):
+        result = bash_glob("zzz_none_zzz.py", path=str(tmp_path))
+        assert result.strip() == "(0.0s)"
+
+    def test_missing_path_raises(self):
+        with pytest.raises(ValueError, match="Path does not exist"):
+            bash_glob("*.py", path="/nonexistent/definitely/missing")
+
+    def test_unsupported_option_is_a_notice(self, tmp_path):
+        result = bash_glob("*.py", path=str(tmp_path), options="-j 2")
+        assert "[Error] unsupported fd option: -j" in result
+
+
+class TestBashGlobBatch:
+    def test_two_lookups_sorted_sections(self, tmp_path):
+        (tmp_path / "one.py").write_text("")
+        (tmp_path / "two.py").write_text("")
+        result = bash_glob_batch(
+            [
+                {"pattern": "two.py", "path": str(tmp_path)},
+                {"pattern": "one.py", "path": str(tmp_path)},
+            ]
+        )
+        assert f"== two.py in {tmp_path.resolve()} ==" in result
+        assert f"== one.py in {tmp_path.resolve()} ==" in result
+        # Sections hold only their own match, in sorted order.
+        one_section = result.split("== one.py in")[1]
+        assert one_section.rstrip().endswith("one.py\n(0.0s)")
+        assert "two.py" not in one_section
+
+    def test_missing_path_is_an_error_section(self):
+        result = bash_glob_batch(
+            [{"pattern": "*.py", "path": "/nonexistent/definitely/missing"}]
+        )
+        assert "Error: Path does not exist" in result
+
+    def test_empty_pattern_lists_all(self, tmp_path):
+        (tmp_path / "listed.txt").write_text("")
+        result = bash_glob_batch([{"path": str(tmp_path)}])
+        assert "listed.txt" in result
 
 
 # --- bash_curl -----------------------------------------------------------
