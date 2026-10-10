@@ -97,23 +97,33 @@ def _render(output: str, notices: list[str], elapsed: float) -> str:
     return f"{output.rstrip()}\n({elapsed:.1f}s)"
 
 
-def run_command(
+def bash_exec(
     command: str, cwd: str | None = None, timeout: int = DEFAULT_TIMEOUT
 ) -> str:
     """
-    Run a shell command and return its combined output as a string.
+    Run an arbitrary shell command and return its combined output.
 
-    stdout and stderr are merged, as in a terminal. When `cwd` is omitted, a
-    leading "cd <path> && ..." on the command is used as the working directory
-    and stripped from the command.
+    WHAT: Executes `command` in bash and returns stdout and stderr merged,
+    exactly as a terminal would show them, followed by a "(Ns)" wall time.
+    WHEN: Use for anything without a dedicated tool — running builds or
+    tests, git, python snippets, package installs. Prefer the dedicated
+    tools when they fit: bash_ripgrep for searching text, bash_find for
+    locating files, bash_ls for listing a directory, bash_curl for
+    fetching URLs.
+    HOW:
+        - command (str): the shell line to run, e.g. "uv run pytest -q".
+        - cwd (str, optional): working directory. Defaults to the current
+          directory; a leading "cd <path> && ..." in the command is also
+          accepted and used as the working directory.
+        - timeout (int, default 300): deadline in seconds; 0 disables the
+          deadline for long-running commands. On timeout the command's
+          whole process group is killed and partial output is returned
+          with a "[command timed out ...]" notice.
 
-    `timeout` is a deadline in seconds; 0 disables it for long-running
-    commands. On timeout the command's whole process group is killed and the
-    output captured so far is returned with a notice.
-
-    Notices are appended as trailing bracketed lines after the output:
-    "[exit code N]" for a non-zero exit, "[command timed out after Ns...]",
-    and "[output truncated: ...]" when the output exceeded the inline cap.
+    Large output is truncated to its first and last ~10-20KB with a
+    notice; non-zero exits are marked "[exit code N]" in the output, not
+    raised. Pipe through "head", "grep", or redirect to a file when you
+    expect huge output.
     """
     if timeout < 0:
         raise ValueError("timeout must be >= 0 (0 disables the deadline).")
@@ -193,12 +203,27 @@ def _spawn(argv: list[str]):
     )
 
 
-def ripgrep(pattern: str, path: str = ".", options: str = "-n") -> str:
+def bash_ripgrep(pattern: str, path: str = ".", options: str = "-n") -> str:
     """
     Search file contents with ripgrep and return the matching lines.
 
-    `options` are extra rg flags (e.g. "-n -i -t py"). No matches (rg exit
-    code 1) is reported as "No matches." rather than an error.
+    WHAT: Runs `rg` and returns lines matching a regex, prefixed with
+    "file:line:". WHEN: The default tool for finding code, text, symbols,
+    or config inside files. Use bash_find instead when you need file
+    NAMES/paths rather than contents, and bash_exec for anything else.
+    HOW:
+        - pattern (str): a regex, e.g. "def _execute", "TODO|FIXME",
+          "error.*timeout".
+        - path (str, default "."): file or directory to search; a file
+          searches just that file, a directory searches recursively.
+        - options (str, default "-n"): extra rg flags as a single string.
+          Useful ones: "-n -i" (case-insensitive), "-n -t py" (Python
+          files only), "-n -l" (just file names), "-n -A 3" (context
+          lines), "-n --no-ignore" (search ignored/hidden files too).
+
+    Returns the matches, or "No matches." when nothing is found (this is
+    not an error). Non-rg errors (bad regex, missing path) appear as an
+    "[exit code 2]" notice with rg's message.
     """
     output, notices, elapsed, rc = _execute(
         ["rg", *options.split(), pattern, str(_resolve_existing(path))],
@@ -209,11 +234,25 @@ def ripgrep(pattern: str, path: str = ".", options: str = "-n") -> str:
     return _render(output, notices, elapsed)
 
 
-def ripgrep_batch(searches: list[dict[str, str]]) -> str:
+def bash_ripgrep_batch(searches: list[dict[str, str]]) -> str:
     """
     Run several ripgrep searches concurrently and return labeled results.
 
-    Each dict needs "pattern" and optionally "path" and "options" (rg flags).
+    WHAT: bash_ripgrep for many patterns at once — all searches run as
+    concurrent processes and the whole batch is capped by one timeout.
+    WHEN: Use when you have several independent searches (e.g. scanning a
+    codebase for multiple symbols before editing); use it instead of
+    repeated bash_ripgrep calls to save round trips. For a single search,
+    prefer bash_ripgrep.
+    HOW:
+        - searches (list[dict]): one dict per search, each with:
+            * pattern (str, required): the regex to search for.
+            * path (str, default "."): file or directory to search.
+            * options (str, default "-n"): extra rg flags.
+
+    Results are labeled "pattern in path" sections. A search with no hits
+    shows "No matches."; a bad spec or missing path shows an "Error:"
+    section instead of failing the whole batch.
     """
 
     def build(spec: dict[str, str]) -> list[str]:
@@ -227,25 +266,50 @@ def ripgrep_batch(searches: list[dict[str, str]]) -> str:
     return _run_batched(searches, build, ok_codes=frozenset({1}), no_match_rc=1)
 
 
-def find(pattern: str | None = None, path: str = ".", options: str = "") -> str:
+def bash_find(pattern: str | None = None, path: str = ".", options: str = "") -> str:
     """
-    Find file paths under a directory using fd.
+    Find file and directory paths by name using fd.
 
-    `pattern` is an fd pattern (regex by default; pass --glob in `options`
-    for glob matching). With no pattern, everything under `path` is listed.
+    WHAT: Runs `fd` and returns matching paths under `path`, one per line.
+    WHEN: Use to locate files/directories by name or extension — "where is
+    the config?", "list all .py files", "find test dirs". Use
+    bash_ripgrep instead when matching file CONTENTS, and bash_ls to see
+    just one directory level.
+    HOW:
+        - pattern (str, optional): fd pattern, a regex by default. Omit or
+          pass "" to list everything under `path`.
+        - path (str, default "."): root directory of the search.
+        - options (str, default ""): extra fd flags as a single string.
+          Useful ones: "--glob" (treat pattern as a glob like "*.py"),
+          "--type f" (files only), "--type d" (directories only),
+          "--hidden", "--max-depth 2", "--exclude node_modules".
+
+    fd ignores hidden files and .gitignore'd paths by default; add
+    "--hidden" and/or "--no-ignore" in options to see them.
     """
-    return _render(
-        *_execute(
-            ["fd", *options.split(), pattern or "", str(_resolve_existing(path))]
-        )[:3]
+    output, notices, elapsed, _ = _execute(
+        ["fd", *options.split(), pattern or "", str(_resolve_existing(path))]
     )
+    return _render(output, notices, elapsed)
 
 
-def find_batch(searches: list[dict[str, str]]) -> str:
+def bash_find_batch(searches: list[dict[str, str]]) -> str:
     """
-    Run several fd lookups concurrently and return labeled results.
+    Run several fd path lookups concurrently and return labeled results.
 
-    Each dict needs "pattern" and optionally "path" and "options" (fd flags).
+    WHAT: bash_find for many patterns at once — all lookups run as
+    concurrent processes under one shared timeout. WHEN: Use when you need
+    several independent file listings (e.g. locating every module touched
+    by a plan before editing); prefer bash_find for a single lookup.
+    HOW:
+        - searches (list[dict]): one dict per lookup, each with:
+            * pattern (str, default ""): fd pattern (regex, or glob with
+              the "--glob" option).
+            * path (str, default "."): root directory of the search.
+            * options (str, default ""): extra fd flags.
+
+    Results are labeled "pattern in path" sections; a bad spec or missing
+    path shows an "Error:" section instead of failing the whole batch.
     """
 
     def build(spec: dict[str, str]) -> list[str]:
@@ -259,22 +323,150 @@ def find_batch(searches: list[dict[str, str]]) -> str:
     return _run_batched(searches, build)
 
 
-def curl(url: str, options: str = "-sSL") -> str:
+def bash_curl(url: str, options: str = "-sSL") -> str:
     """
     Fetch a URL with curl and return the response body.
 
-    `options` are curl flags; the default "-sSL" is silent, shows errors on
-    stderr (merged into the output), and follows redirects.
+    WHAT: Runs `curl` and returns the raw response body as a string.
+    WHEN: Use for fetching web pages, APIs, or any http(s) content —
+    including JSON APIs (pair with jq via bash_exec when needed). Not for
+    searching local files; not for pages that need JavaScript rendering.
+    HOW:
+        - url (str): the URL to fetch, e.g. "https://api.github.com/...".
+        - options (str, default "-sSL"): curl flags as a single string.
+          The default is silent, shows errors on failure (stderr is merged
+          into the output), and follows redirects. Useful additions:
+          "-i" (include response headers), "-H 'Auth: Bearer ...'"
+          (headers), "-X POST -d '{...}'" (requests), "-m 20" (per-request
+          timeout), "-o /dev/null -w '%{http_code}'" (status only).
+
+    A failed transfer (bad URL, connection refused) is reported as
+    "[exit code N]" with curl's error message rather than an exception.
+
+    For readable page text instead of raw HTML, use bash_fetch.
     """
     output, notices, elapsed, _ = _execute(["curl", *options.split(), url])
     return _render(output, notices, elapsed)
 
 
-def ls(path: str = ".", options: str = "-la") -> str:
-    """List directory entries with ls.
+_JUNK_TAGS = ["script", "style", "noscript", "iframe", "svg", "nav", "footer", "header"]
+_JUNK_PATTERNS = (
+    "ad",
+    "ads",
+    "advert",
+    "banner",
+    "cookie",
+    "consent",
+    "popup",
+    "modal",
+    "sidebar",
+    "related",
+    "recommendation",
+    "social",
+    "share",
+    "comment",
+    "disqus",
+    "newsletter",
+    "subscribe",
+)
 
-    `options` are ls flags; the default "-la" shows all entries in long
-    format.
+
+def bash_fetch(url: str, options: str = "-sSL") -> str:
+    """
+    Fetch a web page and return its readable content as markdown.
+
+    WHAT: Downloads the URL (via curl, like bash_curl) and converts the
+    HTML to clean markdown: scripts, styles, nav/header/footer, ads,
+    cookie banners, sidebars, and similar chrome are stripped, the
+    <article>/<main>/<body> content is kept, and the page <title> becomes
+    a leading "# heading". WHEN: Use whenever you want to READ a web page
+    (docs, articles, blog posts) instead of parsing raw HTML. Use
+    bash_curl instead when you need the exact raw response (API JSON,
+    headers, binary). Not suitable for pages that require JavaScript to
+    render.
+    HOW:
+        - url (str): the page URL, e.g. "https://example.com/docs".
+        - options (str, default "-sSL"): curl flags passed through,
+          exactly as in bash_curl; you rarely need to change them.
+
+    Returns markdown text; large results are truncated to the first and
+    last ~10-20KB. A failed transfer is reported with a "[exit code N]"
+    notice and curl's error instead of the markdown.
+    """
+    output, notices, elapsed, rc = _execute(["curl", *options.split(), url])
+    if rc != 0:
+        return _render(output, notices, elapsed)
+    if not output.strip():
+        return _render("[Error] Empty response from URL", notices, elapsed)
+
+    try:
+        from bs4 import BeautifulSoup, Comment
+        from markdownify import markdownify as md
+    except ImportError:
+        return _render(
+            "[Error] bs4 and markdownify are required for HTML conversion",
+            notices,
+            elapsed,
+        )
+
+    try:
+        soup = BeautifulSoup(output, "html.parser")
+
+        for tag in soup.find_all(_JUNK_TAGS):
+            tag.decompose()
+
+        for comment in soup.find_all(string=lambda s: isinstance(s, Comment)):
+            comment.extract()
+
+        to_remove = []
+        for el in soup.find_all(True):
+            classes = " ".join(el.get("class") or []).lower()
+            el_id = str(el.get("id") or "").lower()
+            if any(p in classes or p in el_id for p in _JUNK_PATTERNS):
+                to_remove.append(el)
+        for el in to_remove:
+            el.decompose()
+
+        content = soup.find("article") or soup.find("main") or soup.find("body") or soup
+        title_tag = soup.find("title")
+        title = title_tag.get_text(strip=True) if title_tag else None
+
+        body_md = md(str(content), heading_style="ATX", strip=["img"])
+
+        cleaned: list[str] = []
+        blanks = 0
+        for line in body_md.split("\n"):
+            stripped = line.rstrip()
+            if not stripped:
+                blanks += 1
+                if blanks <= 2:
+                    cleaned.append("")
+            else:
+                blanks = 0
+                cleaned.append(stripped)
+
+        result = "\n".join(cleaned).strip()
+        if title:
+            result = f"# {title}\n\n{result}"
+        return _render(result, notices, elapsed)
+    except Exception as exc:  # noqa: BLE001 — conversion failure returns text, never raises
+        return _render(f"[Error] HTML processing failed: {exc}", notices, elapsed)
+
+
+def bash_ls(path: str = ".", options: str = "-la") -> str:
+    """
+    List the entries of a directory with ls.
+
+    WHAT: Runs `ls` on one directory and returns its entries in long
+    format. WHEN: Use to see what's directly inside a directory — file
+    names, sizes, timestamps. Use bash_find to walk a whole tree by
+    pattern, and bash_ripgrep to search file contents.
+    HOW:
+        - path (str, default "."): directory to list.
+        - options (str, default "-la"): ls flags as a single string; the
+          default shows all entries (including dotfiles) in long format.
+          Useful ones: "-l" (long, no dotfiles), "-lah" (human sizes),
+          "-lt" (newest first), "-1" (one per line).
     """
     output, notices, elapsed, _ = _execute(
         ["ls", *options.split(), str(_resolve_existing(path))]
