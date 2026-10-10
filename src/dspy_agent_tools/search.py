@@ -1,4 +1,26 @@
+import re
 import urllib.parse
+
+_REGION_RE = re.compile(r"^[a-z]{2}-[a-z]{2}$")
+
+
+def _normalize_region(region: str | None) -> str:
+    """Coerce ``region`` to the '<cc>-<lang>' form ddgs engines require.
+
+    ddgs engines do ``region.split("-")`` and raise an opaque
+    ``ValueError`` for anything without exactly one dash (e.g. "us",
+    "United States", "").  "wt-wt" (the historical ddgs "no region"
+    alias) also breaks engines that use the country code as a subdomain,
+    sending requests to wt.wikipedia.org.
+    """
+    r = (region or "").strip().lower()
+    if r == "wt-wt":
+        return "us-en"
+    if _REGION_RE.match(r):
+        return r
+    if re.fullmatch(r"[a-z]{2}", r):
+        return f"{r}-en"
+    return "us-en"
 
 
 def _clean_url(url: str) -> str:
@@ -14,22 +36,24 @@ def _clean_url(url: str) -> str:
 def web_search(
     query: str,
     max_results: int = 5,
-    region: str = "wt-wt",
+    region: str | None = "us-en",
     timelimit: str | None = None,
 ) -> dict:
     """
     Search the web with DuckDuckGo and return results.
 
     Returns {"query", "results": [{"title", "href", "body"}], "count"}.
-    `timelimit` filters by recency: "d" (day), "w" (week), "m" (month),
-    "y" (year), or None.
+    `region` must be a country-language code like "us-en", "uk-en",
+    "de-de"; other values (including None) are coerced to "us-en".
+    `timelimit` filters
+    by recency: "d" (day), "w" (week), "m" (month), "y" (year), or None.
     """
     from ddgs import DDGS
 
     results = DDGS().text(
         query,
         max_results=max_results,
-        region=region,
+        region=_normalize_region(region),
         timelimit=timelimit,
     )
     return {
