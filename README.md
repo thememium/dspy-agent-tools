@@ -207,10 +207,12 @@ lookups are needed; it saves round trips and shares one timeout across the
 batch:
 
 ```python
-bash_ripgrep_batch([
-    {"pattern": r"def main", "path": "src", "options": "-n"},
-    {"pattern": "TODO|FIXME", "options": "-n -i"},
-])
+bash_ripgrep_batch(
+    [
+        {"pattern": r"def main", "path": "src", "options": "-n"},
+        {"pattern": "TODO|FIXME", "options": "-n -i"},
+    ]
+)
 # == def main in src ==
 # src/cli.py:12:def main(args):
 # ...
