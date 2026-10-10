@@ -255,27 +255,28 @@ def _rg_kwargs(options: str, pattern: str) -> tuple[str, dict]:
         ):
             raise ValueError(f"unsupported rg option: {tok}")
         if tok.startswith("--") or len(tok) == 2:
+            flag = tok
             value, i = _take_value(tok, tokens, i - 1)
         else:
-            value = tok[2:]  # attached short-flag value like "-A3" or "-tpy"
-        if tok in ("-A", "--after-context"):
+            flag, value = tok[:2], tok[2:]  # attached value like "-A3" or "-tpy"
+        if flag in ("-A", "--after-context"):
             kwargs["after_context"] = int(value)
-        elif tok in ("-B", "--before-context"):
+        elif flag in ("-B", "--before-context"):
             kwargs["before_context"] = int(value)
-        elif tok in ("-C", "--context"):
+        elif flag in ("-C", "--context"):
             kwargs["context"] = int(value)
-        elif tok in ("-t", "--type"):
+        elif flag in ("-t", "--type"):
             kwargs["ext"] = _RG_TYPE_EXTS.get(value, value)
-        elif tok in ("-T", "--type-not"):
+        elif flag in ("-T", "--type-not"):
             kwargs.setdefault("exclude", []).append(
                 f"*.{_RG_TYPE_EXTS.get(value, value)}"
             )
-        elif tok in ("-g", "--glob"):
+        elif flag in ("-g", "--glob"):
             if value.startswith("!"):
                 kwargs.setdefault("exclude", []).append(value[1:])
             else:
                 kwargs.setdefault("include", []).append(value)
-        elif tok in ("--max-depth",):
+        elif flag == "--max-depth":
             kwargs["max_depth"] = int(value)
         else:
             raise ValueError(f"unsupported rg option: {tok}")
@@ -412,7 +413,9 @@ def bash_ripgrep(pattern: str, path: str = ".", options: str = "-n") -> str:
     root = _resolve_existing(path)
 
     def run(pat: str, kwargs: dict):
-        return rgapi.rg(pat, str(root), timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs)
+        # rgapi rejects count and timeout_ms together.
+        timeout_ms = None if kwargs.get("count") else DEFAULT_TIMEOUT * 1000
+        return rgapi.rg(pat, str(root), timeout_ms=timeout_ms, **kwargs)
 
     try:
         pattern, kwargs = _rg_kwargs(options, pattern)
@@ -456,7 +459,10 @@ def bash_ripgrep_batch(searches: list[dict[str, str]]) -> str:
                 "-n",
                 _rg_kwargs,
                 lambda pat, kwargs, root=root, remaining_ms=remaining_ms: rgapi.rg(
-                    pat, root, timeout_ms=remaining_ms, **kwargs
+                    pat,
+                    root,
+                    timeout_ms=None if kwargs.get("count") else remaining_ms,
+                    **kwargs,
                 ),
             )
         except (KeyError, ValueError, OSError) as exc:
