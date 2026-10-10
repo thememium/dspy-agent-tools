@@ -64,12 +64,10 @@ exclude = ["**/__pycache__", "**/.venv"]
 # See all rules at: https://docs.astral.sh/ty/reference/rules/
 
 [tool.poe.tasks]
-dev = "uv run example.py"
 clean-full = "sh -c 'uv run isort . && uv run ruff check . --fix && uv run ruff format . && uv run deptry . && uv run ty check'"
 clean = "sh -c 'uv run isort . && uv run ruff format .'"
 test = "uv run pytest tests/ -v"
 test-cov = "uv run pytest tests/ -v --cov=dspy_agent_tools --cov-report=term-missing"
-test-e2e = "uv run pytest tests/ -v --run-e2e"
 sort = "uv run isort ."
 lint = "uv run ruff check ."
 format = "uv run ruff format ."
