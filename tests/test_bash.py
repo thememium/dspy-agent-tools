@@ -1,16 +1,20 @@
 """Tests for dspy_agent_tools.bash."""
 
+import os
 import sys
 import types
 
 import pytest
 
-from dspy_agent_tools import bash as bash_mod
 from dspy_agent_tools.bash import (
     MAX_OUTPUT_BYTES,
     _cap,
+    _fd_kwargs,
     _resolve_cwd,
     _resolve_existing,
+    _rg_kwargs,
+    _run_search,
+    _search_text,
     bash_curl,
     bash_exec,
     bash_fetch,
@@ -163,7 +167,7 @@ class TestBashRipgrep:
 
     def test_bad_regex_is_a_notice_not_a_raise(self, tmp_path):
         result = bash_ripgrep("[unclosed", path=str(tmp_path))
-        assert "[exit code 2]" in result
+        assert "[Error]" in result
 
     def test_missing_path_raises(self):
         with pytest.raises(ValueError, match="Path does not exist"):
@@ -174,6 +178,47 @@ class TestBashRipgrep:
         f.write_text("needle\n")
         result = bash_ripgrep("needle", path=str(f))
         assert "needle" in result
+
+    def test_gitignore_and_hidden_are_respected(self, tmp_path):
+        (tmp_path / ".gitignore").write_text("ignored_dir/\n")
+        (tmp_path / "kept.py").write_text("needle\n")
+        ignored = tmp_path / "ignored_dir"
+        ignored.mkdir()
+        (ignored / "x.py").write_text("needle\n")
+        hidden = tmp_path / ".hidden"
+        hidden.mkdir()
+        (hidden / "h.py").write_text("needle\n")
+
+        default = bash_ripgrep("needle", path=str(tmp_path))
+        assert "kept.py" in default
+        assert "ignored_dir" not in default
+        assert ".hidden" not in default
+
+        everything = bash_ripgrep(
+            "needle", path=str(tmp_path), options="-n --no-ignore --hidden"
+        )
+        assert "ignored_dir/x.py" in everything
+        assert ".hidden/h.py" in everything
+
+    def test_case_insensitive_and_type_options(self, tmp_path):
+        (tmp_path / "a.py").write_text("NEEDLE = 1\n")
+        (tmp_path / "b.txt").write_text("needle = 2\n")
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-n -i -t py")
+        assert "a.py" in result
+        assert "b.txt" not in result
+
+    def test_files_with_matches_and_context_options(self, tmp_path):
+        (tmp_path / "a.py").write_text("one\ntwo\nthree\n")
+        assert bash_ripgrep("two", path=str(tmp_path), options="-n -l") == (
+            str(tmp_path / "a.py") + "\n(0.0s)"
+        )
+        context = bash_ripgrep("two", path=str(tmp_path), options="-n -A 1")
+        assert "a.py-3-three" in context
+
+    def test_unsupported_option_is_a_notice(self, tmp_path):
+        result = bash_ripgrep("x", path=str(tmp_path), options="-n -w")
+        assert "[Error]" in result
+        assert "unsupported rg option" in result
 
 
 class TestBashRipgrepBatch:
@@ -239,6 +284,25 @@ class TestBashFind:
         result = bash_find("zzz_no_match_zzz", path=str(tmp_path))
         assert result.strip() == "(0.0s)"
 
+    def test_gitignore_and_hidden_are_respected(self, tmp_path):
+        (tmp_path / ".gitignore").write_text("ignored_dir/\n")
+        (tmp_path / "kept.py").write_text("")
+        ignored = tmp_path / "ignored_dir"
+        ignored.mkdir()
+        (ignored / "skip.py").write_text("")
+        hidden = tmp_path / ".hidden"
+        hidden.mkdir()
+        (hidden / "h.py").write_text("")
+
+        default = bash_find("py", path=str(tmp_path))
+        assert "kept.py" in default
+        assert "ignored_dir" not in default
+        assert ".hidden" not in default
+
+        everything = bash_find("py", path=str(tmp_path), options="--hidden --no-ignore")
+        assert "ignored_dir/skip.py" in everything
+        assert ".hidden/h.py" in everything
+
 
 class TestBashFindBatch:
     def test_two_lookups(self, tmp_path):
@@ -266,43 +330,218 @@ class TestBashFindBatch:
         assert "listed.txt" in result
 
 
-# --- _run_batched internals ---------------------------------------------
+# --- rg option translation ------------------------------------------------
 
 
-class TestRunBatchedInternals:
-    def test_timeout_kills_batch(self):
-        def build(_spec):
-            return ["bash", "-c", "echo started && sleep 30"]
+class TestRgOptionParsing:
+    def test_long_flag_with_equals_sign(self, tmp_path):
+        (tmp_path / "a.py").write_text("alpha = 1\n")
+        result = bash_ripgrep("alpha", path=str(tmp_path), options="-n --max-depth=2")
+        assert "alpha = 1" in result
 
-        result = bash_mod._run_batched(
-            [{"pattern": "slow", "path": "."}], build, timeout=1
+    def test_option_missing_value_is_an_error(self, tmp_path):
+        result = bash_ripgrep("x", path=str(tmp_path), options="-A")
+        assert "[Error] option -A requires a value" in result
+
+    def test_case_sensitive_flag(self, tmp_path):
+        (tmp_path / "a.py").write_text("NEEDLE\n")
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-n -s")
+        assert result.startswith("No matches.")
+
+    def test_smart_case_flag(self, tmp_path):
+        (tmp_path / "a.py").write_text("NEEDLE\nneedle\n")
+        assert bash_ripgrep("Needle", path=str(tmp_path), options="-n -S").startswith(
+            "No matches."
         )
-        assert result.startswith("== slow in ")
-        assert "started" in result
-        assert "timed out after 1s and was killed" in result
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-n -S")
+        assert "NEEDLE" in result
 
-    def test_zero_timeout_uses_no_deadline(self):
-        def build(_spec):
-            return ["bash", "-c", "echo quick"]
+    def test_count_flag(self, tmp_path):
+        (tmp_path / "a.py").write_text("x\nx\n")
+        result = bash_ripgrep("x", path=str(tmp_path), options="-n -c")
+        assert result.startswith("2")
 
-        result = bash_mod._run_batched(
-            [{"pattern": "q", "path": "."}], build, timeout=0
+    def test_single_u_flag(self, tmp_path):
+        (tmp_path / ".gitignore").write_text("ignored_dir/\n")
+        (tmp_path / "keep.py").write_text("needle\n")
+        ignored = tmp_path / "ignored_dir"
+        ignored.mkdir()
+        (ignored / "x.py").write_text("needle\n")
+        hidden = tmp_path / ".hidden"
+        hidden.mkdir()
+        (hidden / "h.py").write_text("needle\n")
+
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-n -u")
+        assert "ignored_dir/x.py" in result
+        assert ".hidden/h.py" in result
+
+    def test_follow_links_flag(self, tmp_path):
+        (tmp_path / "a.py").write_text("needle\n")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "b.py").write_text("needle\n")
+        os.symlink(sub, tmp_path / "link")
+
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-n -L")
+        assert "link/b.py" in result
+
+    def test_attached_context_value(self, tmp_path):
+        (tmp_path / "a.py").write_text("one\ntwo\nthree\n")
+        result = bash_ripgrep("two", path=str(tmp_path), options="-n -A3")
+        assert "a.py-3-three" in result
+
+    def test_before_and_context_options(self, tmp_path):
+        (tmp_path / "a.py").write_text("one\ntwo\nthree\n")
+        before = bash_ripgrep("two", path=str(tmp_path), options="-n -B 1")
+        assert "a.py-1-one" in before
+        both = bash_ripgrep("two", path=str(tmp_path), options="-n -C 1")
+        assert "a.py-1-one" in both
+        assert "a.py-3-three" in both
+
+    def test_type_not_excludes_extension(self, tmp_path):
+        (tmp_path / "a.py").write_text("needle\n")
+        (tmp_path / "b.txt").write_text("needle\n")
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-n -T py")
+        assert "b.txt" in result
+        assert "a.py" not in result
+
+    def test_glob_include_and_exclude(self, tmp_path):
+        (tmp_path / "a.py").write_text("needle\n")
+        (tmp_path / "b.txt").write_text("needle\n")
+        only_py = bash_ripgrep("needle", path=str(tmp_path), options="-n -g *.py")
+        assert "a.py" in only_py
+        assert "b.txt" not in only_py
+        no_txt = bash_ripgrep("needle", path=str(tmp_path), options="-n -g !*.txt")
+        assert "a.py" in no_txt
+        assert "b.txt" not in no_txt
+
+    def test_max_depth(self, tmp_path):
+        (tmp_path / "a.py").write_text("needle\n")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "b.py").write_text("needle\n")
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-n --max-depth 1")
+        assert "a.py" in result
+        assert "b.py" not in result
+
+    def test_unsupported_value_option(self, tmp_path):
+        result = bash_ripgrep("x", path=str(tmp_path), options="-n -j 2")
+        assert "[Error] unsupported rg option: -j" in result
+
+
+# --- fd option translation ------------------------------------------------
+
+
+class TestFdOptionParsing:
+    def test_follow_and_absolute_path(self, tmp_path):
+        (tmp_path / "a.py").write_text("")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "b.py").write_text("")
+        os.symlink(sub, tmp_path / "link")
+
+        result = bash_find("b", path=str(tmp_path), options="-L --absolute-path")
+        assert "link/b.py" in result
+
+    def test_type_files_and_dirs(self, tmp_path):
+        (tmp_path / "f.txt").write_text("")
+        (tmp_path / "d").mkdir()
+        files = bash_find("", path=str(tmp_path), options="-t f").splitlines()
+        assert [line for line in files if line] and files[-1].endswith("f.txt")
+        assert not any(line.endswith("/d") for line in files)
+        dirs = bash_find("", path=str(tmp_path), options="-t d").splitlines()
+        assert any(line.endswith("/d") for line in dirs)
+        assert not any(line.endswith("f.txt") for line in dirs)
+
+    def test_unsupported_fd_type(self, tmp_path):
+        result = bash_find("x", path=str(tmp_path), options="-t l")
+        assert "[Error] unsupported fd type: l" in result
+
+    def test_extension_exclude_and_max_depth(self, tmp_path):
+        (tmp_path / "a.py").write_text("")
+        (tmp_path / "b.txt").write_text("")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "c.py").write_text("")
+
+        py_only = bash_find("", path=str(tmp_path), options="-e py").splitlines()
+        assert any(line.endswith("/a.py") for line in py_only)
+        assert any(line.endswith("sub/c.py") for line in py_only)
+        assert not any(line.endswith("b.txt") for line in py_only)
+
+        no_py = bash_find("", path=str(tmp_path), options="-E py").splitlines()
+        assert any(line.endswith("b.txt") for line in no_py)
+        assert not any(line.endswith("a.py") for line in no_py)
+
+        shallow = bash_find("c", path=str(tmp_path), options="-d 1")
+        assert "c.py" not in shallow
+
+    def test_unsupported_fd_option(self, tmp_path):
+        result = bash_find("x", path=str(tmp_path), options="-j 2")
+        assert "[Error] unsupported fd option: -j" in result
+
+    def test_bad_regex_pattern_is_a_notice(self, tmp_path):
+        result = bash_find("[unclosed", path=str(tmp_path))
+        assert "[Error]" in result
+
+
+# --- search rendering helpers ----------------------------------------------
+
+
+class _FakeResults(list):
+    stop_reason = None
+
+
+class TestSearchText:
+    def test_timeout_notice(self):
+        results = _FakeResults(["a.py:1:needle"])
+        results.stop_reason = "timeout"
+        assert "[search timed out; partial results shown]" in _search_text(results, None)
+
+    def test_count_result(self):
+        assert _search_text(3, None) == "3"
+
+    def test_no_match_replacement(self):
+        assert _search_text(_FakeResults(), "No matches.") == "No matches."
+
+    def test_large_result_is_truncated_inline(self):
+        results = _FakeResults(["x" * (MAX_OUTPUT_BYTES + 1)])
+        text = _search_text(results, None)
+        assert "[output truncated to first 20000 and last 10000 bytes]" in text
+
+
+class TestRunSearch:
+    def test_option_parse_error_becomes_error_body(self):
+        body = _run_search(
+            {"pattern": "x", "options": "-j 2"}, "-n", _rg_kwargs, lambda p, k: None
         )
-        assert "quick" in result
+        assert body == "[Error] unsupported rg option: -j"
 
-    def test_exit_code_notice(self):
-        def build(_spec):
-            return ["bash", "-c", "exit 7"]
+    def test_run_error_becomes_error_body(self):
+        def boom(_pat, _kwargs):
+            raise ValueError("regex exploded")
 
-        result = bash_mod._run_batched([{"pattern": "x", "path": "."}], build)
-        assert "[exit code 7]" in result
+        body = _run_search({"pattern": "["}, "-n", _rg_kwargs, boom)
+        assert body == "[Error] regex exploded"
 
-    def test_large_batch_output_is_truncated(self):
-        def build(_spec):
-            return ["bash", "-c", "python3 -c \"print('y' * 40000)\""]
+    def test_missing_pattern_raises_keyerror(self):
+        with pytest.raises(KeyError, match="pattern"):
+            _run_search({}, "-n", _rg_kwargs, lambda p, k: None)
 
-        result = bash_mod._run_batched([{"pattern": "big", "path": "."}], build)
-        assert "[output truncated to first 20000 and last 10000 bytes]" in result
+    def test_pattern_optional_when_not_required(self):
+        body = _run_search(
+            {}, "", _fd_kwargs, lambda _pat, _kwargs: _FakeResults(), False
+        )
+        assert body == ""
+
+    def test_successful_search(self, tmp_path):
+        (tmp_path / "a.py").write_text("needle\n")
+
+        def run(pat, kwargs):
+            return _FakeResults([f"a.py:1:{pat}"])
+
+        body = _run_search({"pattern": "needle"}, "-n", _rg_kwargs, run)
+        assert body == "a.py:1:needle"
 
 
 # --- bash_curl -----------------------------------------------------------
