@@ -446,10 +446,11 @@ class TestFdOptionParsing:
     def test_type_files_and_dirs(self, tmp_path):
         (tmp_path / "f.txt").write_text("")
         (tmp_path / "d").mkdir()
-        files = bash_find("", path=str(tmp_path), options="-t f").splitlines()
-        assert [line for line in files if line] and files[-1].endswith("f.txt")
+        # The trailing "(Ns)" wall-time line is dropped from the split.
+        files = bash_find("", path=str(tmp_path), options="-t f").splitlines()[:-1]
+        assert files[-1].endswith("f.txt")
         assert not any(line.endswith("/d") for line in files)
-        dirs = bash_find("", path=str(tmp_path), options="-t d").splitlines()
+        dirs = bash_find("", path=str(tmp_path), options="-t d").splitlines()[:-1]
         assert any(line.endswith("/d") for line in dirs)
         assert not any(line.endswith("f.txt") for line in dirs)
 
@@ -464,12 +465,12 @@ class TestFdOptionParsing:
         sub.mkdir()
         (sub / "c.py").write_text("")
 
-        py_only = bash_find("", path=str(tmp_path), options="-e py").splitlines()
+        py_only = bash_find("", path=str(tmp_path), options="-e py").splitlines()[:-1]
         assert any(line.endswith("/a.py") for line in py_only)
         assert any(line.endswith("sub/c.py") for line in py_only)
         assert not any(line.endswith("b.txt") for line in py_only)
 
-        no_py = bash_find("", path=str(tmp_path), options="-E py").splitlines()
+        no_py = bash_find("", path=str(tmp_path), options="-E *.py").splitlines()[:-1]
         assert any(line.endswith("b.txt") for line in no_py)
         assert not any(line.endswith("a.py") for line in no_py)
 
@@ -496,7 +497,9 @@ class TestSearchText:
     def test_timeout_notice(self):
         results = _FakeResults(["a.py:1:needle"])
         results.stop_reason = "timeout"
-        assert "[search timed out; partial results shown]" in _search_text(results, None)
+        assert "[search timed out; partial results shown]" in _search_text(
+            results, None
+        )
 
     def test_count_result(self):
         assert _search_text(3, None) == "3"
@@ -530,7 +533,7 @@ class TestRunSearch:
 
     def test_pattern_optional_when_not_required(self):
         body = _run_search(
-            {}, "", _fd_kwargs, lambda _pat, _kwargs: _FakeResults(), False
+            {}, "", _fd_kwargs, lambda _pat, _kwargs: _FakeResults(), False, None
         )
         assert body == ""
 
