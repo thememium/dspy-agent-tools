@@ -283,14 +283,17 @@ def _rg_kwargs(options: str, pattern: str) -> tuple[str, dict]:
     return pattern, kwargs
 
 
-def _fd_kwargs(options: str, pattern: str | None) -> tuple[str | None, dict]:
+def _fd_kwargs(
+    options: str, pattern: str | None, glob: bool = False
+) -> tuple[str | None, dict]:
     """Translate fd flags into rgapi.fd keyword arguments.
 
-    Returns (pattern, kwargs). With "--glob" the pattern is reinterpreted
-    as an include glob; otherwise it stays a regex matched against file
-    names. Raises ValueError for flags with no rgapi equivalent.
+    Returns (pattern, kwargs). With `glob=True` or the "--glob" flag the
+    pattern is reinterpreted as an include glob; otherwise it stays a
+    regex matched against file names. Raises ValueError for flags with no
+    rgapi equivalent.
     """
-    glob_mode = False
+    glob_mode = glob
     kwargs: dict = {}
     tokens = _expand_options(options)
     i = 0
@@ -541,6 +544,91 @@ def bash_find_batch(searches: list[dict[str, str]]) -> str:
                 _fd_kwargs,
                 lambda pat, kwargs, root=root, remaining_ms=remaining_ms: rgapi.fd(
                     root, pat or None, timeout_ms=remaining_ms, **kwargs
+                ),
+                require_pattern=False,
+                no_match=None,
+            )
+        except (KeyError, ValueError, OSError) as exc:
+            body = f"Error: {exc}"
+        sections.append(f"== {label} ==\n{body}")
+
+    elapsed = time.monotonic() - started
+    return "\n\n".join(sections) + f"\n({elapsed:.1f}s)"
+
+
+def bash_glob(pattern: str, path: str = ".", options: str = "") -> str:
+    """
+    Find file and directory paths matching a glob pattern.
+
+    WHAT: Matches paths under `path` against a glob like "*.py",
+    "src/**/*.py", or "tests/*_test.go" (via the rgapi library — no fd or
+    glob binary needed) and returns them one per line, sorted. WHEN: Use
+    when you think in globs rather than regexes — "all config files",
+    "every module under src/". Use bash_find instead when you want a
+    regex against file names, bash_ripgrep for file CONTENTS, and bash_ls
+    to see one directory level.
+    HOW:
+        - pattern (str): a glob. Without a "/", it matches any path
+          component at any depth ("*.py" finds every Python file); with a
+          "/", it is anchored to `path` ("src/*.py" matches only
+          directly inside src/). "*" does not cross directory separators.
+        - path (str, default "."): root directory of the search.
+        - options (str, default ""): fd-style flags as a single string.
+          Useful ones: "-t f" (files only), "-t d" (directories only),
+          "-d 2" (max depth), "-E node_modules" (exclude a glob),
+          "--hidden" and "--no-ignore" (search ignored/hidden paths
+          too).
+
+    Like fd, hidden files and .gitignore'd paths are skipped by default.
+    A pattern that matches nothing returns empty output (not an error).
+    """
+    started = time.monotonic()
+    root = _resolve_existing(path)
+
+    def run(pat: str | None, kwargs: dict):
+        result = rgapi.fd(root, None, timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs)
+        return sorted(result)
+
+    try:
+        _pattern, kwargs = _fd_kwargs(options, pattern, glob=True)
+        result = run(pattern, kwargs)
+    except ValueError as exc:
+        return _render(_search_error(exc), [], time.monotonic() - started)
+    return _render(_search_text(result, no_match=None), [], time.monotonic() - started)
+
+
+def bash_glob_batch(searches: list[dict[str, str]]) -> str:
+    """
+    Run several glob lookups and return labeled results.
+
+    WHAT: bash_glob for many patterns at once — all lookups run through
+    rgapi under one shared timeout. WHEN: Use when you need several
+    independent file listings (e.g. locating every config, test, and doc
+    file before a change); prefer bash_glob for a single lookup.
+    HOW:
+        - searches (list[dict]): one dict per lookup, each with:
+            * pattern (str, default ""): the glob to match.
+            * path (str, default "."): root directory of the search.
+            * options (str, default ""): fd-style flags, as in bash_glob.
+
+    Results are labeled "pattern in path" sections, sorted per section;
+    a bad spec or missing path shows an "Error:" section instead of
+    failing the whole batch.
+    """
+    started = time.monotonic()
+    deadline = time.monotonic() + DEFAULT_TIMEOUT
+    sections: list[str] = []
+    for spec in searches:
+        label = f"{spec.get('pattern', '')} in {spec.get('path', '.')}"
+        try:
+            root = str(_resolve_existing(spec.get("path", ".")))
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            body = _run_search(
+                spec,
+                "",
+                lambda opts, pat: _fd_kwargs(opts, pat, glob=True),
+                lambda _pat, kwargs, root=root, remaining_ms=remaining_ms: sorted(
+                    rgapi.fd(root, None, timeout_ms=remaining_ms, **kwargs)
                 ),
                 require_pattern=False,
                 no_match=None,
