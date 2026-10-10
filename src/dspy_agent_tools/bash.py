@@ -4,6 +4,9 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from typing import cast
+
+from plumbum import local
 
 DEFAULT_TIMEOUT = 300  # seconds
 MAX_OUTPUT_BYTES = 30_000  # inline cap; head+tail are kept above it
@@ -26,7 +29,9 @@ def _resolve_cwd(cwd: str | None) -> Path:
     return resolved
 
 
-def run_command(command: str, cwd: str | None = None, timeout: int = DEFAULT_TIMEOUT) -> str:
+def run_command(
+    command: str, cwd: str | None = None, timeout: int = DEFAULT_TIMEOUT
+) -> str:
     """
     Run a shell command and return its combined output as a string.
 
@@ -54,19 +59,21 @@ def run_command(command: str, cwd: str | None = None, timeout: int = DEFAULT_TIM
     cwd_path = _resolve_cwd(cwd)
 
     started = time.monotonic()
-    proc = subprocess.Popen(
-        ["bash", "-c", command],
+    proc = local["bash"]["-c", command].popen(
         cwd=str(cwd_path),
-        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        start_new_session=True,  # own process group so timeout kills children too
+        new_session=True,  # own process group so timeout kills children too
     )
+    # PlumbumLocalPopen forwards attribute access to the wrapped Popen.
+    popen = cast(subprocess.Popen[bytes], proc)
     try:
-        raw, _ = proc.communicate(timeout=timeout if timeout > 0 else None)
+        raw, _ = popen.communicate(timeout=timeout if timeout > 0 else None)
         timed_out = False
     except subprocess.TimeoutExpired:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        raw, _ = proc.communicate()
+        pid = popen.pid
+        assert pid is not None  # a process that timed out still has a pid
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        raw, _ = popen.communicate()
         timed_out = True
     elapsed = time.monotonic() - started
 
@@ -75,17 +82,17 @@ def run_command(command: str, cwd: str | None = None, timeout: int = DEFAULT_TIM
     notices: list[str] = []
     if timed_out:
         notices.append(f"[command timed out after {timeout}s and was killed]")
-    if proc.returncode != 0 and not timed_out:
-        notices.append(f"[exit code {proc.returncode}]")
+    elif popen.returncode != 0:
+        notices.append(f"[exit code {popen.returncode}]")
     if len(output.encode()) > MAX_OUTPUT_BYTES:
         output = (
-            output[:_HEAD_BYTES]
-            + "\n[... output truncated: showing first "
+            output[:_HEAD_BYTES] + "\n[... output truncated: showing first "
             f"{_HEAD_BYTES} and last {_TAIL_BYTES} of "
-            f"{len(output.encode())} bytes ...]\n"
-            + output[-_TAIL_BYTES:]
+            f"{len(output.encode())} bytes ...]\n" + output[-_TAIL_BYTES:]
         )
-        notices.append(f"[output truncated to first {_HEAD_BYTES} and last {_TAIL_BYTES} bytes]")
+        notices.append(
+            f"[output truncated to first {_HEAD_BYTES} and last {_TAIL_BYTES} bytes]"
+        )
 
     if notices:
         output = output.rstrip("\n") + "\n\n" + "\n".join(notices)
