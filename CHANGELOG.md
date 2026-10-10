@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.1.3 (2026-10-10)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.2...v0.1.3)
+
+### 🚀 Enhancements
+
+- **.github/ISSUE_TEMPLATE**: add bug report issue template ([38606b2](https://github.com/thememium/dspy-agent-tools/commit/38606b24fa0e15ad85c618bced58f33082d65b96))
+
+### 📖 Documentation
+
+- **readme**: reformat bash_ripgrep_batch example call ([594bc33](https://github.com/thememium/dspy-agent-tools/commit/594bc337a22e8a80a766f8e183ead52b13edf400))
+- **.github**: add contributing guide ([4663e4a](https://github.com/thememium/dspy-agent-tools/commit/4663e4ad8499db57c734f893ca2e5dea804d87ba))
+- add SECURITY.md with vulnerability reporting guidelines ([203d410](https://github.com/thememium/dspy-agent-tools/commit/203d4109273210f56129e9f9fbeb539a93213fae))
+- add MIT license ([3e8d420](https://github.com/thememium/dspy-agent-tools/commit/3e8d420548596fa6bb057ea8e444735d50d4948c))
+
+### 🏡 Chore
+
+- **pyproject**: enable license metadata ([8a5d6c1](https://github.com/thememium/dspy-agent-tools/commit/8a5d6c1246119dcd3f5beff71c0b749844a5caef))
+- **pyproject**: remove dspy_agent_tools script entry ([f7919bc](https://github.com/thememium/dspy-agent-tools/commit/f7919bcff2c319684fdd474c9fda67d1a9fcee48))
+
+### ✅ Tests
+
+- add smoke tests for built distribution mappings and metadata ([0b0eb6d](https://github.com/thememium/dspy-agent-tools/commit/0b0eb6d06ec6b4685f158df74d919785fe3961dd))
+
+### 🤖 CI
+
+- **publish**: add workflow for automatic PyPI releases ([57a50f5](https://github.com/thememium/dspy-agent-tools/commit/57a50f5a5de24ae9143911a138e1c3edbffcbda9))
+
+### Other Changes
+
+- Merge pull request #5 from thememium/eboswell/chore/license-and-open-source-setup (#5) ([7bf8faf](https://github.com/thememium/dspy-agent-tools/commit/7bf8fafd23e25cde2335fb8fbf5cf030a5b35f63))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.2 (2026-10-10)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.1...v0.1.2)
