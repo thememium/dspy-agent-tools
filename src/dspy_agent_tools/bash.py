@@ -10,9 +10,6 @@ import rgapi
 from plumbum import local
 
 DEFAULT_TIMEOUT = 300  # seconds
-MAX_OUTPUT_BYTES = 30_000  # inline cap; head+tail are kept above it
-_HEAD_BYTES = 20_000
-_TAIL_BYTES = 10_000
 
 # Leading "cd <path> &&" on the first line, single plain token only. Anything
 # else (redirects, quoted paths with spaces, more args) is left to the shell.
@@ -35,29 +32,16 @@ def _resolve_cwd(cwd: str | None) -> Path:
     return resolved
 
 
-def _cap(output: str) -> tuple[str, str | None]:
-    """Clamp output to the inline cap, keeping head and tail."""
-    encoded = output.encode()
-    if len(encoded) <= MAX_OUTPUT_BYTES:
-        return output, None
-    return (
-        encoded[:_HEAD_BYTES].decode(errors="replace")
-        + f"\n[... output truncated: showing first {_HEAD_BYTES} and last "
-        f"{_TAIL_BYTES} of {len(encoded)} bytes ...]\n"
-        + encoded[-_TAIL_BYTES:].decode(errors="replace"),
-        f"[output truncated to first {_HEAD_BYTES} and last {_TAIL_BYTES} bytes]",
-    )
-
-
 def _execute(
     argv: list[str],
     cwd: Path | None = None,
     timeout: int = DEFAULT_TIMEOUT,
     ok_codes: frozenset[int] = frozenset(),
 ) -> tuple[str, list[str], float, int | None]:
-    """Run argv with merged output, a kill-on-timeout deadline, and the inline cap.
+    """Run argv with merged output and a kill-on-timeout deadline.
 
-    Returns (output, notices, elapsed_seconds, exit_code).
+    Returns the complete output (no truncation), notices, elapsed seconds,
+    and the exit code.
     """
     started = time.monotonic()
     proc = local[argv[0]][tuple(argv[1:])].popen(
@@ -85,9 +69,6 @@ def _execute(
         notices.append(f"[command timed out after {timeout}s and was killed]")
     elif popen.returncode != 0 and popen.returncode not in ok_codes:
         notices.append(f"[exit code {popen.returncode}]")
-    output, cap_notice = _cap(output)
-    if cap_notice is not None:
-        notices.append(cap_notice)
     return output, notices, elapsed, popen.returncode
 
 
@@ -121,10 +102,9 @@ def bash_exec(
           whole process group is killed and partial output is returned
           with a "[command timed out ...]" notice.
 
-    Large output is truncated to its first and last ~10-20KB with a
-    notice; non-zero exits are marked "[exit code N]" in the output, not
-    raised. Pipe through "head", "grep", or redirect to a file when you
-    expect huge output.
+    Output is returned in full; non-zero exits are marked "[exit code N]"
+    in the output, not raised. Pipe through "head", "grep", or redirect to
+    a file when you expect huge output.
     """
     if timeout < 0:
         raise ValueError("timeout must be >= 0 (0 disables the deadline).")
@@ -334,7 +314,7 @@ def _fd_kwargs(
 
 
 def _search_text(result, no_match: str | None) -> str:
-    """Render an rgapi result with timeout/cap notices, without wall time."""
+    """Render an rgapi result with timeout notices, without wall time."""
     notices: list[str] = []
     if getattr(result, "stop_reason", None) == "timeout":
         notices.append("[search timed out; partial results shown]")
@@ -344,9 +324,6 @@ def _search_text(result, no_match: str | None) -> str:
         text = "\n".join(str(item) for item in result)
     if no_match is not None and not text.strip():
         text = no_match
-    text, cap_notice = _cap(text)
-    if cap_notice is not None:
-        notices.append(cap_notice)
     if notices:
         text = text.rstrip("\n") + "\n\n" + "\n".join(notices)
     return text.rstrip("\n")
@@ -668,25 +645,64 @@ def bash_curl(url: str, options: str = "-sSL") -> str:
 
 
 _JUNK_TAGS = ["script", "style", "noscript", "iframe", "svg", "nav", "footer", "header"]
-_JUNK_PATTERNS = (
-    "ad",
-    "ads",
-    "advert",
-    "banner",
-    "cookie",
-    "consent",
-    "popup",
-    "modal",
-    "sidebar",
-    "related",
-    "recommendation",
-    "social",
-    "share",
-    "comment",
-    "disqus",
-    "newsletter",
-    "subscribe",
+# Class/id tokens that mark page chrome.  Matched as whole tokens (see
+# _is_junk), never as substrings: "ad" as a substring also matches "header",
+# "loading", and "breadcrumb".
+_JUNK_TOKENS = frozenset(
+    {
+        "ad",
+        "ads",
+        "advert",
+        "adverts",
+        "advertise",
+        "advertisement",
+        "advertising",
+        "adsbygoogle",
+        "adslot",
+        "adunit",
+        "banner",
+        "banners",
+        "cookie",
+        "cookies",
+        "consent",
+        "popup",
+        "modal",
+        "sidebar",
+        "related",
+        "recommendation",
+        "recommendations",
+        "social",
+        "share",
+        "sharing",
+        "comment",
+        "comments",
+        "disqus",
+        "newsletter",
+        "subscribe",
+        "sponsored",
+        "promo",
+        "promotion",
+    }
 )
+# Split class/id strings on punctuation and camelCase transitions.
+_TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _is_junk(element) -> bool:
+    """True when an element's class/id carries a whole junk token."""
+    if element.name in ("html", "body"):
+        return False
+    classes = element.get("class") or []
+    if isinstance(classes, str):
+        classes = [classes]
+    values = [*classes, str(element.get("id") or "")]
+    tokens = {
+        token.lower()
+        for value in values
+        for token in _TOKEN_SPLIT.split(str(value))
+        if token
+    }
+    return not tokens.isdisjoint(_JUNK_TOKENS)
 
 
 def bash_fetch(url: str, options: str = "-sSL") -> str:
@@ -707,9 +723,9 @@ def bash_fetch(url: str, options: str = "-sSL") -> str:
         - options (str, default "-sSL"): curl flags passed through,
           exactly as in bash_curl; you rarely need to change them.
 
-    Returns markdown text; large results are truncated to the first and
-    last ~10-20KB. A failed transfer is reported with a "[exit code N]"
-    notice and curl's error instead of the markdown.
+    Returns the complete markdown text (no truncation). A failed transfer is
+    reported with a "[exit code N]" notice and curl's error instead of the
+    markdown.
     """
     output, notices, elapsed, rc = _execute(["curl", *options.split(), url])
     if rc != 0:
@@ -730,22 +746,23 @@ def bash_fetch(url: str, options: str = "-sSL") -> str:
     try:
         soup = BeautifulSoup(output, "html.parser")
 
-        for tag in soup.find_all(_JUNK_TAGS):
-            tag.decompose()
+        # Choose the content root before pruning.  Pruning the whole document
+        # first can remove an ancestor of <article>/<main>, and a junk-looking
+        # class on <html>/<body> would otherwise decompose the entire page.
+        content = soup.find("article") or soup.find("main") or soup.find("body") or soup
+        for tag in list(content.find_all(_JUNK_TAGS)):
+            if tag is not content:
+                tag.decompose()
 
-        for comment in soup.find_all(string=lambda s: isinstance(s, Comment)):
+        for comment in content.find_all(string=lambda s: isinstance(s, Comment)):
             comment.extract()
 
-        to_remove = []
-        for el in soup.find_all(True):
-            classes = " ".join(el.get("class") or []).lower()
-            el_id = str(el.get("id") or "").lower()
-            if any(p in classes or p in el_id for p in _JUNK_PATTERNS):
-                to_remove.append(el)
+        to_remove = [
+            el for el in content.find_all(True) if el is not content and _is_junk(el)
+        ]
         for el in to_remove:
             el.decompose()
 
-        content = soup.find("article") or soup.find("main") or soup.find("body") or soup
         title_tag = soup.find("title")
         title = title_tag.get_text(strip=True) if title_tag else None
 
