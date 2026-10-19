@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.1.5 (2026-10-19)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.4...v0.1.5)
+
+### 🚀 Enhancements
+
+- **bash.py**: remove output truncation and switch to token‑based junk detection ([4837577](https://github.com/thememium/dspy-agent-tools/commit/4837577a6463ba61b28d0fd482dc7efcf1065127))
+
+### 🩹 Fixes
+
+- **bash**: eliminate old output cap and correct content filtering ([0b172f1](https://github.com/thememium/dspy-agent-tools/commit/0b172f15346a1f79172cbaec2e463bdff3677e67))
+
+### 📖 Documentation
+
+- **README**: change output truncation behaviour to return full output ([6ccbc6a](https://github.com/thememium/dspy-agent-tools/commit/6ccbc6aa784e0dcf30a54438ea635b41eb9ec7f8))
+
+### 🏡 Chore
+
+- **deps**: update dependency versions to newer releases ([9468237](https://github.com/thememium/dspy-agent-tools/commit/94682379b3f881166788d36dcf898843e11452b3))
+
+### ✅ Tests
+
+- **bash**: add tests for junk element detection and removal of unwanted tags, attributes, and comments ([baf9fa2](https://github.com/thememium/dspy-agent-tools/commit/baf9fa28e6942c4bf9d7f87ecd613bd02de3f570))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.4 (2026-10-10)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.3...v0.1.4)
