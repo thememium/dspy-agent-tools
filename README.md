@@ -272,7 +272,7 @@ bash_ripgrep_batch(
 
 Shared behaviour across the bash tools:
 
-- Output is capped at ~30KB (first 20KB + last 10KB kept) with a truncation notice.
+- Output is returned in full (no inline truncation). Redirect to a file, pipe through `head`/`grep`, or slice the returned value when output may be huge.
 - Wall time is appended as `(Ns)`.
 - Timeouts kill the whole process group and return partial output.
 - Bad regexes and unknown flags come back as `[Error]` text instead of raising.
