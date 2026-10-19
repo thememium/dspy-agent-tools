@@ -8,6 +8,7 @@ import pytest
 
 from dspy_agent_tools.bash import (
     _fd_kwargs,
+    _is_junk,
     _resolve_cwd,
     _resolve_existing,
     _rg_kwargs,
@@ -660,6 +661,31 @@ HTML_PAGE = """\
 """
 
 
+class _FakeElement:
+    """Minimal bs4.Tag stand-in for _is_junk's attribute access."""
+
+    def __init__(self, name, attrs):
+        self.name = name
+        self._attrs = attrs
+
+    def get(self, key):
+        return self._attrs.get(key)
+
+
+class TestIsJunk:
+    def test_html_and_body_are_never_junk(self):
+        assert _is_junk(_FakeElement("html", {"class": "promo"})) is False
+        assert _is_junk(_FakeElement("body", {"id": "sidebar"})) is False
+
+    def test_string_class_attribute_is_treated_as_one_value(self):
+        # Defensive: parsers other than html.parser may return a bare string.
+        assert _is_junk(_FakeElement("div", {"class": "promo-banner"})) is True
+
+    def test_whole_tokens_match_but_substrings_do_not(self):
+        assert _is_junk(_FakeElement("div", {"class": "ad-container"})) is True
+        assert _is_junk(_FakeElement("div", {"class": "loading-note"})) is False
+
+
 class TestBashFetch:
     def test_converts_html_to_clean_markdown(self, tmp_path):
         f = tmp_path / "page.html"
@@ -722,6 +748,34 @@ class TestBashFetch:
         assert "Ad slot" not in result
         assert "Accept cookies" not in result
         assert "Sidebar text" not in result
+
+    def test_junk_tags_inside_the_content_root_are_removed(self, tmp_path):
+        f = tmp_path / "page.html"
+        f.write_text(
+            "<html><body><article>"
+            "<script>alert(1)</script>"
+            "<style>.x { color: red }</style>"
+            "<nav>Nav chrome</nav>"
+            "<p>Real content.</p>"
+            "</article></body></html>"
+        )
+        result = bash_fetch(f"file://{f}")
+        assert "Real content." in result
+        assert "alert(1)" not in result
+        assert "color: red" not in result
+        assert "Nav chrome" not in result
+
+    def test_comment_inside_the_content_root_is_stripped(self, tmp_path):
+        f = tmp_path / "page.html"
+        f.write_text(
+            "<html><body><article>"
+            "<!-- hidden note -->"
+            "<p>Real content.</p>"
+            "</article></body></html>"
+        )
+        result = bash_fetch(f"file://{f}")
+        assert "hidden note" not in result
+        assert "Real content." in result
 
     def test_large_markdown_is_returned_in_full(self, tmp_path):
         body = "word " * 12_000  # ~60KB of markdown
