@@ -7,8 +7,6 @@ import types
 import pytest
 
 from dspy_agent_tools.bash import (
-    MAX_OUTPUT_BYTES,
-    _cap,
     _fd_kwargs,
     _resolve_cwd,
     _resolve_existing,
@@ -28,38 +26,6 @@ from dspy_agent_tools.bash import (
 )
 
 # --- helpers -------------------------------------------------------------
-
-
-class TestCap:
-    def test_under_cap_returns_output_and_no_notice(self):
-        out, notice = _cap("short output")
-        assert out == "short output"
-        assert notice is None
-
-    def test_over_cap_keeps_head_and_tail(self):
-        output = "a" * (MAX_OUTPUT_BYTES + 1)
-        out, notice = _cap(output)
-        assert notice is not None
-        assert "output truncated" in notice
-        assert "of 30001 bytes" in out
-        assert out.startswith("a" * 20000)
-        assert out.rstrip().endswith("a" * 10000)
-        assert "[... output truncated:" in out
-
-    def test_over_cap_replaces_invalid_bytes_at_head_boundary(self):
-        # A two-byte char straddling the head cut decodes with "replace".
-        output = "a" * 19999 + "é" + "b" * 10000
-        out, notice = _cap(output)
-        assert notice is not None
-        assert "\ufffd" in out
-
-    def test_over_cap_replaces_invalid_bytes_at_tail_boundary(self):
-        # A two-byte char straddling the tail cut decodes with "replace".
-        output = "a" * 20100 + "b" + "é" + "c" * 9999
-        assert len(output.encode()) == 30102
-        out, notice = _cap(output)
-        assert notice is not None
-        assert "\ufffd" in out
 
 
 class TestResolveExisting:
@@ -144,9 +110,10 @@ class TestBashExec:
         assert "[exit code 3]" in result
         assert "out" in result
 
-    def test_large_output_is_truncated(self):
+    def test_large_output_is_returned_in_full(self):
         result = bash_exec("python3 -c \"print('x' * 40000)\"")
-        assert "[output truncated to first 20000 and last 10000 bytes]" in result
+        assert "x" * 40000 in result
+        assert "truncated" not in result
 
     def test_wall_time_suffix(self):
         result = bash_exec("true")
@@ -509,10 +476,9 @@ class TestSearchText:
     def test_no_match_replacement(self):
         assert _search_text(_FakeResults(), "No matches.") == "No matches."
 
-    def test_large_result_is_truncated_inline(self):
-        results = _FakeResults(["x" * (MAX_OUTPUT_BYTES + 1)])
-        text = _search_text(results, None)
-        assert "[output truncated to first 20000 and last 10000 bytes]" in text
+    def test_large_result_is_returned_in_full(self):
+        line = "x" * 100_000
+        assert _search_text(_FakeResults([line]), None) == line
 
 
 class TestRunSearch:
@@ -706,6 +672,65 @@ class TestBashFetch:
         assert "Footer junk" not in result
         assert "var junk = 1;" not in result
         assert "analytics junk comment" not in result
+
+    def test_header_in_root_class_does_not_wipe_the_page(self, tmp_path):
+        # Regression: substring-matching "ad" against "header" removed <html>
+        # itself, so the whole document decomposed to empty markdown.
+        f = tmp_path / "page.html"
+        f.write_text(
+            '<html class="vector-feature-language-in-header-enabled">'
+            "<head><title>Header Page</title></head>"
+            "<body><header>Site chrome</header>"
+            "<main><p>Article body survives.</p></main></body></html>"
+        )
+        result = bash_fetch(f"file://{f}")
+        assert result.startswith("# Header Page")
+        assert "Article body survives." in result
+        assert "Site chrome" not in result
+
+    def test_large_page_keeps_content_past_the_old_cap(self, tmp_path):
+        # Regression: raw HTML was capped at 30KB before parsing, so an
+        # article starting beyond that window never reached the converter.
+        filler = "f" * 60_000
+        f = tmp_path / "big.html"
+        f.write_text(
+            "<html><head><title>Big Page</title></head><body>"
+            f"<div>{filler}</div>"
+            "<article><p>Deep article text.</p></article>"
+            "</body></html>"
+        )
+        result = bash_fetch(f"file://{f}")
+        assert "Deep article text." in result
+        assert "truncated" not in result
+
+    def test_junk_class_tokens_are_removed_without_overmatching(self, tmp_path):
+        f = tmp_path / "page.html"
+        f.write_text(
+            "<html><body><article>"
+            '<div class="ad-container">Buy this</div>'
+            '<div class="adSlot">Ad slot</div>'
+            '<div class="cookie-banner">Accept cookies</div>'
+            '<div class="sidebar">Sidebar text</div>'
+            '<div class="breadcrumb download loading">Keep breadcrumb</div>'
+            "<p>Real content.</p>"
+            "</article></body></html>"
+        )
+        result = bash_fetch(f"file://{f}")
+        assert "Real content." in result
+        assert "Keep breadcrumb" in result
+        assert "Buy this" not in result
+        assert "Ad slot" not in result
+        assert "Accept cookies" not in result
+        assert "Sidebar text" not in result
+
+    def test_large_markdown_is_returned_in_full(self, tmp_path):
+        body = "word " * 12_000  # ~60KB of markdown
+        f = tmp_path / "long.html"
+        f.write_text(f"<html><body><article><p>{body}</p></article></body></html>")
+        result = bash_fetch(f"file://{f}")
+        assert len(result) > 30_000
+        assert "word word word" in result
+        assert "truncated" not in result
 
     def test_failed_transfer_returns_raw_output(self):
         result = bash_fetch("file:///nonexistent/definitely/missing")
