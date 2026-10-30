@@ -35,16 +35,21 @@ def _resolve_cwd(cwd: str | None) -> Path:
 def _execute(
     argv: list[str],
     cwd: Path | None = None,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: float = DEFAULT_TIMEOUT,
     ok_codes: frozenset[int] = frozenset(),
+    env: dict[str, str] | None = None,
 ) -> tuple[str, list[str], float, int | None]:
     """Run argv with merged output and a kill-on-timeout deadline.
 
     Returns the complete output (no truncation), notices, elapsed seconds,
-    and the exit code.
+    and the exit code. ``env`` adds or overrides variables for the child
+    process only; ``None`` inherits the current environment.
     """
     started = time.monotonic()
-    proc = local[argv[0]][tuple(argv[1:])].popen(
+    command = local[argv[0]]
+    if env:
+        command = command.with_env(**env)
+    proc = command[tuple(argv[1:])].popen(
         cwd=None if cwd is None else str(cwd),
         stderr=subprocess.STDOUT,
         new_session=True,  # own process group so timeout kills children too
