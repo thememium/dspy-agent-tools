@@ -344,7 +344,7 @@ def _parse_flag_head(head: str, description: str) -> _Flag | None:
         if name.startswith("-"):
             names.append(name)
 
-    if not names:
+    if not names:  # pragma: no cover - defensive; the head must start with "-"
         return None
 
     if value_spec is not None:
