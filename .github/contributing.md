@@ -241,10 +241,12 @@ $ uv run poe release
 ├── src/dspy_agent_tools/    # Source code
 │   ├── __init__.py          # Public API - re-exports all tools
 │   ├── bash.py              # Shell execution, content/path search, listing, URL fetching
+│   ├── cli.py               # Lazy discovery of any executable's commands via --help
 │   ├── files.py             # File read/write/edit with snapshot guard and tree-sitter blocks
 │   └── search.py            # DuckDuckGo web and news search
 └── tests/
     ├── test_bash.py         # Tests for bash.py
+    ├── test_cli.py          # Tests for cli.py
     ├── test_files.py        # Tests for files.py
     └── test_search.py       # Tests for search.py
 ```
