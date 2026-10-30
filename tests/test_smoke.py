@@ -14,6 +14,7 @@ import sys
 import dspy_agent_tools
 
 EXPECTED_EXPORTS = {
+    "MCPTools",
     "bash_curl",
     "bash_exec",
     "bash_fetch",
@@ -25,6 +26,7 @@ EXPECTED_EXPORTS = {
     "bash_ripgrep",
     "bash_ripgrep_batch",
     "edit_file",
+    "mcp",
     "read_file",
     "web_news",
     "web_search",
