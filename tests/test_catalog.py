@@ -29,6 +29,18 @@ def local_echo(text: str) -> str:
     return f"local:{text}"
 
 
+def verbose(value: int) -> int:
+    """Return a value unchanged.
+
+    This is a deliberately verbose description used to exercise description
+    truncation. This is a deliberately verbose description used to exercise
+    description truncation. This is a deliberately verbose description used to
+    exercise description truncation. This is a deliberately verbose description
+    used to exercise description truncation.
+    """
+    return value
+
+
 def by_name(tools):
     return {tool.name: tool for tool in tools}
 
@@ -63,6 +75,26 @@ class TestSearchMode:
             asyncio.run(tools["call_tool"].acall(name="greet", arguments={}))
             == "hello world"
         )
+
+    def test_empty_query_returns_every_entry(self):
+        tools = by_name(Toolbox([add, greet], mode="search"))
+        response = tools["search_tools"](query="!!!")
+        assert response.splitlines()[0].startswith("1. add(a, b)")
+        assert "2. greet" in response
+
+    def test_truncates_long_descriptions(self):
+        tools = by_name(Toolbox([verbose], mode="search"))
+        response = tools["search_tools"](query="verbose")
+        assert response.rstrip().endswith("...")
+
+    def test_search_reports_no_match(self):
+        tools = by_name(Toolbox([add], mode="search"))
+        assert tools["search_tools"](query="zzzz") == "[no matching tools]"
+
+    def test_call_tool_rejects_unknown_name(self):
+        tools = by_name(Toolbox([add], mode="search"))
+        with pytest.raises(ValueError, match="Unknown tool 'nope'"):
+            tools["call_tool"](name="nope", arguments={})
 
     def test_name_prefix_applies_to_tools_and_facades(self):
         box = Toolbox([add], mode="search", name_prefix="local_")
@@ -191,6 +223,51 @@ class TestSources:
         assert closer.closed
         assert {entry.name for entry in combined.entries} == {"add", "greet"}
 
+    def test_context_manager_closes_sources(self):
+        closer = _Closer()
+        box = Toolbox(MCPTools([dspy.Tool(add)], [closer]), mode="search")
+
+        with box as entered:
+            assert entered is box
+            assert entered.entries
+
+        assert closer.closed
+
+    def test_async_context_manager_closes_sources(self):
+        closer = _Closer()
+        box = Toolbox(MCPTools([dspy.Tool(add)], [closer]), mode="search")
+
+        async def use():
+            async with box as entered:
+                assert entered is box
+                assert entered.entries
+
+        asyncio.run(use())
+        assert closer.closed
+
+    def test_right_addition_keeps_sources_alive(self):
+        closer = _Closer()
+        box = Toolbox(MCPTools([dspy.Tool(add)], [closer]), mode="search")
+
+        combined = [greet] + box
+        assert isinstance(combined, Toolbox)
+        assert {entry.name for entry in combined.entries} == {"add", "greet"}
+        combined.close()
+        assert closer.closed
+
+    def test_in_place_addition_rebuilds_catalog(self):
+        box = Toolbox([add], mode="search")
+        box += [greet]
+        assert isinstance(box, Toolbox)
+        assert {entry.name for entry in box.entries} == {"add", "greet"}
+
+    def test_ignores_unrelated_entries_attribute(self):
+        class NotACatalog(list):
+            entries = (object(),)
+
+        box = Toolbox(NotACatalog([dspy.Tool(add)]), mode="search")
+        assert {entry.name for entry in box.entries} == {"add"}
+
     def test_mcp_and_local_tools_share_one_catalog(self):
         server = MCP(command=sys.executable, args=[str(SERVER)], name_prefix="mcp_")
         box = Toolbox([server, local_echo], mode="search")
@@ -213,3 +290,7 @@ class TestSources:
     def test_rejects_unusable_entries(self):
         with pytest.raises(TypeError, match="Toolbox entries must be"):
             Toolbox([42], mode="search")
+
+    def test_rejects_string_entries(self):
+        with pytest.raises(TypeError, match="Toolbox entries must be"):
+            Toolbox("add", mode="search")
