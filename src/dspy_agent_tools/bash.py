@@ -480,7 +480,9 @@ def bash_find(pattern: str | None = None, path: str = ".", options: str = "") ->
     root = _resolve_existing(path)
 
     def run(pat: str | None, kwargs: dict):
-        return rgapi.fd(root, pat, timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs)
+        return rgapi.fd(
+            pattern=pat, root=root, timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs
+        )
 
     try:
         pattern, kwargs = _fd_kwargs(options, pattern or "")
@@ -520,7 +522,7 @@ def bash_find_batch(searches: list[dict[str, str]]) -> str:
                 "",
                 _fd_kwargs,
                 lambda pat, kwargs, root=root, remaining_ms=remaining_ms: rgapi.fd(
-                    root, pat or None, timeout_ms=remaining_ms, **kwargs
+                    pattern=pat or None, root=root, timeout_ms=remaining_ms, **kwargs
                 ),
                 require_pattern=False,
                 no_match=None,
@@ -563,7 +565,9 @@ def bash_glob(pattern: str, path: str = ".", options: str = "") -> str:
     root = _resolve_existing(path)
 
     def run(pat: str | None, kwargs: dict):
-        result = rgapi.fd(root, None, timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs)
+        result = rgapi.fd(
+            pattern=None, root=root, timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs
+        )
         return sorted(result)
 
     try:
@@ -605,7 +609,7 @@ def bash_glob_batch(searches: list[dict[str, str]]) -> str:
                 "",
                 lambda opts, pat: _fd_kwargs(opts, pat, glob=True),
                 lambda _pat, kwargs, root=root, remaining_ms=remaining_ms: sorted(
-                    rgapi.fd(root, None, timeout_ms=remaining_ms, **kwargs)
+                    rgapi.fd(pattern=None, root=root, timeout_ms=remaining_ms, **kwargs)
                 ),
                 require_pattern=False,
                 no_match=None,
