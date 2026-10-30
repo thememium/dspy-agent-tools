@@ -6,9 +6,21 @@ from pathlib import Path
 
 import dspy
 import pytest
+from plumbum import CommandNotFound
 
+import dspy_agent_tools.cli as cli_module
 from dspy_agent_tools import CLI, CLITools, Toolbox
-from dspy_agent_tools.cli import _default_prefix
+from dspy_agent_tools.cli import (
+    _default_prefix,
+    _description,
+    _Flag,
+    _normalize_args,
+    _parse_commands,
+    _parse_flag_head,
+    _parse_flags,
+    _parse_help,
+    _usage,
+)
 
 SCRIPT = r'''
 import os
@@ -265,3 +277,181 @@ class TestCache:
 
         tools.refresh()
         assert not discovery.root.expanded
+
+
+class TestParsingEdges:
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "usage: prog [opts]\n  continuation\nFLAGS\n",
+                "prog [opts]\ncontinuation",
+            ),
+            ("usage: prog\n  continuation\nprose\n", "prog\ncontinuation"),
+            ("USAGE\n  prog <command>\n  more\n\n", "prog <command>\nmore"),
+            ("no usage here", ""),
+        ],
+    )
+    def test_usage_variants(self, text, expected):
+        assert _usage(text) == expected
+
+    def test_description_skips_usage_and_sections(self):
+        assert _description("usage: prog\n\nDesc here") == "Desc here"
+        assert _description("USAGE\n  prog x\n\nDesc here") == "Desc here"
+        assert _description("usage: prog\n  continuation\nDesc here") == "Desc here"
+        assert _description("-a    flag\nDesc here") == "Desc here"
+        assert _description("Options:\nDesc here") == "Desc here"
+
+    def test_description_prefers_indented_fallback(self):
+        assert _description("  Indented description") == "Indented description"
+        assert _description("") == ""
+
+    def test_flag_line_includes_repeatable(self):
+        flag = _Flag(
+            names=["--tag"],
+            kind="array",
+            default=None,
+            choices=None,
+            repeatable=True,
+            description="",
+        )
+        assert "repeatable" in flag.line()
+
+    def test_flag_head_skips_non_flags(self):
+        assert _parse_flag_head("plain", "") is None
+
+    def test_flag_head_skips_empty_alias_parts(self):
+        flag = _parse_flag_head("-x, , --y", "desc")
+        assert flag is not None
+        assert flag.names == ["-x", "--y"]
+
+    def test_flag_head_parses_optional_values(self):
+        flag = _parse_flag_head("--porcelain[=<version>]", "machine readable")
+        assert flag is not None
+        assert flag.names == ["--porcelain"]
+        assert flag.kind == "string"
+
+    def test_flag_head_parses_inline_defaults(self):
+        assert _parse_flag_head("--mode=auto", "").default == "auto"
+        assert _parse_flag_head("--flag=true", "").kind == "boolean"
+        assert _parse_flag_head("--flag=[]", "").kind == "array"
+        assert _parse_flag_head("--flag=map[]", "").kind == "object"
+        assert _parse_flag_head("--flag=", "").kind == "string"
+        assert _parse_flag_head("--flag=500", "").kind == "integer"
+
+    def test_flag_head_parses_repeatable_names(self):
+        flag = _parse_flag_head("--tag...", "")
+        assert flag is not None
+        assert flag.repeatable is True
+
+    def test_flag_head_parses_repeatable_values(self):
+        flag = _parse_flag_head("--flag <values>...", "")
+        assert flag is not None
+        assert flag.repeatable is True
+        assert flag.kind == "string"
+
+    def test_flag_head_treats_usage_template_as_value(self):
+        flag = _parse_flag_head("--engine=ENGINE", "")
+        assert flag is not None
+        assert flag.default is None
+        assert flag.kind == "string"
+
+    def test_flag_head_infers_object_and_array(self):
+        assert _parse_flag_head("--map map", "").kind == "object"
+        array = _parse_flag_head("--list list", "")
+        assert array.kind == "array"
+        assert array.repeatable is True
+
+    def test_parse_flags_joins_continuations_and_ignores_duplicates(self):
+        flags = {}
+        _parse_flags(
+            ["  --x int   first", "             more", "  --x int   second"],
+            flags,
+        )
+        assert flags["--x"].description == "first more"
+
+    def test_parse_commands_skips_unmatched_and_meta(self):
+        commands = {}
+        _parse_commands(["  nope"], commands)
+        _parse_commands(["  help    Show help"], commands)
+        _parse_commands(["  real    Real command"], commands)
+        assert commands == {"real": "Real command"}
+
+    def test_parse_help_falls_back_for_root_help(self):
+        usage, _, commands, _ = _parse_help(
+            "usage: prog <command>\n\n  alpha    Alpha command\n",
+            is_root=True,
+        )
+        assert usage == "prog <command>"
+        assert commands == {"alpha": "Alpha command"}
+
+
+class TestDiscoveryEdges:
+    @staticmethod
+    def discovery():
+        return cli_module._Discovery(
+            sys.executable,
+            base_args=[],
+            cwd=None,
+            env=None,
+            timeout=1,
+            help_timeout=1,
+            max_expands=2,
+            max_depth=2,
+        )
+
+    def test_help_text_reports_execution_errors(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise RuntimeError("no help")
+
+        monkeypatch.setattr(cli_module, "_execute", boom)
+        text, code = self.discovery()._help_text(())
+        assert text == "no help"
+        assert code == 1
+
+    def test_expand_unknown_path_raises(self):
+        with pytest.raises(KeyError):
+            self.discovery().expand(("nope",))
+
+    def test_score_covers_name_affixes(self):
+        node = cli_module._Node("status", ("status",))
+        assert cli_module._Discovery._score(node, ["sta"], "sta") > 0
+        assert cli_module._Discovery._score(node, ["atu"], "atu") > 0
+
+    def test_search_honors_expansion_budget(self, tmp_path):
+        tools = by_name(make(tmp_path, max_expands=1))
+        assert tools["fake_search_commands"](query="pull requests")
+
+    def test_run_reports_command_not_found(self, monkeypatch, tmp_path):
+        tools = by_name(make(tmp_path))
+        tools["fake_search_commands"](query="")
+
+        def boom(*args, **kwargs):
+            raise CommandNotFound("fake")
+
+        monkeypatch.setattr(cli_module, "_execute", boom)
+        result = tools["fake_run_command"](command="", args=[])
+        assert result.startswith("[command not found:")
+
+    def test_code_mode_truncates_help(self, tmp_path):
+        tools = by_name(make(tmp_path, mode="code", max_help_chars=40))
+        result = tools["fake_get_command_help"](command="pr list")
+        assert result["help"].endswith("[help truncated]")
+
+    def test_normalize_args_accepts_none_and_string(self):
+        assert _normalize_args(None) == []
+        assert _normalize_args("--limit 2") == ["--limit", "2"]
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"timeout": -1}, "timeout must be"),
+            ({"help_timeout": 0}, "help_timeout must be"),
+            ({"max_expands": 0}, "max_expands must be"),
+            ({"max_depth": 0}, "max_depth must be"),
+            ({"max_help_chars": -1}, "max_help_chars must be"),
+        ],
+    )
+    def test_rejects_invalid_options(self, tmp_path, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            make(tmp_path, **kwargs)
