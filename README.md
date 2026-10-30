@@ -46,6 +46,9 @@ Three families of tools:
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
 
+It also ships an **MCP bridge** (`dspy_agent_tools.mcp`) that turns any stdio
+MCP server into a list of DSPy tools you can mix with the built-ins.
+
 Tools are just Python functions, exactly as
 [DSPy's docs describe](https://dspy.ai/current/getting-started/react-and-tools/#tools-are-just-python-functions):
 DSPy reads the name, type-hinted parameters, and docstring of each function to
@@ -80,6 +83,12 @@ binaries, which must be on your PATH. The search tools
 (`bash_ripgrep`, `bash_find`, `bash_glob`) run through the `rgapi` library —
 ripgrep's and fd's engines as Python modules — so no `rg`/`fd` binary is
 needed.
+
+The MCP bridge is an optional extra (it pulls in DSPy and the MCP SDK):
+
+```bash
+uv add "dspy-agent-tools[mcp]"
+```
 
 ### Basic Usage with dspy.ReAct
 
@@ -197,6 +206,43 @@ from dspy_agent_tools import (
     web_search,
 )
 ```
+
+### With MCP servers
+
+`mcp` launches a stdio MCP server, converts every tool it advertises into a
+`dspy.Tool`, and returns them as a list. The server keeps running until you
+call `close()` or the process exits, so repeated tool calls reuse one session:
+
+```python
+import dspy
+from dspy_agent_tools import bash_exec, mcp
+
+files = mcp("npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp")
+
+agent = dspy.ReAct(
+    "question -> answer",
+    tools=files + [bash_exec],  # mix MCP tools with regular ones
+)
+
+result = agent(question="List the files inside /tmp")
+print(result.answer)
+```
+
+Both paths work out of the box: `agent(...)` synchronously converts the
+async MCP calls (scoped to those tools, no global DSPy setting), and
+`await agent.acall(...)` runs fully asynchronously in async applications.
+No cleanup is required: the server keeps running while the tools or the
+`MCPTools` list are referenced, then stops when they are garbage-collected,
+with an interpreter-exit fallback. Call `files.close()` only to stop it
+earlier.
+
+- `mcp(command, *args)` also accepts `env`, `cwd`, `startup_timeout`,
+  `name_prefix`, and `result_mode`.
+- Call `mcp` once per server and concatenate the results for several servers;
+  use `name_prefix="fs_"` when servers expose identically named tools.
+- The return value, `MCPTools`, is a `list` subclass: passing it as `tools=`,
+  concatenating with `+` on either side, and unpacking all work. It is also a
+  context manager (`with mcp(...) as tools:`) that closes the server on exit.
 
 ### Batching
 
