@@ -46,7 +46,7 @@ Three built-in tool families, plus a generic Toolbox and optional MCP bridge:
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
-- **Toolbox** — `Toolbox([...], mode="search"|"code")` applies the same progressive-discovery facade to any mix of MCP servers, `dspy.Tool` objects, and plain Python functions.
+- **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
 
 Tools are just Python functions, exactly as
 [DSPy's docs describe](https://dspy.ai/current/getting-started/react-and-tools/#tools-are-just-python-functions):
@@ -298,11 +298,14 @@ earlier.
 
 ### Tool discovery with Toolbox
 
-A 46-tool server such as GitHub's MCP endpoint costs roughly 14k tokens of
-function definitions on every turn when every tool is passed as its own
-`dspy.Tool`. `Toolbox` keeps the catalog in the Python process and exposes
-three discovery tools instead. It accepts any mix of MCP servers, regular
-`dspy.Tool` objects, and plain sync or async Python functions:
+`Toolbox` accepts any mix of MCP servers, regular `dspy.Tool` objects, and
+plain sync or async Python functions, and flattens nested lists. With no
+`mode` (the default, `mode=None`), it returns every tool eagerly — the same
+full load you would pass directly. With `mode="search"` or `mode="code"`, it
+keeps the catalog in the Python process and exposes three discovery tools
+instead, which matters for large catalogs: a 46-tool server such as GitHub's
+MCP endpoint costs roughly 14k tokens of function definitions on every turn
+when every tool is passed as its own `dspy.Tool`.
 
 ```python
 from dspy_agent_tools import MCP, Toolbox, bash_exec, read_file
@@ -389,7 +392,9 @@ Use `mode="code"` when:
 Skip both modes when the catalog is small (roughly fewer than ten tools) and
 the task is straightforward. The discovery round trip — search, inspect, then
 call — can cost more than just passing the function definitions directly as
-`tools=`.
+`tools=`. Omit `mode` (or pass `mode=None`) to get the full load while still
+keeping `Toolbox`'s source ownership, duplicate-name checks, and
+`name_prefix` handling.
 
 - Plain functions and `dspy.Tool` instances are catalogued from their DSPy
   metadata: function name, docstring, type hints, and defaults.
