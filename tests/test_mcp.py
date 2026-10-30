@@ -16,7 +16,7 @@ import dspy
 import pytest
 from dspy.utils.dummies import DummyLM
 
-from dspy_agent_tools import MCPTools, mcp
+from dspy_agent_tools import MCP, MCPTools
 from dspy_agent_tools.mcp import (
     _accepted_kwargs,
     _close_all,
@@ -32,7 +32,7 @@ SERVER = Path(__file__).parent / "fixtures" / "mcp_server.py"
 
 
 def start(**kwargs):
-    return mcp(sys.executable, str(SERVER), **kwargs)
+    return MCP(command=sys.executable, args=[str(SERVER)], **kwargs)
 
 
 @pytest.fixture()
@@ -213,12 +213,12 @@ class TestLifecycle:
     def test_startup_timeout(self):
         slow = Path(__file__).parent / "fixtures" / "slow_server.py"
         with pytest.raises(TimeoutError, match="did not initialize"):
-            mcp(sys.executable, str(slow), startup_timeout=0.5)
+            MCP(command=sys.executable, args=[str(slow)], startup_timeout=0.5)
 
     def test_startup_failure_propagates(self):
         broken = Path(__file__).parent / "fixtures" / "broken_server.py"
         with pytest.raises(ExceptionGroup):
-            mcp(sys.executable, str(broken))
+            MCP(command=sys.executable, args=[str(broken)])
 
     def test_async_context_manager_closes(self):
         tools = start()
@@ -346,9 +346,83 @@ class TestInternals:
         monkeypatch.setattr(mcp_module, "_Connection", NoSessionConnection)
 
         with pytest.raises(RuntimeError, match="failed to initialize"):
-            mcp("irrelevant")
+            MCP(command="irrelevant")
 
         assert closed == [True]
+
+
+class TestTransportSelection:
+    @pytest.fixture()
+    def selected(self, monkeypatch):
+        calls = []
+
+        for kind, name in (
+            ("stdio", "_stdio_transport"),
+            ("http", "_http_transport"),
+            ("sse", "_sse_transport"),
+        ):
+
+            def factory(*args, _kind=kind, **kwargs):
+                calls.append(_kind)
+                return lambda: None
+
+            monkeypatch.setattr(mcp_module, name, factory)
+        monkeypatch.setattr(
+            mcp_module, "_build_tools", lambda factory, **kwargs: factory
+        )
+        return calls
+
+    def test_infers_stdio_from_command(self, selected):
+        MCP(command="npx", args=["server"])
+        assert selected == ["stdio"]
+
+    def test_infers_http_from_url(self, selected):
+        MCP(url="https://example.com/mcp")
+        assert selected == ["http"]
+
+    def test_explicit_http(self, selected):
+        MCP(url="https://example.com/mcp", transport="http")
+        assert selected == ["http"]
+
+    def test_explicit_sse(self, selected):
+        MCP(url="https://example.com/sse", transport="sse")
+        assert selected == ["sse"]
+
+    def test_requires_command_or_url(self):
+        with pytest.raises(ValueError, match="requires command"):
+            MCP()
+
+    def test_rejects_command_and_url(self):
+        with pytest.raises(ValueError, match="not both"):
+            MCP(command="npx", url="https://example.com/mcp")
+
+    def test_rejects_unknown_transport(self):
+        with pytest.raises(ValueError, match="Unknown transport"):
+            MCP(command="npx", transport="websocket")
+
+    def test_stdio_requires_command(self):
+        with pytest.raises(ValueError, match="requires command"):
+            MCP(transport="stdio")
+
+    def test_stdio_rejects_url(self):
+        with pytest.raises(ValueError, match="does not accept url"):
+            MCP(url="https://example.com/mcp", transport="stdio")
+
+    def test_http_requires_url(self):
+        with pytest.raises(ValueError, match="requires url"):
+            MCP(transport="http")
+
+    def test_http_rejects_command(self):
+        with pytest.raises(ValueError, match="does not accept command"):
+            MCP(command="npx", transport="http")
+
+    def test_sse_requires_url(self):
+        with pytest.raises(ValueError, match="requires url"):
+            MCP(transport="sse")
+
+    def test_custom_transport_rejects_command_or_url(self):
+        with pytest.raises(ValueError, match="not both"):
+            MCP(transport=lambda: None, command="npx")
 
 
 class TestHttpTransport:
