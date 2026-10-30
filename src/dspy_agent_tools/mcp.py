@@ -13,6 +13,11 @@ Transports are chosen by :func:`MCP`:
 - ``transport=factory`` uses any custom async transport yielding a read/write
   pair (WebSocket, in-memory, ...).
 
+``MCP`` returns every advertised tool eagerly. To keep definitions out of the
+model context, wrap the result in :class:`dspy_agent_tools.Toolbox` with
+``mode="search"`` or ``mode="code"``; ``Toolbox`` also accepts regular
+``dspy.Tool`` objects and plain Python functions.
+
 The returned tools work from both DSPy paths without extra configuration:
 ``agent(question=...)`` uses DSPy's async-to-sync conversion for the MCP call
 only (the global setting is untouched), and ``await agent.acall(...)`` runs
@@ -41,6 +46,8 @@ from collections.abc import Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar, cast
+
+from .toolbox import CatalogEntry, _sync_tool_class
 
 if TYPE_CHECKING:
     from dspy import Tool
@@ -91,41 +98,6 @@ def _read_write(streams: Any) -> tuple[Any, Any]:
     return streams.read, streams.write
 
 
-_SYNC_TOOL_CLASS: Any = None
-
-
-def _sync_tool_class() -> type[Tool]:
-    """Build once a ``Tool`` whose sync path converts async results.
-
-    ``dspy.Tool.__call__`` refuses to run an async function unless
-    ``allow_tool_async_sync_conversion`` is set. Enabling it inside the tool
-    call keeps ``agent(...)`` working without mutating global DSPy settings,
-    and leaves ``acall`` fully asynchronous.
-    """
-    global _SYNC_TOOL_CLASS
-    if _SYNC_TOOL_CLASS is None:
-        import dspy
-        from dspy import Tool
-
-        class _SyncCapableTool(Tool):
-            def __call__(self, **kwargs: Any) -> Any:
-                with dspy.context(allow_tool_async_sync_conversion=True):
-                    return super().__call__(**self._without_nulls(kwargs))
-
-            async def acall(self, **kwargs: Any) -> Any:
-                return await super().acall(**self._without_nulls(kwargs))
-
-            @staticmethod
-            def _without_nulls(kwargs: dict[str, Any]) -> dict[str, Any]:
-                """Treat ``None`` as "not supplied"; MCP schemas reject explicit nulls."""
-                return {
-                    name: value for name, value in kwargs.items() if value is not None
-                }
-
-        _SYNC_TOOL_CLASS = _SyncCapableTool
-    return _SYNC_TOOL_CLASS
-
-
 def _mcp_signature(
     tool: Any,
     args: dict[str, Any],
@@ -167,7 +139,7 @@ def _mcp_signature(
 
 def _as_sync_capable(tool: Tool, signature: inspect.Signature | None = None) -> Tool:
     """Rebuild an MCP tool so its synchronous path also works."""
-    cls = _sync_tool_class()
+    cls = _sync_tool_class(drop_nulls=True)
     if signature is not None:
         cast(Any, tool.func).__signature__ = signature
     return cls(
@@ -429,14 +401,24 @@ class MCPTools(list):
     Behaves like a normal list, so it can be passed directly as ``tools=``,
     concatenated with regular DSPy tools (``tools + [bash_exec]`` and
     ``[bash_exec] + tools`` both keep the MCP connections attached), or
-    unpacked. The server is stopped automatically once neither this list nor
-    any of its tools is referenced any more (and at interpreter exit); call
-    :meth:`close` (or use it as a context manager) only to stop it early.
+    unpacked. ``entries`` keeps the exact ``CatalogEntry`` metadata (including
+    the server's JSON input schema) for ``Toolbox``. The server is stopped
+    automatically once neither this list nor any of its tools is referenced any
+    more (and at interpreter exit); call :meth:`close` (or use it as a context
+    manager) only to stop it early.
     """
 
-    def __init__(self, tools: Any = (), connections: Any = ()) -> None:
+    def __init__(
+        self,
+        tools: Any = (),
+        connections: Any = (),
+        entries: Any = (),
+    ) -> None:
         super().__init__(tools)
         self._connections: list[_Connection] = list(connections)
+        # Exact MCP schemas for Toolbox; empty after concatenation with tools
+        # that this list did not catalogue.
+        self.entries: tuple[CatalogEntry, ...] = tuple(entries)
 
     def close(self) -> None:
         """Stop every server owned by this list. Safe to call repeatedly."""
@@ -519,22 +501,33 @@ def _build_tools(
             raise RuntimeError("MCP server failed to initialize")
         listed = connection.run(session.list_tools())
         proxy = _SessionProxy(connection)
-        tools = []
+        entries: list[CatalogEntry] = []
         for advertised in listed.tools:
             tool = Tool.from_mcp_tool(proxy, advertised, result_mode=result_mode)
             signature = _mcp_signature(
                 advertised, tool.args or {}, tool.arg_types or {}
             )
-            tools.append(_as_sync_capable(tool, signature))
-        if name_prefix:
-            for tool in tools:
+            tool = _as_sync_capable(tool, signature)
+            if name_prefix:
                 tool.name = f"{name_prefix}{tool.name}"
+            schema = getattr(advertised, "input_schema", None) or getattr(
+                advertised, "inputSchema", None
+            )
+            entries.append(
+                CatalogEntry(
+                    name=cast(str, tool.name),
+                    description=getattr(advertised, "description", None) or "",
+                    schema=schema if isinstance(schema, dict) else {},
+                    tool=tool,
+                )
+            )
+        tools = [entry.tool for entry in entries]
     except BaseException:
         connection.close()
         raise
 
     _CONNECTIONS.add(connection)
-    return MCPTools(tools, [connection])
+    return MCPTools(tools, [connection], entries)
 
 
 def _http_transport(
@@ -686,6 +679,11 @@ def MCP(
     async-to-sync conversion for their sync path, so both
     ``agent(question=...)`` and ``await agent.acall(question=...)`` work
     without extra configuration.
+
+    Every advertised tool becomes its own ``dspy.Tool``. For progressive
+    discovery, wrap the result in ``Toolbox``::
+
+        catalog = Toolbox(MCP(url="https://example.com/mcp"), mode="search")
 
     Args:
         command: Executable to launch for a stdio server (e.g. ``"npx"``).
