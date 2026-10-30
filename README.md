@@ -210,15 +210,19 @@ from dspy_agent_tools import (
 
 ### With MCP servers
 
-`mcp` launches a stdio MCP server, converts every tool it advertises into a
-`dspy.Tool`, and returns them as a list. The server keeps running while the
-tools are referenced, so repeated calls reuse one session:
+`MCP` is one wrapper for every transport. It starts the server, converts every
+tool it advertises into a `dspy.Tool`, and returns them as a list. The server
+keeps running while the tools are referenced, so repeated calls reuse one
+session:
 
 ```python
 import dspy
-from dspy_agent_tools import bash_exec, mcp
+from dspy_agent_tools import MCP, bash_exec
 
-files = mcp("npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp")
+files = MCP(
+    command="npx",
+    args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+)
 
 agent = dspy.ReAct(
     "question -> answer",
@@ -229,28 +233,31 @@ result = agent(question="List the files inside /tmp")
 print(result.answer)
 ```
 
-Remote servers use the transport-specific factory:
+Remote servers use the same wrapper. `url=` selects Streamable HTTP, and
+`transport="sse"` selects the legacy HTTP+SSE transport:
 
 ```python
-from dspy_agent_tools import mcp_http, mcp_sse
-
-tools = mcp_http(
-    "https://example.com/mcp",
+tools = MCP(
+    url="https://example.com/mcp",
     headers={"Authorization": "Bearer <token>"},
 )
 
-legacy = mcp_sse("https://example.com/sse")  # only for pre-Streamable-HTTP servers
+legacy = MCP(url="https://example.com/sse", transport="sse")
 ```
 
-- `mcp_http(url, ...)` speaks **Streamable HTTP**, the transport used by most
+- `MCP(command=..., args=[...])` runs a local **stdio** server.
+- `MCP(url=...)` connects over **Streamable HTTP**, the transport used by most
   hosted MCP servers.
-- `mcp_sse(url, ...)` speaks the legacy **HTTP+SSE** transport.
-- `mcp_transport(factory)` connects any custom MCP transport: `factory` is a
+- `MCP(url=..., transport="sse")` connects over legacy **HTTP+SSE**.
+- `MCP(transport=factory)` uses a custom async transport: `factory` is a
   zero-argument callable returning an async context manager that yields a
   read/write pair.
-- All three accept `headers`, `auth`, `startup_timeout`, `name_prefix`, and
-  `result_mode`; `mcp_http` also accepts an `http_client_factory` for custom
-  HTTP clients (proxies, OAuth providers).
+- `transport="auto"` (the default) infers the transport from `command=` vs
+  `url=`; pass `"stdio"`, `"http"`, or `"sse"` to be explicit.
+
+All transports accept `headers`, `auth`, `timeout`, `startup_timeout`,
+`name_prefix`, and `result_mode`; remote transports also accept
+`http_client_factory` for custom HTTP clients (proxies, OAuth providers).
 
 Both paths work out of the box: `agent(...)` synchronously converts the
 async MCP calls (scoped to those tools, no global DSPy setting), and
@@ -260,13 +267,11 @@ No cleanup is required: the session keeps running while the tools or the
 with an interpreter-exit fallback. Call `tools.close()` only to stop it
 earlier.
 
-- `mcp(command, *args)` also accepts `env`, `cwd`, `startup_timeout`,
-  `name_prefix`, and `result_mode`.
-- Call `mcp` once per server and concatenate the results for several servers;
+- Call `MCP` once per server and concatenate the results for several servers;
   use `name_prefix="fs_"` when servers expose identically named tools.
 - The return value, `MCPTools`, is a `list` subclass: passing it as `tools=`,
   concatenating with `+` on either side, and unpacking all work. It is also a
-  context manager (`with mcp(...) as tools:`) that closes the server on exit.
+  context manager (`with MCP(...) as tools:`) that closes the server on exit.
 
 ### Batching
 
