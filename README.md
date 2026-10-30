@@ -369,15 +369,17 @@ gh = CLI(
     "gh",
     commands=[
         Command(
-            "pr_list",
-            "pr list",
-            "List pull requests in a repository.",
+            command="pr list",
+            name="pr_list",
+            description="List pull requests in a repository.",
             args={
                 "repo": Argument(help="owner/name"),
                 "state": Option(
-                    "open", "--state", choices=("open", "closed", "merged")
+                    "--state",
+                    default="open",
+                    choices=("open", "closed", "merged"),
                 ),
-                "limit": Option(30, "--limit", type=int),
+                "limit": Option("--limit", default=30, type=int),
                 "label": Option("--label", repeatable=True),
                 "draft": Option("--draft", is_flag=True),
             },
@@ -413,11 +415,11 @@ remains available when you want to set `positional=` or `flag=` directly.
 - `choices=` adds an enum to the schema.
 - `fixed=` adds always-present argv items, such as `("--json",)`.
 - `ok_codes=` suppresses the `[exit code N]` notice for accepted exits.
-- `Command.path` accepts `"pr list"`, `"db:migrate"` (one token), or
+- `Command.command` accepts `"pr list"`, `"db:migrate"` (one token), or
   `("pr", "list")`.
 
 Arguments are built as
-`[executable, *base_args, *command.path, *positionals, *fixed, *flags]` and
+`[executable, *base_args, *command_tokens, *positionals, *fixed, *flags]` and
 run without a shell. Explicit commands do not probe `--help`, so they also
 work for hidden commands and plugin commands that do not appear in help.
 
