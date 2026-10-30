@@ -289,6 +289,7 @@ class TestParsingEdges:
             ),
             ("usage: prog\n  continuation\nprose\n", "prog\ncontinuation"),
             ("USAGE\n  prog <command>\n  more\n\n", "prog <command>\nmore"),
+            ("USAGE\n  prog\nFLAGS\n", "prog"),
             ("no usage here", ""),
         ],
     )
@@ -348,7 +349,7 @@ class TestParsingEdges:
         flag = _parse_flag_head("--flag <values>...", "")
         assert flag is not None
         assert flag.repeatable is True
-        assert flag.kind == "string"
+        assert flag.kind == "array"
 
     def test_flag_head_treats_usage_template_as_value(self):
         flag = _parse_flag_head("--engine=ENGINE", "")
@@ -427,7 +428,7 @@ class TestDiscoveryEdges:
         tools["fake_search_commands"](query="")
 
         def boom(*args, **kwargs):
-            raise CommandNotFound("fake")
+            raise CommandNotFound("fake", [])
 
         monkeypatch.setattr(cli_module, "_execute", boom)
         result = tools["fake_run_command"](command="", args=[])
