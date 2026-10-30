@@ -62,7 +62,7 @@ _SCHEMA_TYPES: dict[type[Any], str] = {
 }
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True, eq=False, kw_only=True)
 class Arg:
     """One argument of an explicitly defined :class:`Command`.
 
@@ -80,20 +80,21 @@ class Arg:
     repeatable: bool = False
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True, eq=False, kw_only=True)
 class Command:
     """One explicitly defined CLI command exposed as a ``dspy.Tool``.
 
-    ``path`` is the command path after the executable, either a tuple such as
-    ``("pr", "list")`` or a space-separated string such as ``"pr list"``.
+    ``command`` is the command path after the executable, either a tuple such
+    as ``("pr", "list")`` or a space-separated string such as ``"pr list"``.
     Colons stay inside one token (``"db:migrate"`` is one command).
-    ``args`` maps tool argument names to :class:`Arg` definitions; use
-    :func:`Argument` and :func:`Option` for the common cases. ``fixed``
-    arguments are always appended before user flags.
+    ``name`` is the tool name before the CLI's ``name_prefix``. ``args`` maps
+    tool argument names to :class:`Arg` definitions; use :func:`Argument` and
+    :func:`Option` for the common cases. ``fixed`` arguments are always
+    appended before user flags.
     """
 
+    command: str | Sequence[str]
     name: str
-    path: str | Sequence[str]
     description: str = ""
     args: dict[str, Arg] = field(default_factory=dict)
     fixed: tuple[str, ...] = ()
@@ -951,11 +952,11 @@ def _validate_arg(
     positionals[arg.positional] = name
 
 
-def _path_parts(path: str | Sequence[str]) -> tuple[str, ...]:
+def _command_parts(command: str | Sequence[str]) -> tuple[str, ...]:
     """Split a space-separated signature; colons stay inside one token."""
-    if isinstance(path, str):
-        return tuple(part for part in path.split() if part)
-    return tuple(path)
+    if isinstance(command, str):
+        return tuple(part for part in command.split() if part)
+    return tuple(command)
 
 
 def _assign_positionals(args: dict[str, Arg]) -> dict[str, Arg]:
@@ -978,7 +979,7 @@ def _normalize_command(command: Command) -> Command:
     fixed = command.fixed if isinstance(command.fixed, str) else tuple(command.fixed)
     return replace(
         command,
-        path=_path_parts(command.path),
+        command=_command_parts(command.command),
         args=_assign_positionals(command.args),
         fixed=fixed,
     )
@@ -990,7 +991,7 @@ def _validate_command(command: Command) -> None:
         raise ValueError(f"Command name {command.name!r} must be a valid identifier")
     if isinstance(command.fixed, (str, bytes)):
         raise TypeError(f"{command.name}: fixed must be a sequence of strings")
-    for part in command.path:
+    for part in command.command:
         if not isinstance(part, str) or not part:
             raise ValueError(
                 f"{command.name}: command path parts must be non-empty strings"
@@ -1153,7 +1154,7 @@ def _build_command_tools(
             return _run_argv(
                 executable,
                 base_args,
-                command.path,
+                command.command,
                 _command_argv(command, kwargs),
                 cwd=cwd,
                 env=env,
@@ -1314,17 +1315,17 @@ def CLI(
         ...     "gh",
         ...     commands=[
         ...         Command(
-        ...             "pr_list",
-        ...             "pr list",
-        ...             "List pull requests in a repository.",
+        ...             command="pr list",
+        ...             name="pr_list",
+        ...             description="List pull requests in a repository.",
         ...             args={
         ...                 "repo": Argument(help="owner/name"),
         ...                 "state": Option(
-        ...                     "open",
         ...                     "--state",
+        ...                     default="open",
         ...                     choices=("open", "closed", "merged"),
         ...                 ),
-        ...                 "limit": Option(30, "--limit", type=int),
+        ...                 "limit": Option("--limit", default=30, type=int),
         ...             },
         ...             fixed=("--json",),
         ...         )
