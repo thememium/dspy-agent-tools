@@ -17,9 +17,12 @@ dependencies = [
   "ddgs>=9.16.0",
   "markdownify>=1.2.3",
   "plumbum>=2.0.2",
-  "rgapi>=0.2.2",
+  "rgapi>=0.2.3",
   "tree-sitter-language-pack>=1.22.1",
 ]
+
+[project.optional-dependencies]
+mcp = ["dspy>=3.1", "httpx2>=2.10", "mcp>=2"]
 
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]
@@ -29,7 +32,10 @@ build-backend = "uv_build"
 dev = [
   "bandit>=1.9.4",
   "deptry>=0.25.1",
+  "dspy>=3.1",
+  "httpx2>=2.10",
   "isort>=9.0.2",
+  "mcp>=2",
   "poethepoet>=0.49.0",
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
