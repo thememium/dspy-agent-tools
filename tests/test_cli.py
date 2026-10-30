@@ -470,7 +470,9 @@ class TestExplicitCommands:
     def test_commands_replace_discovery(self, tmp_path):
         tools = make(
             tmp_path,
-            commands=[Command("status", ("status",), "Show status")],
+            commands=[
+                Command(command=("status",), name="status", description="Show status")
+            ],
         )
         assert isinstance(tools, CLITools)
         assert [tool.name for tool in tools] == ["fake_status"]
@@ -480,15 +482,13 @@ class TestExplicitCommands:
 
     def test_builds_typed_schema_and_signature(self, tmp_path):
         command = Command(
-            "list_prs",
-            ("pr", "list"),
-            "List pull requests.",
+            command=("pr", "list"),
+            name="list_prs",
+            description="List pull requests.",
             args={
                 "limit": Arg(flag="--limit", type=int, default=30, help="Max rows"),
                 "state": Arg(
-                    flag="--state",
-                    choices=("open", "closed"),
-                    default="open",
+                    flag="--state", choices=("open", "closed"), default="open"
                 ),
                 "label": Arg(flag="--label", repeatable=True),
                 "json": Arg(flag="--json", type=bool),
@@ -517,15 +517,13 @@ class TestExplicitCommands:
 
     def test_maps_arguments_to_argv(self, tmp_path):
         command = Command(
-            "list_prs",
-            ("pr", "list"),
-            "List pull requests.",
+            command=("pr", "list"),
+            name="list_prs",
+            description="List pull requests.",
             args={
                 "limit": Arg(flag="--limit", type=int, default=30),
                 "state": Arg(
-                    flag="--state",
-                    choices=("open", "closed"),
-                    default="open",
+                    flag="--state", choices=("open", "closed"), default="open"
                 ),
                 "label": Arg(flag="--label", repeatable=True),
                 "json": Arg(flag="--json", type=bool),
@@ -544,18 +542,18 @@ class TestExplicitCommands:
             tmp_path,
             commands=[
                 Command(
-                    "view",
-                    ("view",),
-                    "View a pull request.",
+                    command=("view",),
+                    name="view",
+                    description="View a pull request.",
                     args={
                         "number": Arg(positional=0, type=int, help="PR number"),
                         "json": Arg(flag="--json", type=bool),
                     },
                 ),
                 Command(
-                    "many",
-                    ("many",),
-                    "Many paths.",
+                    command=("many",),
+                    name="many",
+                    description="Many paths.",
                     args={"paths": Arg(positional=0, repeatable=True)},
                 ),
             ],
@@ -568,14 +566,12 @@ class TestExplicitCommands:
             tmp_path,
             commands=[
                 Command(
-                    "list_prs",
-                    ("pr", "list"),
-                    "List.",
+                    command=("pr", "list"),
+                    name="list_prs",
+                    description="List.",
                     args={
                         "state": Arg(
-                            flag="--state",
-                            choices=("open", "closed"),
-                            default="open",
+                            flag="--state", choices=("open", "closed"), default="open"
                         ),
                         "limit": Arg(flag="--limit", type=int),
                     },
@@ -592,9 +588,9 @@ class TestExplicitCommands:
             tmp_path,
             commands=[
                 Command(
-                    "pr_list",
-                    "pr list",
-                    "List pull requests.",
+                    command="pr list",
+                    name="pr_list",
+                    description="List pull requests.",
                     args={
                         "state": Option("open", "--state"),
                         "repo": Argument(help="owner/name"),
@@ -610,7 +606,11 @@ class TestExplicitCommands:
         )
         migrate = make(
             tmp_path,
-            commands=[Command("migrate", "db:migrate", "Run migrations.")],
+            commands=[
+                Command(
+                    command="db:migrate", name="migrate", description="Run migrations."
+                )
+            ],
         )[0]
         assert migrate().startswith("ran db:migrate")
 
@@ -619,9 +619,9 @@ class TestExplicitCommands:
             tmp_path,
             commands=[
                 Command(
-                    "pr_list",
-                    "pr list",
-                    "List pull requests.",
+                    command="pr list",
+                    name="pr_list",
+                    description="List pull requests.",
                     args={
                         "repo": Argument(..., help="owner/name"),
                         "state": Option(..., "--state"),
@@ -655,9 +655,9 @@ class TestExplicitCommands:
             tmp_path,
             commands=[
                 Command(
-                    "pair",
-                    ("pair",),
-                    "Pair.",
+                    command=("pair",),
+                    name="pair",
+                    description="Pair.",
                     args={
                         "first": Arg(positional=0, default=None),
                         "second": Arg(positional=1, default=None),
@@ -673,9 +673,9 @@ class TestExplicitCommands:
             tmp_path,
             commands=[
                 Command(
-                    "fail_ok",
-                    ("fail",),
-                    "Fail with an accepted code.",
+                    command=("fail",),
+                    name="fail_ok",
+                    description="Fail with an accepted code.",
                     ok_codes=frozenset({3}),
                 )
             ],
@@ -689,14 +689,12 @@ class TestExplicitCommands:
             tmp_path,
             commands=[
                 Command(
-                    "filtered",
-                    ("filtered",),
-                    "Filtered.",
+                    command=("filtered",),
+                    name="filtered",
+                    description="Filtered.",
                     args={
                         "label": Arg(
-                            flag="--label",
-                            repeatable=True,
-                            default=["default"],
+                            flag="--label", repeatable=True, default=["default"]
                         ),
                         "maybe": Arg(flag="--maybe", default=None),
                     },
@@ -711,22 +709,22 @@ class TestExplicitCommands:
         [
             (
                 Command(
-                    "bad",
-                    ("bad",),
+                    command=("bad",),
+                    name="bad",
                     args={"x": Arg(flag="--x", positional=0)},
                 ),
                 ValueError,
                 "exactly one",
             ),
             (
-                Command("bad", ("bad",), args={"x": Arg()}),
+                Command(command=("bad",), name="bad", args={"x": Arg()}),
                 ValueError,
                 "exactly one",
             ),
             (
                 Command(
-                    "bad",
-                    ("bad",),
+                    command=("bad",),
+                    name="bad",
                     args={"x": Arg(flag="--x", type=bytes)},
                 ),
                 ValueError,
@@ -734,95 +732,79 @@ class TestExplicitCommands:
             ),
             (
                 Command(
-                    "bad",
-                    ("bad",),
-                    args={
-                        "x": Arg(
-                            flag="--x",
-                            type=int,
-                            choices=("1", "2"),
-                        )
-                    },
+                    command=("bad",),
+                    name="bad",
+                    args={"x": Arg(flag="--x", type=int, choices=("1", "2"))},
                 ),
                 ValueError,
                 "choices require type=str",
             ),
             (
                 Command(
-                    "bad",
-                    ("bad",),
+                    command=("bad",),
+                    name="bad",
                     args={"x": Arg(flag="--x", repeatable=True, default="x")},
                 ),
                 ValueError,
                 "repeatable defaults",
             ),
             (
-                Command("bad", ("bad",), args={"x": Arg(flag="x")}),
+                Command(command=("bad",), name="bad", args={"x": Arg(flag="x")}),
                 ValueError,
                 "must start with",
             ),
             (
                 Command(
-                    "bad",
-                    ("bad",),
-                    args={
-                        "x": Arg(flag="--x"),
-                        "y": Arg(flag="--x"),
-                    },
+                    command=("bad",),
+                    name="bad",
+                    args={"x": Arg(flag="--x"), "y": Arg(flag="--x")},
                 ),
                 ValueError,
                 "duplicate flag",
             ),
             (
-                Command("bad", ("bad",), args={"not-valid": Arg(flag="--x")}),
+                Command(
+                    command=("bad",), name="bad", args={"not-valid": Arg(flag="--x")}
+                ),
                 ValueError,
                 "valid identifier",
             ),
             (
                 Command(
-                    "bad",
-                    ("bad",),
-                    args={
-                        "x": Arg(positional=0),
-                        "y": Arg(positional=0),
-                    },
+                    command=("bad",),
+                    name="bad",
+                    args={"x": Arg(positional=0), "y": Arg(positional=0)},
                 ),
                 ValueError,
                 "duplicate positional",
             ),
             (
                 Command(
-                    "bad",
-                    ("bad",),
-                    args={
-                        "x": Arg(positional=0),
-                        "y": Arg(positional=2),
-                    },
+                    command=("bad",),
+                    name="bad",
+                    args={"x": Arg(positional=0), "y": Arg(positional=2)},
                 ),
                 ValueError,
                 "contiguous",
             ),
             (
-                Command("bad", ("bad",), args={"x": Arg(positional=-2)}),
+                Command(command=("bad",), name="bad", args={"x": Arg(positional=-2)}),
                 ValueError,
                 "non-negative",
             ),
             (
                 Command(
-                    "bad",
-                    ("bad",),
-                    args={
-                        "x": Arg(positional=0, default=None),
-                        "y": Arg(positional=1),
-                    },
+                    command=("bad",),
+                    name="bad",
+                    args={"x": Arg(positional=0, default=None), "y": Arg(positional=1)},
                 ),
                 ValueError,
                 "cannot follow an optional",
             ),
             (
                 Command(
-                    "bad",
-                    ("bad",),
+                    command=("bad",),
+                    name="bad",
                     args={
                         "x": Arg(positional=0, repeatable=True),
                         "y": Arg(positional=1),
@@ -831,15 +813,19 @@ class TestExplicitCommands:
                 ValueError,
                 "must be last",
             ),
-            (Command("bad name", ("bad",)), ValueError, "valid identifier"),
-            (Command("bad", ("",)), ValueError, "non-empty strings"),
             (
-                Command("bad", ("bad",), fixed=cast(Any, (1,))),
+                Command(command=("bad",), name="bad name"),
+                ValueError,
+                "valid identifier",
+            ),
+            (Command(command=("",), name="bad"), ValueError, "non-empty strings"),
+            (
+                Command(command=("bad",), name="bad", fixed=cast(Any, (1,))),
                 TypeError,
                 "must be strings",
             ),
             (
-                Command("bad", ("bad",), fixed=cast(Any, "--flag")),
+                Command(command=("bad",), name="bad", fixed=cast(Any, "--flag")),
                 TypeError,
                 "sequence of strings",
             ),
@@ -860,8 +846,8 @@ class TestExplicitCommands:
             make(
                 tmp_path,
                 commands=[
-                    Command("same", ("status",)),
-                    Command("same", ("where",)),
+                    Command(command=("status",), name="same"),
+                    Command(command=("where",), name="same"),
                 ],
             )
 
@@ -872,7 +858,11 @@ class TestExplicitCommands:
             tmp_path,
             env={"FAKE_ENV": "hello"},
             cwd=workdir,
-            commands=[Command("where", ("where",), "Show environment")],
+            commands=[
+                Command(
+                    command=("where",), name="where", description="Show environment"
+                )
+            ],
         )[0]
         result = tool()
         assert "env=hello" in result
