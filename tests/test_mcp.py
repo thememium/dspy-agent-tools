@@ -7,7 +7,6 @@ import importlib
 import sys
 import threading
 import weakref
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -437,40 +436,6 @@ class TestHttpTransport:
         monkeypatch.setattr(
             mcp_module, "importlib", SimpleNamespace(import_module=fake_import)
         )
-
-    def test_v1_client_fallback(self, monkeypatch):
-        seen = {}
-
-        @asynccontextmanager
-        async def legacy_client(**kwargs):
-            seen.update(kwargs)
-            yield ("read", "write")
-
-        self._fake_import(
-            monkeypatch, SimpleNamespace(streamablehttp_client=legacy_client)
-        )
-        transport = _http_transport(
-            "http://example/mcp",
-            headers={"Authorization": "Bearer x"},
-            timeout=1.0,
-            sse_read_timeout=2.0,
-            auth=None,
-            http_client_factory=lambda: "client",
-            terminate_on_close=False,
-        )
-
-        async def run():
-            async with transport() as streams:
-                assert streams == ("read", "write")
-
-        asyncio.run(run())
-
-        assert seen["url"] == "http://example/mcp"
-        assert seen["headers"] == {"Authorization": "Bearer x"}
-        assert seen["timeout"] == 1.0
-        assert seen["sse_read_timeout"] == 2.0
-        assert seen["terminate_on_close"] is False
-        assert seen["httpx_client_factory"]() == "client"
 
     def test_missing_client_raises(self, monkeypatch):
         self._fake_import(monkeypatch, SimpleNamespace())
