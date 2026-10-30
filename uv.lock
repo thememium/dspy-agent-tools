@@ -733,6 +733,7 @@ dependencies = [
 [package.optional-dependencies]
 mcp = [
     { name = "dspy" },
+    { name = "httpx2" },
     { name = "mcp" },
 ]
 
@@ -741,6 +742,7 @@ dev = [
     { name = "bandit" },
     { name = "deptry" },
     { name = "dspy" },
+    { name = "httpx2" },
     { name = "isort" },
     { name = "mcp" },
     { name = "poethepoet" },
@@ -756,6 +758,7 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "ddgs", specifier = ">=9.16.0" },
     { name = "dspy", marker = "extra == 'mcp'", specifier = ">=3.1" },
+    { name = "httpx2", marker = "extra == 'mcp'", specifier = ">=2.10" },
     { name = "markdownify", specifier = ">=1.2.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.9" },
     { name = "plumbum", specifier = ">=2.0.2" },
@@ -769,6 +772,7 @@ dev = [
     { name = "bandit", specifier = ">=1.9.4" },
     { name = "deptry", specifier = ">=0.25.1" },
     { name = "dspy", specifier = ">=3.1" },
+    { name = "httpx2", specifier = ">=2.10" },
     { name = "isort", specifier = ">=9.0.2" },
     { name = "mcp", specifier = ">=1.9" },
     { name = "poethepoet", specifier = ">=0.49.0" },
