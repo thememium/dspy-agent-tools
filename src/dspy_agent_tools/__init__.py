@@ -11,9 +11,11 @@ from .bash import (
     bash_ripgrep_batch,
 )
 from .files import edit_file, read_file, write_file
+from .mcp import MCPTools, mcp
 from .search import web_news, web_search
 
 __all__ = [
+    "MCPTools",
     "bash_curl",
     "bash_exec",
     "bash_fetch",
@@ -25,6 +27,7 @@ __all__ = [
     "bash_ripgrep",
     "bash_ripgrep_batch",
     "edit_file",
+    "mcp",
     "read_file",
     "web_news",
     "web_search",
