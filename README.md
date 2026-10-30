@@ -40,15 +40,12 @@ DSPy Agent Tools is a library of **tool functions** for
 function with a tool-optimized docstring, so you can hand them straight to
 `dspy.ReAct` or `dspy.RLM` — no adapters, no wrappers.
 
-Three families of tools:
+Three built-in tool families, plus an optional MCP bridge:
 
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
-
-It also ships an **MCP bridge** (`dspy_agent_tools.mcp`) that turns local
-stdio or remote Streamable HTTP/SSE MCP servers into lists of DSPy tools you
-can mix with the built-ins.
+- **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
 
 Tools are just Python functions, exactly as
 [DSPy's docs describe](https://dspy.ai/current/getting-started/react-and-tools/#tools-are-just-python-functions):
@@ -57,7 +54,8 @@ assemble the instructions it sends to the LM. These docstrings are written for
 that purpose — each one tells the model WHAT the tool does, WHEN to use it
 instead of a sibling tool, and HOW to pass arguments.
 
-Requires **Python 3.13+** and **DSPy 3.1+**.
+Requires **Python 3.13+**; run agents with **DSPy 3.1+** (the `[mcp]` extra
+installs it).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -85,7 +83,9 @@ binaries, which must be on your PATH. The search tools
 ripgrep's and fd's engines as Python modules — so no `rg`/`fd` binary is
 needed.
 
-The MCP bridge is an optional extra (it pulls in DSPy and MCP SDK 2.x):
+The MCP bridge is an optional extra (it pulls in DSPy, `httpx2`, and MCP
+SDK 2.x). Importing `MCP` works without it; calling `MCP()` raises an
+`ImportError` with the install hint:
 
 ```bash
 uv add "dspy-agent-tools[mcp]"
@@ -211,9 +211,9 @@ from dspy_agent_tools import (
 ### With MCP servers
 
 `MCP` is one wrapper for every transport. It starts the server, converts every
-tool it advertises into a `dspy.Tool`, and returns them as a list. The server
-keeps running while the tools are referenced, so repeated calls reuse one
-session:
+tool it advertises into a `dspy.Tool`, and returns them as an `MCPTools` list.
+The server keeps running while the tools are referenced, so repeated calls
+reuse one session:
 
 ```python
 import dspy
@@ -245,7 +245,8 @@ tools = MCP(
 legacy = MCP(url="https://example.com/sse", transport="sse")
 ```
 
-- `MCP(command=..., args=[...])` runs a local **stdio** server.
+- `MCP(command=..., args=[...])` runs a local **stdio** server; `env=` and
+  `cwd=` configure its environment and working directory.
 - `MCP(url=...)` connects over **Streamable HTTP**, the transport used by most
   hosted MCP servers.
 - `MCP(url=..., transport="sse")` connects over legacy **HTTP+SSE**.
@@ -255,9 +256,30 @@ legacy = MCP(url="https://example.com/sse", transport="sse")
 - `transport="auto"` (the default) infers the transport from `command=` vs
   `url=`; pass `"stdio"`, `"http"`, or `"sse"` to be explicit.
 
-All transports accept `headers`, `auth`, `timeout`, `startup_timeout`,
-`name_prefix`, and `result_mode`; remote transports also accept
-`http_client_factory` for custom HTTP clients (proxies, OAuth providers).
+Every transport accepts `startup_timeout` (seconds to wait for initialization
+and tool listing, default 60), `name_prefix` (prepended to every tool name),
+and `result_mode`: `"text"` (default) flattens MCP text content to strings,
+`"structured"` returns the server's `structuredContent` when it provides it.
+The stdio transport ignores the HTTP-only options.
+
+Remote transports (`url=`, `transport="http"` or `"sse"`) additionally accept:
+
+- `headers` — extra HTTP headers such as an `Authorization` bearer token.
+- `timeout` — HTTP timeout; defaults to 30 s for Streamable HTTP and 5 s for
+  legacy SSE.
+- `sse_read_timeout` — how long to wait on the server stream (default 300 s).
+- `auth` — an `httpx`/`httpx2` auth handler, e.g. an MCP OAuth client
+  provider.
+- `http_client_factory` — zero-argument callable returning an async HTTP
+  client, created and closed on the connection's event loop. For Streamable
+  HTTP it replaces the default client, so `headers`, `timeout`, and `auth`
+  are then ignored; for legacy SSE it is passed to the SDK as
+  `httpx_client_factory` alongside the other options.
+- `terminate_on_close` — ask the server to terminate the HTTP session on close
+  (Streamable HTTP only, default `True`).
+
+For legacy SSE, `headers`, `timeout`, `sse_read_timeout`, and `auth` are only
+forwarded when the installed MCP SDK's `sse_client` accepts them.
 
 Both paths work out of the box: `agent(...)` synchronously converts the
 async MCP calls (scoped to those tools, no global DSPy setting), and
