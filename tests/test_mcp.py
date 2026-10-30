@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import gc
 import importlib
+import inspect
 import sys
 import threading
 import weakref
@@ -14,6 +15,7 @@ from typing import Any, cast
 import dspy
 import pytest
 from dspy.utils.dummies import DummyLM
+from mcp.types import Tool as MCPTool
 
 from dspy_agent_tools import MCP, MCPTools
 from dspy_agent_tools.mcp import (
@@ -55,6 +57,11 @@ class TestFactory:
         assert by_name["add"].desc == "Add two integers and return the sum."
         assert by_name["add"].args["a"]["type"] == "integer"
         assert by_name["echo"].args["text"]["type"] == "string"
+
+    def test_exposes_real_python_signatures(self, tools):
+        by_name = {tool.name: tool for tool in tools}
+        assert str(inspect.signature(by_name["add"].func)) == "(a: int, b: int)"
+        assert str(inspect.signature(by_name["echo"].func)) == "(text: str)"
 
     def test_name_prefix(self):
         with start(name_prefix="srv_") as tools:
@@ -348,6 +355,70 @@ class TestInternals:
             MCP(command="irrelevant")
 
         assert closed == [True]
+
+    def test_mcp_tools_expose_schema_signatures(self):
+        class Session:
+            def __init__(self):
+                self.arguments = None
+
+            async def call_tool(self, name, arguments=None):
+                self.arguments = arguments
+                return SimpleNamespace(content=[], is_error=False)
+
+        advertised = MCPTool(
+            name="search",
+            description="Search things.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "default": 10},
+                    "note": {"type": "string"},
+                },
+                "required": ["query"],
+            },
+        )
+        session = Session()
+        base = dspy.Tool.from_mcp_tool(session, advertised)
+        tool = mcp_module._as_sync_capable(
+            base,
+            mcp_module._mcp_signature(
+                advertised, base.args or {}, base.arg_types or {}
+            ),
+        )
+
+        signature = inspect.signature(tool.func)
+        assert list(signature.parameters) == ["query", "limit", "note"]
+        assert signature.parameters["query"].default is inspect.Parameter.empty
+        assert signature.parameters["limit"].default == 10
+        assert signature.parameters["note"].default is None
+
+        assert tool(query="dspy", limit=None, note=None) == []
+        assert session.arguments == {"query": "dspy"}
+        assert asyncio.run(tool.acall(query="rlm", limit=None, note=None)) == []
+        assert session.arguments == {"query": "rlm"}
+
+    def test_mcp_signature_tolerates_alternate_schemas(self):
+        signature = mcp_module._mcp_signature(
+            SimpleNamespace(inputSchema={}),
+            {"query": {"type": "string"}},
+            {"query": str},
+        )
+        assert list(signature.parameters) == ["query"]
+
+        assert (
+            mcp_module._mcp_signature(
+                SimpleNamespace(input_schema="not a schema"), {}, {}
+            )
+            == inspect.Signature()
+        )
+
+        flagged = mcp_module._mcp_signature(
+            SimpleNamespace(input_schema={"properties": {"flag": True}}),
+            {"flag": {"type": "boolean"}},
+            {"flag": bool},
+        )
+        assert flagged.parameters["flag"].default is None
 
 
 class TestTransportSelection:

@@ -110,15 +110,66 @@ def _sync_tool_class() -> type[Tool]:
         class _SyncCapableTool(Tool):
             def __call__(self, **kwargs: Any) -> Any:
                 with dspy.context(allow_tool_async_sync_conversion=True):
-                    return super().__call__(**kwargs)
+                    return super().__call__(**self._without_nulls(kwargs))
+
+            async def acall(self, **kwargs: Any) -> Any:
+                return await super().acall(**self._without_nulls(kwargs))
+
+            @staticmethod
+            def _without_nulls(kwargs: dict[str, Any]) -> dict[str, Any]:
+                """Treat ``None`` as "not supplied"; MCP schemas reject explicit nulls."""
+                return {
+                    name: value for name, value in kwargs.items() if value is not None
+                }
 
         _SYNC_TOOL_CLASS = _SyncCapableTool
     return _SYNC_TOOL_CLASS
 
 
-def _as_sync_capable(tool: Tool) -> Tool:
+def _mcp_signature(
+    tool: Any,
+    args: dict[str, Any],
+    arg_types: dict[str, Any],
+) -> inspect.Signature:
+    """Build a real Python signature for an MCP tool's arguments.
+
+    ``Tool.from_mcp_tool`` wraps every tool in ``async def func(*args,
+    **kwargs)``, so anything introspecting the callable (``dspy.RLM``'s
+    interpreter registers sandbox tools from ``inspect.signature``) sees a
+    generic ``(args, kwargs)`` wrapper instead of the tool's parameters.
+    """
+    schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None)
+    if not isinstance(schema, dict):
+        schema = {}
+    properties = schema.get("properties") or {}
+    required = set(schema.get("required") or ())
+
+    # Required parameters come first so the signature stays valid Python when
+    # optional parameters carry defaults.
+    ordered = [name for name in args if name in required]
+    ordered += [name for name in args if name not in required]
+
+    parameters = []
+    for name in ordered:
+        parameter = inspect.Parameter(
+            name,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            annotation=arg_types.get(name, Any),
+        )
+        if name not in required:
+            prop = properties.get(name)
+            parameter = parameter.replace(
+                default=prop.get("default") if isinstance(prop, dict) else None
+            )
+        parameters.append(parameter)
+    return inspect.Signature(parameters)
+
+
+def _as_sync_capable(tool: Tool, signature: inspect.Signature | None = None) -> Tool:
     """Rebuild an MCP tool so its synchronous path also works."""
     cls = _sync_tool_class()
+    if signature is not None:
+        cast(Any, tool.func).__signature__ = signature
     return cls(
         func=tool.func,
         name=tool.name,
@@ -468,10 +519,13 @@ def _build_tools(
             raise RuntimeError("MCP server failed to initialize")
         listed = connection.run(session.list_tools())
         proxy = _SessionProxy(connection)
-        tools = [
-            _as_sync_capable(Tool.from_mcp_tool(proxy, tool, result_mode=result_mode))
-            for tool in listed.tools
-        ]
+        tools = []
+        for advertised in listed.tools:
+            tool = Tool.from_mcp_tool(proxy, advertised, result_mode=result_mode)
+            signature = _mcp_signature(
+                advertised, tool.args or {}, tool.arg_types or {}
+            )
+            tools.append(_as_sync_capable(tool, signature))
         if name_prefix:
             for tool in tools:
                 tool.name = f"{name_prefix}{tool.name}"
