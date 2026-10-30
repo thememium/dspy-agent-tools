@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.6 (2026-10-30)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.5...v0.1.6)
+
+### 🚀 Enhancements
+
+- **search**: add failover search with retries and status ([12c6983](https://github.com/thememium/dspy-agent-tools/commit/12c6983244129ba4c95cb8e73085311622efc7cd))
+
+### 📖 Documentation
+
+- **readme**: update Search section to show multi‑engine web and news search with failover ([6b489c2](https://github.com/thememium/dspy-agent-tools/commit/6b489c22abfb766a2fd298205d35a48e22b79c70))
+
+### ✅ Tests
+
+- **search**: extend test coverage for search utilities ([f027d06](https://github.com/thememium/dspy-agent-tools/commit/f027d06dfe88ff6985fe175f557a0d2275de0c12))
+
+### Other Changes
+
+- Merge pull request #6 from thememium/eboswell/feat/improved-web-search-engines-retries-failovers (#6) ([1293280](https://github.com/thememium/dspy-agent-tools/commit/12932809774bb3bd2cd1eafc497b4cfb3ae37e21))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.5 (2026-10-19)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.4...v0.1.5)
