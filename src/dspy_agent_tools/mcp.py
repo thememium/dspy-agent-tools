@@ -510,44 +510,17 @@ def mcp_transport(
     )
 
 
-def mcp_http(
+def _http_transport(
     url: str,
     *,
-    headers: dict[str, str] | None = None,
-    timeout: float = 30.0,
-    sse_read_timeout: float = 300.0,
-    auth: Any = None,
-    http_client_factory: Any = None,
-    terminate_on_close: bool = True,
-    startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
-    name_prefix: str = "",
-    result_mode: Literal["text", "structured"] = "text",
-) -> MCPTools:
-    """Connect to a remote MCP server over Streamable HTTP.
-
-    This is the transport used by most hosted MCP servers (including OAuth
-    providers); the legacy HTTP+SSE transport is :func:`mcp_sse`.
-
-    Args:
-        url: Server endpoint, e.g. ``"https://example.com/mcp"``.
-        headers: Extra HTTP headers, e.g. an ``Authorization`` bearer token.
-        timeout: HTTP timeout for regular requests, in seconds.
-        sse_read_timeout: How long to wait for the server stream, in seconds.
-        auth: Optional ``httpx``/``httpx2`` auth handler (for example an MCP
-            OAuth client provider).
-        http_client_factory: Optional zero-argument callable returning an async
-            HTTP client. It is created and closed on the connection's event
-            loop, so it is safe for clients with loop affinity. When given,
-            ``headers``, ``timeout``, and ``auth`` are ignored.
-        terminate_on_close: Ask the server to terminate the session on close.
-        startup_timeout: Seconds to wait for initialization and tool listing.
-        name_prefix: Prepended to every tool name.
-        result_mode: ``"text"`` flattens MCP text content; ``"structured"``
-            returns ``structuredContent`` when the server provides it.
-
-    Returns:
-        An :class:`MCPTools` list of ``dspy.Tool`` owning the live session.
-    """
+    headers: dict[str, str] | None,
+    timeout: float,
+    sse_read_timeout: float,
+    auth: Any,
+    http_client_factory: Any,
+    terminate_on_close: bool,
+) -> Callable[[], Any]:
+    """Build the Streamable HTTP transport context-manager factory."""
 
     @asynccontextmanager
     async def transport():
@@ -597,13 +570,95 @@ def mcp_http(
         ):
             yield streams
 
+    return transport
+
+
+def mcp_http(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+    sse_read_timeout: float = 300.0,
+    auth: Any = None,
+    http_client_factory: Any = None,
+    terminate_on_close: bool = True,
+    startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
+    name_prefix: str = "",
+    result_mode: Literal["text", "structured"] = "text",
+) -> MCPTools:
+    """Connect to a remote MCP server over Streamable HTTP.
+
+    This is the transport used by most hosted MCP servers (including OAuth
+    providers); the legacy HTTP+SSE transport is :func:`mcp_sse`.
+
+    Args:
+        url: Server endpoint, e.g. ``"https://example.com/mcp"``.
+        headers: Extra HTTP headers, e.g. an ``Authorization`` bearer token.
+        timeout: HTTP timeout for regular requests, in seconds.
+        sse_read_timeout: How long to wait for the server stream, in seconds.
+        auth: Optional ``httpx``/``httpx2`` auth handler (for example an MCP
+            OAuth client provider).
+        http_client_factory: Optional zero-argument callable returning an async
+            HTTP client. It is created and closed on the connection's event
+            loop, so it is safe for clients with loop affinity. When given,
+            ``headers``, ``timeout``, and ``auth`` are ignored.
+        terminate_on_close: Ask the server to terminate the session on close.
+        startup_timeout: Seconds to wait for initialization and tool listing.
+        name_prefix: Prepended to every tool name.
+        result_mode: ``"text"`` flattens MCP text content; ``"structured"``
+            returns ``structuredContent`` when the server provides it.
+
+    Returns:
+        An :class:`MCPTools` list of ``dspy.Tool`` owning the live session.
+    """
+
     return _build_tools(
-        transport,
+        _http_transport(
+            url,
+            headers=headers,
+            timeout=timeout,
+            sse_read_timeout=sse_read_timeout,
+            auth=auth,
+            http_client_factory=http_client_factory,
+            terminate_on_close=terminate_on_close,
+        ),
         label=url,
         startup_timeout=startup_timeout,
         name_prefix=name_prefix,
         result_mode=result_mode,
     )
+
+
+def _sse_transport(
+    url: str,
+    *,
+    headers: dict[str, str] | None,
+    timeout: float,
+    sse_read_timeout: float,
+    auth: Any,
+    httpx_client_factory: Any,
+) -> Callable[[], Any]:
+    """Build the legacy HTTP+SSE transport context-manager factory."""
+
+    @asynccontextmanager
+    async def transport():
+        from mcp.client.sse import sse_client
+
+        options = _accepted_kwargs(
+            sse_client,
+            url=url,
+            headers=headers,
+            timeout=timeout,
+            sse_read_timeout=sse_read_timeout,
+            auth=auth,
+        )
+        if httpx_client_factory is not None:
+            options["httpx_client_factory"] = _zero_arg_factory(httpx_client_factory)
+
+        async with sse_client(**options) as streams:
+            yield streams
+
+    return transport
 
 
 def mcp_sse(
@@ -642,26 +697,15 @@ def mcp_sse(
         An :class:`MCPTools` list of ``dspy.Tool`` owning the live session.
     """
 
-    @asynccontextmanager
-    async def transport():
-        from mcp.client.sse import sse_client
-
-        options = _accepted_kwargs(
-            sse_client,
-            url=url,
+    return _build_tools(
+        _sse_transport(
+            url,
             headers=headers,
             timeout=timeout,
             sse_read_timeout=sse_read_timeout,
             auth=auth,
-        )
-        if httpx_client_factory is not None:
-            options["httpx_client_factory"] = _zero_arg_factory(httpx_client_factory)
-
-        async with sse_client(**options) as streams:
-            yield streams
-
-    return _build_tools(
-        transport,
+            httpx_client_factory=httpx_client_factory,
+        ),
         label=url,
         startup_timeout=startup_timeout,
         name_prefix=name_prefix,
