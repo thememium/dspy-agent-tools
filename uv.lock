@@ -762,7 +762,7 @@ requires-dist = [
     { name = "markdownify", specifier = ">=1.2.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2" },
     { name = "plumbum", specifier = ">=2.0.2" },
-    { name = "rgapi", specifier = ">=0.2.2" },
+    { name = "rgapi", specifier = ">=0.2.3" },
     { name = "tree-sitter-language-pack", specifier = ">=1.22.1" },
 ]
 provides-extras = ["mcp"]
@@ -2360,16 +2360,16 @@ wheels = [
 
 [[package]]
 name = "rgapi"
-version = "0.2.2"
+version = "0.2.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastcore" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/12/c5/0cc199ac0a2ba8835c77ab94b9c03f11a4860fd1dde3d0ba99d29c9ff2bb/rgapi-0.2.2.tar.gz", hash = "sha256:b3e5cd1944d071a13deed545209afdafb7bdd684a927281ab1224dbb1d663d04", size = 66948, upload-time = "2026-10-09T20:10:13.561Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0d/c7/140622223d410b8508304e607ef7bfc5b566c9fa5f1e13f2611adfe1e5aa/rgapi-0.2.3.tar.gz", hash = "sha256:02d820220ec3e5e2812ff562eeaa595d42a2537d8790cd41cbb2d190e4e96a3c", size = 67383, upload-time = "2026-10-25T02:37:41.894Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/19/b9/7f15ab84c462f4785a45dd0d6725c09be0f17082dcedcf3affb9af76c8e5/rgapi-0.2.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:dc0182301f5a417bd189ece7667ed2f694b8836ff9d71d4d5742d23874e40513", size = 1435324, upload-time = "2026-10-09T20:10:08.288Z" },
-    { url = "https://files.pythonhosted.org/packages/58/6f/f602f24568c3e53309d358094cc212ec9c51620f106a89964c84bc28475f/rgapi-0.2.2-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:442ada95168110c1aea7c39f96ca51d4ff2ad0d6658daf8c4a1ed60a6b8dd3af", size = 1555773, upload-time = "2026-10-09T20:10:10.002Z" },
-    { url = "https://files.pythonhosted.org/packages/45/5e/356e87c21675bf2b3d7c6833979be912b86e0c08e3054bbdf07248e833c9/rgapi-0.2.2-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d9ff58cad69b94680dfa8753663bfb4c303b1c80b67c8226cf57990cfd1076e6", size = 1594298, upload-time = "2026-10-09T20:10:11.799Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/4f/717c9781d116fb0a4a30ad847a3a6a171285daab4af189a1657f7d156d88/rgapi-0.2.3-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:e691abb41bff7d49a944361ef5d855d617e8c489048749d49a597e9f8ce75786", size = 1454142, upload-time = "2026-10-25T02:37:37.33Z" },
+    { url = "https://files.pythonhosted.org/packages/bd/87/ae49f8577ebbb2547a41b3cc9b63eb7eba5b9429be2f32ec60720efb101d/rgapi-0.2.3-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4a71b2008a5aae6358a435560221c0a80251d7f7575dcbd016e70d6673895211", size = 1572454, upload-time = "2026-10-25T02:37:38.647Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/c6/fd2d46c04488589c9b0ff16d955dabdc74efb3f1d5ac62e10365fe97d092/rgapi-0.2.3-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ee3c68c62630d230cd9009e24169705ebee09d7d28846050fbfe7fdea1d6ac36", size = 1614647, upload-time = "2026-10-25T02:37:40.024Z" },
 ]
 
 [[package]]

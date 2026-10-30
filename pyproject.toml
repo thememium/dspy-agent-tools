@@ -17,7 +17,7 @@ dependencies = [
   "ddgs>=9.16.0",
   "markdownify>=1.2.3",
   "plumbum>=2.0.2",
-  "rgapi>=0.2.2",
+  "rgapi>=0.2.3",
   "tree-sitter-language-pack>=1.22.1",
 ]
 
