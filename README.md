@@ -44,7 +44,7 @@ Three families of tools:
 
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
-- **Search** — DuckDuckGo web and news search
+- **Search** — multi-engine web and news search with failover and explicit outcomes
 
 Tools are just Python functions, exactly as
 [DSPy's docs describe](https://dspy.ai/current/getting-started/react-and-tools/#tools-are-just-python-functions):
@@ -267,8 +267,16 @@ bash_ripgrep_batch(
 
 | Tool | Use it for |
 | --- | --- |
-| **`web_search`** | DuckDuckGo web search. Returns `{"query", "results": [{"title", "href", "body"}], "count"}`. `timelimit`: `"d"`, `"w"`, `"m"`, `"y"`, or `None`. |
-| **`web_news`** | DuckDuckGo News search; results add `source` and `date`. Same `timelimit` values. |
+| **`web_search`** | Web search across ddgs engines in failover order. Returns `{"query", "results": [{"title", "href", "body"}], "count", "status"}`. `timelimit`: `"d"`, `"w"`, `"m"`, `"y"`, or `None`. |
+| **`web_news`** | News search; results add `source` and `date`. Same `timelimit` values and `status` contract. |
+
+`status` is `ok`, `no_results` (engines answered but found nothing), or
+`error` (no engine answered; `error` then carries the attempt count). An
+engine that returns no results is retried with a fresh client, because ddgs
+randomizes its browser profile and a mobile profile can hide results the
+parser cannot read. An engine with a transport failure is skipped for the
+rest of the search and the next engine is tried. The whole search shares a
+45 s budget.
 
 Shared behaviour across the bash tools:
 
