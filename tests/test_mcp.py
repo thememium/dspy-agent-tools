@@ -1,16 +1,32 @@
 """Tests for dspy_agent_tools.mcp."""
 
 import asyncio
+import concurrent.futures
 import gc
+import importlib
 import sys
+import threading
 import weakref
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import dspy
 import pytest
 from dspy.utils.dummies import DummyLM
 
 from dspy_agent_tools import MCPTools, mcp
+from dspy_agent_tools.mcp import (
+    _accepted_kwargs,
+    _close_all,
+    _Connection,
+    _http_transport,
+    _read_write,
+    _SessionProxy,
+)
+
+mcp_module = importlib.import_module("dspy_agent_tools.mcp")
 
 SERVER = Path(__file__).parent / "fixtures" / "mcp_server.py"
 
@@ -198,3 +214,205 @@ class TestLifecycle:
         slow = Path(__file__).parent / "fixtures" / "slow_server.py"
         with pytest.raises(TimeoutError, match="did not initialize"):
             mcp(sys.executable, str(slow), startup_timeout=0.5)
+
+    def test_startup_failure_propagates(self):
+        broken = Path(__file__).parent / "fixtures" / "broken_server.py"
+        with pytest.raises(ExceptionGroup):
+            mcp(sys.executable, str(broken))
+
+    def test_async_context_manager_closes(self):
+        tools = start()
+
+        async def run():
+            async with tools as entered:
+                assert entered is tools
+            with pytest.raises(RuntimeError, match="MCP server is closed"):
+                await tools[0].acall(a=1, b=1)
+
+        asyncio.run(run())
+
+    def test_close_all_stops_live_connections(self):
+        tools = start()
+        _close_all()
+        with pytest.raises(RuntimeError, match="MCP server is closed"):
+            asyncio.run(tools[0].acall(a=1, b=1))
+
+
+class _FakeFuture:
+    """Stand-in for a ``run_coroutine_threadsafe`` future."""
+
+    def __init__(self, outcomes: list[BaseException | Any]) -> None:
+        self.outcomes = outcomes
+        self.cancelled = False
+
+    def done(self) -> bool:
+        return False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def result(self, timeout=None):
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def _bare_connection(serve_future: Any) -> Any:
+    connection: Any = object.__new__(_Connection)
+    connection._closed = False
+    connection._state = SimpleNamespace(stop=None)
+    connection._serve_future = serve_future
+    connection._loop = asyncio.new_event_loop()
+    connection._thread = threading.current_thread()
+    connection._session = object()
+    return connection
+
+
+class TestInternals:
+    def test_accepted_kwargs_keeps_kwargs_for_var_keyword(self):
+        def accepts_all(**kwargs):
+            return kwargs
+
+        assert _accepted_kwargs(accepts_all, a=1, b=2) == {"a": 1, "b": 2}
+
+    def test_accepted_kwargs_filters_unknown_kwargs(self):
+        def narrow(url, timeout=1):
+            return url
+
+        assert _accepted_kwargs(narrow, url="u", timeout=2, extra=3) == {
+            "url": "u",
+            "timeout": 2,
+        }
+
+    def test_read_write_accepts_stream_objects(self):
+        streams = SimpleNamespace(read="read", write="write")
+        assert _read_write(streams) == ("read", "write")
+
+    def test_proxy_cancellation_cancels_remote_call(self):
+        class HangingSession:
+            async def call_tool(self, name, arguments=None):
+                await asyncio.Event().wait()
+
+        class FakeConnection:
+            closed = False
+            session = HangingSession()
+            loop = None
+
+        async def run():
+            connection = FakeConnection()
+            connection.loop = asyncio.get_running_loop()
+            proxy = _SessionProxy(cast(Any, connection))
+            task = asyncio.create_task(proxy.call_tool("tool", {}))
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(run())
+
+    def test_close_cancels_after_shutdown_timeout(self):
+        future = _FakeFuture([concurrent.futures.TimeoutError(), RuntimeError("late")])
+        connection = _bare_connection(future)
+        connection.close()
+
+        assert future.cancelled
+        connection._loop.close()
+
+    def test_close_swallows_shutdown_errors(self):
+        future = _FakeFuture([RuntimeError("boom")])
+        connection = _bare_connection(future)
+        connection.close()
+
+        connection._loop.close()
+
+    def test_del_swallows_close_errors(self):
+        connection: Any = object.__new__(_Connection)
+        connection._closed = False
+        connection._state = object()  # no ``stop`` attribute
+
+        _Connection.__del__(connection)
+
+    def test_build_tools_requires_a_session(self, monkeypatch):
+        closed = []
+
+        class NoSessionConnection:
+            def __init__(self, *args, **kwargs):
+                self.session = None
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(mcp_module, "_Connection", NoSessionConnection)
+
+        with pytest.raises(RuntimeError, match="failed to initialize"):
+            mcp("irrelevant")
+
+        assert closed == [True]
+
+
+class TestHttpTransport:
+    def _fake_import(self, monkeypatch, module):
+        real_import = importlib.import_module
+
+        def fake_import(name, package=None):
+            if name == "mcp.client.streamable_http":
+                return module
+            return real_import(name, package)
+
+        monkeypatch.setattr(
+            mcp_module, "importlib", SimpleNamespace(import_module=fake_import)
+        )
+
+    def test_v1_client_fallback(self, monkeypatch):
+        seen = {}
+
+        @asynccontextmanager
+        async def legacy_client(**kwargs):
+            seen.update(kwargs)
+            yield ("read", "write")
+
+        self._fake_import(
+            monkeypatch, SimpleNamespace(streamablehttp_client=legacy_client)
+        )
+        transport = _http_transport(
+            "http://example/mcp",
+            headers={"Authorization": "Bearer x"},
+            timeout=1.0,
+            sse_read_timeout=2.0,
+            auth=None,
+            http_client_factory=lambda: "client",
+            terminate_on_close=False,
+        )
+
+        async def run():
+            async with transport() as streams:
+                assert streams == ("read", "write")
+
+        asyncio.run(run())
+
+        assert seen["url"] == "http://example/mcp"
+        assert seen["headers"] == {"Authorization": "Bearer x"}
+        assert seen["timeout"] == 1.0
+        assert seen["sse_read_timeout"] == 2.0
+        assert seen["terminate_on_close"] is False
+        assert seen["httpx_client_factory"]() == "client"
+
+    def test_missing_client_raises(self, monkeypatch):
+        self._fake_import(monkeypatch, SimpleNamespace())
+        transport = _http_transport(
+            "http://example/mcp",
+            headers=None,
+            timeout=1.0,
+            sse_read_timeout=2.0,
+            auth=None,
+            http_client_factory=None,
+            terminate_on_close=True,
+        )
+
+        async def run():
+            async with transport():
+                pass
+
+        with pytest.raises(ImportError, match="Streamable HTTP client"):
+            asyncio.run(run())
