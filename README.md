@@ -46,7 +46,7 @@ optional MCP bridge:
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
-- **CLI** — `CLI("gh")` turns any executable into a three-tool discovery facade (`search_commands`, `get_command_help`, `run_command`). The CLI's own help is the schema; commands are discovered lazily and cached, with no per-command spec and no shell.
+- **CLI** — `CLI("gh")` turns any executable into a three-tool discovery facade (`search_commands`, `get_command_help`, `run_command`); pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable.
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
 - **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
 
@@ -300,9 +300,9 @@ earlier.
 
 ### With any CLI
 
-`CLI` wraps an executable that has no MCP server. Instead of a spec for every
-command, it exposes a three-tool discovery facade and reads the program's own
-`--help` on demand:
+`CLI` wraps an executable that has no MCP server. By default it exposes a
+three-tool discovery facade and reads the program's own `--help` on demand;
+pass `commands=` to define typed tools explicitly instead (see below).
 
 ```python
 import dspy
@@ -356,6 +356,70 @@ are exact rather than inferred.
 `CLI` is already a discovery facade: pass its tools directly to the agent
 instead of wrapping them in `Toolbox(mode="search")`. Use `Toolbox` when you
 need to combine them with other tools under one catalog.
+
+#### Explicit commands
+
+If you know exactly which commands the agent needs, pass `commands=` and skip
+`--help` discovery entirely. Each `Command` becomes one typed `dspy.Tool`:
+
+```python
+from dspy_agent_tools import Argument, CLI, Command, Option
+
+gh = CLI(
+    "gh",
+    commands=[
+        Command(
+            "pr_list",
+            "pr list",
+            "List pull requests in a repository.",
+            args={
+                "repo": Argument(help="owner/name"),
+                "state": Option(
+                    "open", "--state", choices=("open", "closed", "merged")
+                ),
+                "limit": Option(30, "--limit", type=int),
+                "label": Option("--label", repeatable=True),
+                "draft": Option("--draft", is_flag=True),
+            },
+            fixed=("--json",),
+        )
+    ],
+)
+# gh == [gh_pr_list]; no search_commands/get_command_help/run_command.
+```
+
+`commands=` replaces discovery for that CLI group; the three `--help` tools are
+not created. Each tool name is `name_prefix + Command.name` (default prefix is
+the executable name).
+
+`Argument` and `Option` are the usecli-style helpers; the lower-level `Arg`
+remains available when you want to set `positional=` or `flag=` directly.
+
+- `Argument(...)` is a required positional; `Argument(default=...)` is
+  optional. Positional indices are assigned in `Command.args` order. Indices
+  must be contiguous, required positionals must come before optional ones,
+  and a repeatable positional must be last.
+- `Option("--limit", default=30, type=int)` becomes `--limit VALUE`. The
+  usecli form `Option(30, "--limit", type=int)` works too.
+- `Option("--verbose", is_flag=True)` becomes `--verbose` when true and is
+  omitted when false.
+- `Option("...", "--state")` / `Option(..., "--state")` marks a required
+  option.
+- `type=` is `str`, `int`, `float`, or `bool`.
+- `default=` makes an argument optional. Boolean flags default to `False` and
+  repeatable flags default to empty when no default is given; every other
+  argument is required.
+- `repeatable=True` repeats the flag for each value in a list.
+- `choices=` adds an enum to the schema.
+- `fixed=` adds always-present argv items, such as `("--json",)`.
+- `ok_codes=` suppresses the `[exit code N]` notice for accepted exits.
+- `Command.path` accepts `"pr list"`, `"db:migrate"` (one token), or
+  `("pr", "list")`.
+
+Arguments are built as
+`[executable, *base_args, *command.path, *positionals, *fixed, *flags]` and
+run without a shell. Explicit commands do not probe `--help`, so they also
+work for hidden commands and plugin commands that do not appear in help.
 
 ### Tool discovery with Toolbox
 
@@ -557,7 +621,8 @@ Shared behaviour across the bash tools:
 ### CLI (`dspy_agent_tools.cli`)
 
 `CLI(executable, ...)` returns three generated `dspy.Tool`s. Names are
-prefixed by the executable (or `name_prefix`):
+prefixed by the executable (or `name_prefix`). With `commands=[...]`, it
+returns one tool per explicit `Command` instead and skips discovery:
 
 | Tool | Use it for |
 | --- | --- |
