@@ -164,6 +164,31 @@ class TestSearchMode:
         assert "sum(a, b): Add numbers." in by_name(box)["search_tools"](query="sum")
 
 
+class TestFullLoad:
+    def test_default_mode_returns_every_tool(self):
+        box = Toolbox([add, greet])
+        assert box.mode is None
+        assert {tool.name for tool in box} == {"add", "greet"}
+        assert by_name(box)["add"](a=2, b=3) == 5
+
+    def test_default_mode_reuses_tool_objects(self):
+        tool = dspy.Tool(add)
+        box = Toolbox(tool)
+        assert box[0] is tool
+
+    def test_default_mode_applies_name_prefix(self):
+        box = Toolbox([dspy.Tool(add)], name_prefix="local_")
+        assert [tool.name for tool in box] == ["local_add"]
+        assert box[0](a=1, b=2) == 3
+
+    def test_default_mode_owns_sources(self):
+        closer = _Closer()
+        box = Toolbox(MCPTools([dspy.Tool(add)], [closer]))
+
+        box.close()
+        assert closer.closed
+
+
 class TestCodeMode:
     def test_returns_structured_search_and_details(self):
         box = Toolbox([add, greet], mode="code")
