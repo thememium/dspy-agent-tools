@@ -40,11 +40,13 @@ DSPy Agent Tools is a library of **tool functions** for
 function with a tool-optimized docstring, so you can hand them straight to
 `dspy.ReAct` or `dspy.RLM` — no adapters, no wrappers.
 
-Three built-in tool families, plus a generic Toolbox and optional MCP bridge:
+Three built-in tool families, plus a generic Toolbox, a CLI bridge, and an
+optional MCP bridge:
 
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
+- **CLI** — `CLI("gh")` turns any executable into a three-tool discovery facade (`search_commands`, `get_command_help`, `run_command`). The CLI's own help is the schema; commands are discovered lazily and cached, with no per-command spec and no shell.
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
 - **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
 
@@ -296,6 +298,65 @@ earlier.
   concatenating with `+` on either side, and unpacking all work. It is also a
   context manager (`with MCP(...) as tools:`) that closes the server on exit.
 
+### With any CLI
+
+`CLI` wraps an executable that has no MCP server. Instead of a spec for every
+command, it exposes a three-tool discovery facade and reads the program's own
+`--help` on demand:
+
+```python
+import dspy
+from dspy_agent_tools import CLI, bash_exec
+
+gh = CLI("gh")
+agent = dspy.ReAct("question -> answer", tools=gh + [bash_exec])
+
+worker = dspy.RLM("task -> report", tools=CLI("docker", mode="code"))
+```
+
+| Tool | Purpose |
+| --- | --- |
+| `search_commands(query, limit=8)` | Rank known command paths and one-line descriptions. Only the best matching branches are expanded. |
+| `get_command_help(command="")` | Usage, subcommands, a parsed flag table, and the raw help for one path. `command=""` is the executable itself. |
+| `run_command(command="", args=[])` | Execute `[executable, *base_args, *command_path, *args]`; no shell. |
+
+Discovery starts on the first tool call, not when `CLI()` is called. Every
+help page is cached; `tools.refresh()` drops the cache. A search expands at
+most `max_expands` pages to depth `max_depth`, so searching for `pr list`
+costs two help calls (root, then `pr`); asking for its details then fetches
+`pr list`. Nothing walks the whole tree.
+
+```python
+git = CLI("git")
+tools = {tool.name: tool for tool in git}
+tools["git_search_commands"](query="status")
+tools["git_get_command_help"](command="status")
+tools["git_run_command"](command="status", args=["--short"])
+```
+
+- `base_args=["-m", "mytool"]` handles wrappers such as `python -m mytool`.
+- `name_prefix` defaults to the executable name (`gh_`).
+- `cwd`, `env`, and `timeout` configure execution; `help_timeout` bounds each
+  discovery call; `max_help_chars` caps the raw help in `get_command_help`.
+- `mode="search"` (default) returns text for `dspy.ReAct`; `mode="code"`
+  returns `list[dict]` / `dict` for `dspy.RLM`.
+
+The parsed flag table is best-effort. `--help` is the schema, and the raw help
+is authoritative: positional grammars such as kubectl's usage line are
+returned as text rather than turned into a fake JSON schema. Discovery runs
+with pagers disabled; when `--help` opens a man page (git) or fails, it
+retries `-h`.
+
+Only the configured executable is reachable, and every argument is passed as
+an argv item, so metacharacters are not interpreted. The program can still do
+anything its own flags allow; use a container or an MCP server for a real
+security boundary. When a CLI has an MCP server, prefer `MCP` — its schemas
+are exact rather than inferred.
+
+`CLI` is already a discovery facade: pass its tools directly to the agent
+instead of wrapping them in `Toolbox(mode="search")`. Use `Toolbox` when you
+need to combine them with other tools under one catalog.
+
 ### Tool discovery with Toolbox
 
 `Toolbox` accepts any mix of MCP servers, regular `dspy.Tool` objects, and
@@ -492,6 +553,22 @@ Shared behaviour across the bash tools:
 - Wall time is appended as `(Ns)`.
 - Timeouts kill the whole process group and return partial output.
 - Bad regexes and unknown flags come back as `[Error]` text instead of raising.
+
+### CLI (`dspy_agent_tools.cli`)
+
+`CLI(executable, ...)` returns three generated `dspy.Tool`s. Names are
+prefixed by the executable (or `name_prefix`):
+
+| Tool | Use it for |
+| --- | --- |
+| **`search_commands`** | Find command paths by name or description. Discovery is lazy and cached. |
+| **`get_command_help`** | Read one path's usage, subcommands, parsed flags, and raw help before running it. |
+| **`run_command`** | Run one resolved path with raw argv strings. No shell; only the configured executable is reachable. |
+
+The parsed flag table supports the common help formats (argparse, click,
+clap, cobra, git short help, kubectl), but it is advisory. The raw help text
+is authoritative, and `mode="code"` returns the same data as dictionaries for
+`dspy.RLM`.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
