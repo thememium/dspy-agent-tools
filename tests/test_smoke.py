@@ -14,8 +14,12 @@ import sys
 import dspy_agent_tools
 
 EXPECTED_EXPORTS = {
+    "Arg",
+    "Argument",
     "CLI",
     "CLITools",
+    "Command",
+    "Option",
     "MCP",
     "MCPTools",
     "Toolbox",
