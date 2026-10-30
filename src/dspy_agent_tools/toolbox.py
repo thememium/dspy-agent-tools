@@ -1,8 +1,9 @@
-"""Search- and code-mode discovery facades over any tool catalog.
+"""Eager and progressive-discovery views over any tool catalog.
 
 ``Toolbox`` collects MCP tools, regular ``dspy.Tool`` objects, and plain sync
-or async Python functions into one catalog, then exposes a three-tool discovery
-interface instead of every definition:
+or async Python functions into one list. With the default ``mode=None`` it
+returns every tool eagerly. With a discovery mode it exposes three tools
+instead of every definition:
 
 - ``search_tools`` ranks the catalog locally with BM25.
 - ``get_tool_details`` returns one tool's description and input schema.
@@ -14,6 +15,7 @@ interface instead of every definition:
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -327,6 +329,15 @@ def build_facade(
     ]
 
 
+def _renamed(tool: Tool, name: str) -> Tool:
+    """Return ``tool`` under ``name`` without mutating the caller's object."""
+    if tool.name == name:
+        return tool
+    renamed = copy.copy(tool)
+    renamed.name = name
+    return renamed
+
+
 def _tool_entry(tool: Tool, name_prefix: str) -> CatalogEntry:
     """Catalog one ``dspy.Tool`` using the schema DSPy derived for it."""
     properties = tool.args if isinstance(tool.args, dict) else {}
@@ -434,22 +445,21 @@ def _collect_entries(
 
 
 class Toolbox(list):
-    """Search- or code-mode discovery facade over any mix of tools.
+    """Tool catalog that loads eagerly or exposes a discovery facade.
 
-    ``Toolbox`` applies the same progressive-discovery methodology to an
-    arbitrary list: MCP servers (pass the result of ``MCP(...)``), regular
-    ``dspy.Tool`` objects, and plain sync or async Python functions. The
-    returned list holds the three discovery tools instead of every definition,
-    so the model sees only a few schemas.
+    ``Toolbox`` accepts MCP servers (pass the result of ``MCP(...)``), regular
+    ``dspy.Tool`` objects, and plain sync or async Python functions, and
+    flattens nested lists and generators.
 
-    ``mode="search"`` returns text results for ``dspy.ReAct`` / ``dspy.ReActV2``.
-    ``mode="code"`` returns structured ``list[dict]`` / ``dict`` results so
-    ``dspy.RLM`` code can compose calls without parsing text.
+    With the default ``mode=None`` every tool is returned as its own
+    ``dspy.Tool`` — the full load. ``mode="search"`` returns three discovery
+    tools with text results for ``dspy.ReAct`` / ``dspy.ReActV2``.
+    ``mode="code"`` returns the same three tools with structured
+    ``list[dict]`` / ``dict`` results for ``dspy.RLM``.
 
-    Nested lists and generators are flattened. Tool names must be unique
-    (case-insensitively); use ``name_prefix`` or rename the function. Sources
-    that own resources, such as ``MCPTools`` and nested ``Toolbox`` instances,
-    are closed by :meth:`close`.
+    Tool names must be unique (case-insensitively); use ``name_prefix`` or
+    rename the function. Sources that own resources, such as ``MCPTools`` and
+    nested ``Toolbox`` instances, are closed by :meth:`close`.
 
     Example:
         >>> from dspy_agent_tools import MCP, Toolbox, bash_exec, read_file
@@ -464,14 +474,20 @@ class Toolbox(list):
         self,
         tools: Any = (),
         *,
-        mode: Literal["search", "code"] = "search",
+        mode: Literal["search", "code"] | None = None,
         name_prefix: str = "",
     ) -> None:
-        if mode not in _TOOLBOX_MODES:
-            raise ValueError(f"Unknown mode {mode!r}: expected 'search' or 'code'")
+        if mode is not None and mode not in _TOOLBOX_MODES:
+            raise ValueError(
+                f"Unknown mode {mode!r}: expected 'search', 'code', or None"
+            )
         Tool = _load_tool()
         entries, sources = _collect_entries(tools, Tool, name_prefix)
-        super().__init__(build_facade(entries, mode=mode, name_prefix=name_prefix))
+        if mode is None:
+            loaded = [_renamed(entry.tool, entry.name) for entry in entries]
+        else:
+            loaded = build_facade(entries, mode=mode, name_prefix=name_prefix)
+        super().__init__(loaded)
         self.mode = mode
         self.name_prefix = name_prefix
         self.entries = tuple(entries)
