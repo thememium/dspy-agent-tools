@@ -353,6 +353,44 @@ worker = dspy.RLM(
 )
 ```
 
+#### Search mode vs code mode
+
+Both modes expose the same three discovery tools and the same local BM25
+catalog; the difference is who orchestrates the calls and how results move
+through the context.
+
+| | `mode="search"` | `mode="code"` |
+| --- | --- | --- |
+| Agent | `dspy.ReAct` / `dspy.ReActV2` and other tool-calling modules | `dspy.RLM` or another agent that executes Python |
+| Return shape | text (`str`) | structured (`list[dict]`, `dict`) |
+| Orchestration | The model picks one tool per turn | The model writes code that can call many tools |
+| Intermediate results | Returned to the model as observations | Stay in the interpreter unless printed |
+| Best for | A few lookups with small results | Multi-step workflows, loops, filtering, large payloads |
+| Cost profile | Saves schema tokens; observations still enter context | Saves schema tokens and can keep large results out of context |
+| Requirement | None beyond DSPy | A working code interpreter |
+
+Use `mode="search"` when:
+
+- You are building a ReAct-style agent.
+- The task usually needs one to three tool calls with small outputs.
+- You want the safest option: the model never writes or executes code.
+- You are unsure which mode to pick — start here.
+
+Use `mode="code"` when:
+
+- You are building an RLM that can write Python.
+- The task needs several calls combined with Python logic (filter, rank,
+  join, aggregate).
+- Tool results are large and only a summary needs to reach the model. In RLM,
+  `search_tools`, `get_tool_details`, and `call_tool` are Python callables;
+  intermediate values stay in the REPL unless you `print()` them or assign
+  them to the final output.
+
+Skip both modes when the catalog is small (roughly fewer than ten tools) and
+the task is straightforward. The discovery round trip — search, inspect, then
+call — can cost more than just passing the function definitions directly as
+`tools=`.
+
 - Plain functions and `dspy.Tool` instances are catalogued from their DSPy
   metadata: function name, docstring, type hints, and defaults.
 - Names must be unique (case-insensitively); pass `name_prefix="..."` or rename
