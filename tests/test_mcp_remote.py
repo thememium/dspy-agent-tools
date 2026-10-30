@@ -13,7 +13,7 @@ import pytest
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import create_mcp_http_client
 
-from dspy_agent_tools import mcp_http, mcp_sse, mcp_transport
+from dspy_agent_tools import MCP
 
 SERVER = Path(__file__).parent / "fixtures" / "remote_server.py"
 
@@ -88,20 +88,20 @@ def _call_add(tools) -> str:
 
 class TestStreamableHTTP:
     def test_lists_and_calls_tools(self, http_url):
-        with mcp_http(http_url) as tools:
+        with MCP(url=http_url) as tools:
             assert {tool.name for tool in tools} == {"add", "echo"}
             assert _call_add(tools) == "5"
 
     def test_headers_and_name_prefix(self, http_url):
-        with mcp_http(http_url, headers={"X-Test": "1"}, name_prefix="x_") as tools:
+        with MCP(url=http_url, headers={"X-Test": "1"}, name_prefix="x_") as tools:
             assert {tool.name for tool in tools} == {"x_add", "x_echo"}
 
     def test_custom_http_client_factory(self, http_url):
-        with mcp_http(http_url, http_client_factory=create_mcp_http_client) as tools:
+        with MCP(url=http_url, http_client_factory=create_mcp_http_client) as tools:
             assert _call_add(tools) == "5"
 
     def test_closes_when_tools_are_collected(self, http_url):
-        tools = mcp_http(http_url)
+        tools = MCP(url=http_url)
         connection = tools._connections[0]
         thread = connection._thread
         ref = weakref.ref(connection)
@@ -116,18 +116,20 @@ class TestStreamableHTTP:
 
 class TestSSE:
     def test_lists_and_calls_tools(self, sse_url):
-        with mcp_sse(sse_url) as tools:
+        with MCP(url=sse_url, transport="sse") as tools:
             assert {tool.name for tool in tools} == {"add", "echo"}
             assert _call_add(tools) == "5"
 
     def test_custom_http_client_factory(self, sse_url):
-        with mcp_sse(sse_url, httpx_client_factory=create_mcp_http_client) as tools:
+        with MCP(
+            url=sse_url, transport="sse", http_client_factory=create_mcp_http_client
+        ) as tools:
             assert _call_add(tools) == "5"
 
 
 class TestCustomTransport:
     def test_sse_via_transport(self, sse_url):
-        tools = mcp_transport(lambda: sse_client(sse_url))
+        tools = MCP(transport=lambda: sse_client(sse_url))
         try:
             assert {tool.name for tool in tools} == {"add", "echo"}
             assert _call_add(tools) == "5"
