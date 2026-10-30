@@ -596,8 +596,10 @@ def MCP(
             OAuth client provider).
         http_client_factory: Optional zero-argument callable returning an async
             HTTP client. It is created and closed on the connection's event
-            loop, so it is safe for clients with loop affinity. When given,
-            ``headers``, ``timeout``, and ``auth`` are ignored.
+            loop, so it is safe for clients with loop affinity. For Streamable
+            HTTP, supplying it makes ``headers``, ``timeout``, and ``auth``
+            ignored; for legacy SSE it is passed to the SDK as its
+            ``httpx_client_factory`` alongside those options.
         terminate_on_close: Ask the server to terminate the HTTP session on
             close.
         startup_timeout: Seconds to wait for initialization and tool listing.
