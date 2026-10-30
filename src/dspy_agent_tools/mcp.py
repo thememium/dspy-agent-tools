@@ -23,7 +23,7 @@ or list are referenced, then stops when they are garbage-collected, with an
 interpreter-exit fallback. ``MCPTools.close()`` is only needed to release the
 server earlier.
 
-Requires the optional ``mcp`` extra::
+Requires the optional ``mcp`` extra (MCP SDK 2.x)::
 
     uv add "dspy-agent-tools[mcp]"
 """
@@ -447,30 +447,12 @@ def _http_transport(
     @asynccontextmanager
     async def transport():
         module = importlib.import_module("mcp.client.streamable_http")
-
-        # MCP SDK v1 (also present in some v2 builds) takes headers/timeouts.
-        legacy = getattr(module, "streamablehttp_client", None)
-        if legacy is not None:
-            options = _accepted_kwargs(
-                legacy,
-                url=url,
-                headers=headers,
-                timeout=timeout,
-                sse_read_timeout=sse_read_timeout,
-                terminate_on_close=terminate_on_close,
-                auth=auth,
-            )
-            if http_client_factory is not None:
-                options["httpx_client_factory"] = _zero_arg_factory(http_client_factory)
-            async with legacy(**options) as streams:
-                yield streams
-            return
-
         streamable = getattr(module, "streamable_http_client", None)
         factory = getattr(module, "create_mcp_http_client", None)
         if streamable is None or factory is None:
             raise ImportError(
-                "The installed MCP SDK does not provide a Streamable HTTP client"
+                "The installed MCP SDK does not provide a Streamable HTTP "
+                "client; dspy-agent-tools requires mcp>=2"
             )
 
         if http_client_factory is not None:
