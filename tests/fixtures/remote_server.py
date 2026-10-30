@@ -1,14 +1,8 @@
 """Streamable HTTP / SSE MCP server used by tests/test_mcp_remote.py."""
 
 import argparse
-import importlib
 
-try:  # MCP SDK v1
-    _server_module = importlib.import_module("mcp.server.fastmcp")
-    MCPServer = getattr(_server_module, "FastMCP")  # noqa: B009 - v1/v2 compatibility
-except ModuleNotFoundError:  # MCP SDK v2
-    _server_module = importlib.import_module("mcp.server")
-    MCPServer = getattr(_server_module, "MCPServer")  # noqa: B009 - v1/v2 compatibility
+from mcp.server import MCPServer
 
 server = MCPServer("dspy-agent-tools remote test server")
 
