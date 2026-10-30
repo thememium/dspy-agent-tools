@@ -29,11 +29,13 @@ Example:
 
 from __future__ import annotations
 
+import inspect
 import re
 import shlex
 import threading
+import types
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -50,6 +52,119 @@ DEFAULT_MAX_DEPTH = 3
 DEFAULT_MAX_HELP_CHARS = 20_000
 
 _MODES = ("search", "code")
+_MISSING = object()
+_AUTO_POSITIONAL = -1
+_SCHEMA_TYPES: dict[type[Any], str] = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+}
+
+
+@dataclass(frozen=True, eq=False)
+class Arg:
+    """One argument of an explicitly defined :class:`Command`.
+
+    Set exactly one of ``flag`` or ``positional``. A missing ``default`` makes
+    the argument required, except for boolean and repeatable flags, which
+    default to off and empty respectively.
+    """
+
+    flag: str | None = None
+    positional: int | None = None
+    type: Any = str
+    default: Any = _MISSING
+    help: str = ""
+    choices: tuple[str, ...] = ()
+    repeatable: bool = False
+
+
+@dataclass(frozen=True, eq=False)
+class Command:
+    """One explicitly defined CLI command exposed as a ``dspy.Tool``.
+
+    ``path`` is the command path after the executable, either a tuple such as
+    ``("pr", "list")`` or a space-separated string such as ``"pr list"``.
+    Colons stay inside one token (``"db:migrate"`` is one command).
+    ``args`` maps tool argument names to :class:`Arg` definitions; use
+    :func:`Argument` and :func:`Option` for the common cases. ``fixed``
+    arguments are always appended before user flags.
+    """
+
+    name: str
+    path: str | Sequence[str]
+    description: str = ""
+    args: dict[str, Arg] = field(default_factory=dict)
+    fixed: tuple[str, ...] = ()
+    ok_codes: frozenset[int] = frozenset()
+
+
+def Argument(
+    default: Any = _MISSING,
+    *,
+    help: str = "",
+    type: Any = str,
+    choices: Sequence[str] = (),
+    repeatable: bool = False,
+) -> Arg:
+    """Define a positional argument for an explicit :class:`Command`.
+
+    Positional indices are assigned automatically in ``Command.args`` order.
+    ``Argument(...)`` (Ellipsis) marks a required argument, matching the
+    usecli/Typer convention.
+    """
+    return Arg(
+        positional=_AUTO_POSITIONAL,
+        type=type,
+        default=_MISSING if default is Ellipsis else default,
+        help=help,
+        choices=tuple(choices),
+        repeatable=repeatable,
+    )
+
+
+def Option(
+    *flags: Any,
+    default: Any = _MISSING,
+    help: str = "",
+    type: Any = str,
+    choices: Sequence[str] = (),
+    repeatable: bool = False,
+    is_flag: bool = False,
+) -> Arg:
+    """Define an option for an explicit :class:`Command`.
+
+    The last long flag is used in argv; aliases are accepted for readability.
+    ``is_flag=True`` or ``type=bool`` makes a boolean switch that defaults to
+    off. The usecli form ``Option(default, "--flag")`` is accepted as well:
+    ``Option(..., "--flag")`` marks a required option.
+    """
+    if flags and (not isinstance(flags[0], str) or not flags[0].startswith("-")):
+        if default is not _MISSING:
+            raise ValueError("Option default was given twice")
+        default = flags[0]
+        flags = flags[1:]
+    if not flags:
+        raise ValueError("Option requires at least one flag")
+    for flag in flags:
+        if not isinstance(flag, str) or not flag.startswith("-"):
+            raise ValueError(f"Option flag must start with '-': {flag!r}")
+    primary = next(
+        (flag for flag in reversed(flags) if flag.startswith("--")), flags[-1]
+    )
+    kind = bool if is_flag else type
+    if is_flag and default is _MISSING:
+        default = False
+    return Arg(
+        flag=primary,
+        type=kind,
+        default=_MISSING if default is Ellipsis else default,
+        help=help,
+        choices=tuple(choices),
+        repeatable=repeatable,
+    )
+
 
 # Discovery must never open a pager or wait for a terminal.
 _HELP_ENV = {
@@ -488,6 +603,28 @@ class _Node:
         return " ".join(self.path) or "(root)"
 
 
+def _run_argv(
+    executable: str,
+    base_args: Sequence[str],
+    path: Sequence[str],
+    args: Sequence[str],
+    *,
+    cwd: Path | None,
+    env: dict[str, str] | None,
+    timeout: float,
+    ok_codes: frozenset[int] = frozenset(),
+) -> str:
+    """Execute one argv tail and render it like the bash tools."""
+    argv = [executable, *base_args, *path, *args]
+    try:
+        output, notices, elapsed, _returncode = _execute(
+            argv, cwd=cwd, timeout=timeout, env=env, ok_codes=ok_codes
+        )
+    except CommandNotFound:
+        return f"[command not found: {executable}]"
+    return _render(output, notices, elapsed)
+
+
 class _Discovery:
     """Lazily expand one executable's help tree on a background-free cache."""
 
@@ -679,19 +816,15 @@ class _Discovery:
     def run(self, command: str, args: Sequence[str]) -> str:
         """Resolve ``command`` and execute it with an argv tail."""
         node = self.resolve(command)
-        argv = [
+        return _run_argv(
             self.executable,
-            *self.base_args,
-            *node.path,
-            *[str(item) for item in args],
-        ]
-        try:
-            output, notices, elapsed, _returncode = _execute(
-                argv, cwd=self.cwd, timeout=self.timeout, env=self.env
-            )
-        except CommandNotFound:
-            return f"[command not found: {self.executable}]"
-        return _render(output, notices, elapsed)
+            self.base_args,
+            node.path,
+            [str(item) for item in args],
+            cwd=self.cwd,
+            env=self.env,
+            timeout=self.timeout,
+        )
 
 
 def _search_text(nodes: Sequence[_Node]) -> str:
@@ -774,6 +907,277 @@ def _normalize_args(args: Any) -> list[str]:
     return [str(item) for item in args]
 
 
+def _effective_default(arg: Arg) -> Any:
+    """Resolve the default used for schema, signature, and argv building."""
+    if arg.default is not _MISSING:
+        return arg.default
+    if arg.flag is not None and arg.type is bool:
+        return False
+    if arg.flag is not None and arg.repeatable:
+        return ()
+    return _MISSING
+
+
+def _validate_arg(
+    name: str, arg: Arg, positionals: dict[int, str], flags: set[str]
+) -> None:
+    """Validate one explicit argument definition."""
+    if not name.isidentifier():
+        raise ValueError(f"Argument name {name!r} must be a valid identifier")
+    if (arg.flag is None) == (arg.positional is None):
+        raise ValueError(f"{name}: set exactly one of flag= or positional=")
+    if arg.type not in _SCHEMA_TYPES:
+        raise ValueError(f"{name}: unsupported type {arg.type!r}")
+    if arg.choices and arg.type is not str:
+        raise ValueError(f"{name}: choices require type=str")
+    if (
+        arg.repeatable
+        and arg.default is not _MISSING
+        and arg.default is not None
+        and not isinstance(arg.default, (list, tuple, set, frozenset))
+    ):
+        raise ValueError(f"{name}: repeatable defaults must be a list or tuple")
+    if arg.flag is not None:
+        if not arg.flag.startswith("-"):
+            raise ValueError(f"{name}: flag must start with '-'")
+        if arg.flag in flags:
+            raise ValueError(f"{name}: duplicate flag {arg.flag!r}")
+        flags.add(arg.flag)
+        return
+    if arg.positional is None or arg.positional < 0:
+        raise ValueError(f"{name}: positional must be a non-negative index")
+    if arg.positional in positionals:
+        raise ValueError(f"{name}: duplicate positional index {arg.positional}")
+    positionals[arg.positional] = name
+
+
+def _path_parts(path: str | Sequence[str]) -> tuple[str, ...]:
+    """Split a space-separated signature; colons stay inside one token."""
+    if isinstance(path, str):
+        return tuple(part for part in path.split() if part)
+    return tuple(path)
+
+
+def _assign_positionals(args: dict[str, Arg]) -> dict[str, Arg]:
+    """Turn ``Argument()`` markers into concrete positional indices."""
+    result: dict[str, Arg] = {}
+    next_index = 0
+    for name, arg in args.items():
+        if arg.positional == _AUTO_POSITIONAL:
+            result[name] = replace(arg, positional=next_index)
+            next_index += 1
+        else:
+            result[name] = arg
+            if arg.positional is not None and arg.positional >= next_index:
+                next_index = arg.positional + 1
+    return result
+
+
+def _normalize_command(command: Command) -> Command:
+    """Resolve path strings and automatic positional indices once."""
+    fixed = command.fixed if isinstance(command.fixed, str) else tuple(command.fixed)
+    return replace(
+        command,
+        path=_path_parts(command.path),
+        args=_assign_positionals(command.args),
+        fixed=fixed,
+    )
+
+
+def _validate_command(command: Command) -> None:
+    """Validate one explicit command, including positional ordering."""
+    if not command.name or not command.name.isidentifier():
+        raise ValueError(f"Command name {command.name!r} must be a valid identifier")
+    if isinstance(command.fixed, (str, bytes)):
+        raise TypeError(f"{command.name}: fixed must be a sequence of strings")
+    for part in command.path:
+        if not isinstance(part, str) or not part:
+            raise ValueError(
+                f"{command.name}: command path parts must be non-empty strings"
+            )
+    for item in command.fixed:
+        if not isinstance(item, str):
+            raise TypeError(f"{command.name}: fixed arguments must be strings")
+
+    positionals: dict[int, str] = {}
+    flags: set[str] = set()
+    for name, arg in command.args.items():
+        _validate_arg(name, arg, positionals, flags)
+
+    if not positionals:
+        return
+    ordered = sorted(positionals)
+    if ordered != list(range(len(ordered))):
+        raise ValueError(
+            f"{command.name}: positional indices must be contiguous from 0"
+        )
+    seen_optional = False
+    for index in ordered:
+        arg = command.args[positionals[index]]
+        optional = _effective_default(arg) is not _MISSING
+        if seen_optional and not optional:
+            raise ValueError(
+                f"{command.name}: required positional {positionals[index]!r} "
+                "cannot follow an optional positional"
+            )
+        seen_optional = seen_optional or optional
+        if arg.repeatable and index != ordered[-1]:
+            raise ValueError(
+                f"{command.name}: repeatable positional {positionals[index]!r} "
+                "must be last"
+            )
+
+
+def _annotation(arg: Arg) -> Any:
+    """Return the Python annotation for one explicit argument."""
+    return types.GenericAlias(list, arg.type) if arg.repeatable else arg.type
+
+
+def _arg_schema(arg: Arg) -> dict[str, Any]:
+    """Return the JSON schema for one explicit argument."""
+    item: dict[str, Any] = {"type": _SCHEMA_TYPES[arg.type]}
+    if arg.choices:
+        item["enum"] = list(arg.choices)
+    schema = {"type": "array", "items": item} if arg.repeatable else item
+    default = _effective_default(arg)
+    if default is not _MISSING:
+        if arg.repeatable and default is not None:
+            schema["default"] = list(default)
+        else:
+            schema["default"] = default
+    return schema
+
+
+def _command_signature(command: Command) -> inspect.Signature:
+    """Build a real signature so ``dspy.RLM`` sees explicit parameters."""
+    required = [
+        (name, arg)
+        for name, arg in command.args.items()
+        if _effective_default(arg) is _MISSING
+    ]
+    optional = [
+        (name, arg)
+        for name, arg in command.args.items()
+        if _effective_default(arg) is not _MISSING
+    ]
+    parameters = []
+    for name, arg in [*required, *optional]:
+        default = _effective_default(arg)
+        parameters.append(
+            inspect.Parameter(
+                name,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation=_annotation(arg),
+                default=(inspect.Parameter.empty if default is _MISSING else default),
+            )
+        )
+    return inspect.Signature(parameters)
+
+
+def _stringify(name: str, arg: Arg, value: Any) -> str:
+    text = str(value)
+    if arg.choices and text not in arg.choices:
+        raise ValueError(f"{name} must be one of {arg.choices}, got {text!r}")
+    return text
+
+
+def _command_argv(command: Command, values: dict[str, Any]) -> list[str]:
+    """Turn tool keyword arguments into argv items."""
+    positionals: dict[int, list[str]] = {}
+    flags: list[str] = []
+    for name, arg in command.args.items():
+        value = values.get(name, _effective_default(arg))
+        if value is _MISSING:
+            raise ValueError(f"{name} is required")
+        if value is None:
+            continue
+        if arg.positional is not None:
+            items = (
+                value
+                if arg.repeatable and isinstance(value, (list, tuple, set, frozenset))
+                else [value]
+            )
+            positionals[arg.positional] = [
+                _stringify(name, arg, item) for item in items
+            ]
+            continue
+
+        assert arg.flag is not None
+        if arg.type is bool:
+            if value:
+                flags.append(arg.flag)
+            continue
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+        if arg.repeatable or isinstance(value, (list, tuple, set, frozenset)):
+            for item in items:
+                flags.extend([arg.flag, _stringify(name, arg, item)])
+        else:
+            flags.extend([arg.flag, _stringify(name, arg, value)])
+
+    ordered = sorted(positionals)
+    if ordered != list(range(len(ordered))):
+        raise ValueError(
+            f"{command.name}: positional arguments cannot be skipped; "
+            "supply them in order"
+        )
+    positional_values = [item for index in ordered for item in positionals[index]]
+    return [*positional_values, *command.fixed, *flags]
+
+
+def _build_command_tools(
+    commands: Sequence[Command],
+    *,
+    executable: str,
+    base_args: Sequence[str],
+    prefix: str,
+    cwd: Path | None,
+    env: dict[str, str] | None,
+    timeout: float,
+) -> list[Tool]:
+    """Build one ``dspy.Tool`` per explicitly defined command."""
+    tool_cls = _load_tool()
+    seen: set[str] = set()
+    tools: list[Tool] = []
+
+    def build(command: Command) -> Tool:
+        command = _normalize_command(command)
+        _validate_command(command)
+        tool_name = f"{prefix}{command.name}"
+        key = tool_name.casefold()
+        if key in seen:
+            raise ValueError(f"Duplicate tool name {tool_name!r}")
+        seen.add(key)
+        signature = _command_signature(command)
+
+        def run(**kwargs: Any) -> str:
+            return _run_argv(
+                executable,
+                base_args,
+                command.path,
+                _command_argv(command, kwargs),
+                cwd=cwd,
+                env=env,
+                timeout=timeout,
+                ok_codes=command.ok_codes,
+            )
+
+        run.__name__ = tool_name
+        run.__doc__ = command.description
+        run.__signature__ = signature  # type: ignore
+        return tool_cls(
+            run,
+            name=tool_name,
+            desc=command.description,
+            args={name: _arg_schema(arg) for name, arg in command.args.items()},
+            arg_types={name: _annotation(arg) for name, arg in command.args.items()},
+            arg_desc={name: arg.help for name, arg in command.args.items() if arg.help},
+        )
+
+    for command in commands:
+        tools.append(build(command))
+    return tools
+
+
 def _build_tools(
     discovery: _Discovery,
     *,
@@ -818,11 +1222,12 @@ def _build_tools(
 
 
 class CLITools(list):
-    """List of ``dspy.Tool`` backed by a lazily discovered executable.
+    """List of ``dspy.Tool`` backed by one executable.
 
     Behaves like a normal list, so it can be passed directly as ``tools=`` or
-    concatenated with other tools. Discovery state is shared by the three
-    tools; :meth:`refresh` drops the cached help pages.
+    concatenated with other tools. In discovery mode the three tools share one
+    cache, and :meth:`refresh` drops its help pages. Explicit-command mode has
+    no discovery cache, so :meth:`refresh` is a no-op.
     """
 
     def __init__(self, tools: Any = (), discovery: _Discovery | None = None) -> None:
@@ -844,6 +1249,7 @@ def _default_prefix(executable: str) -> str:
 def CLI(
     executable: str,
     *,
+    commands: Sequence[Command] | None = None,
     base_args: Sequence[str] = (),
     mode: Literal["search", "code"] = "search",
     name_prefix: str | None = None,
@@ -855,42 +1261,75 @@ def CLI(
     max_depth: int = DEFAULT_MAX_DEPTH,
     max_help_chars: int = DEFAULT_MAX_HELP_CHARS,
 ) -> CLITools:
-    """Expose one executable as three lazily discovered DSPy tools.
+    """Expose one executable as explicit DSPy tools or a discovery facade.
 
-    The CLI's own help is the schema. Discovery starts on the first tool call:
-    ``search_commands`` reads the root help, expands the best matching
-    branches, and caches every page. ``get_command_help`` expands exactly the
-    requested path. ``run_command`` resolves that path and executes it.
+    With ``commands=...``, each :class:`Command` becomes its own typed
+    ``dspy.Tool`` and discovery is skipped entirely. Without it, the CLI's
+    own help is the schema: ``search_commands`` reads the root help, expands
+    the best matching branches, and caches every page; ``get_command_help``
+    expands exactly the requested path; ``run_command`` resolves that path
+    and executes it.
 
     Args:
         executable: Program to run, resolved through ``PATH`` (or a path).
             Only this program is reachable; arguments are never passed to a
             shell.
+        commands: Explicit command definitions. When provided, the three
+            ``--help`` discovery tools are skipped; each command becomes one
+            tool. The sequence must contain at least one command. Commands can
+            declare required and optional arguments, flags, positionals,
+            choices, and fixed args.
         base_args: Fixed arguments inserted before the discovered command,
             e.g. ``["-m", "mytool"]`` for a Python module CLI.
-        mode: ``"search"`` (default) returns text for ``dspy.ReAct``;
-            ``"code"`` returns dictionaries for ``dspy.RLM``.
+        mode: Used by the discovery facade: ``"search"`` (default) returns
+            text for ``dspy.ReAct``; ``"code"`` returns dictionaries for
+            ``dspy.RLM``. Ignored when ``commands=...`` is provided.
         name_prefix: Prepended to every tool name. Defaults to the executable
             name, such as ``"gh_"``.
         cwd: Working directory for help calls and command execution.
         env: Extra environment variables for help calls and execution. Help
             calls additionally force non-interactive pager settings.
         timeout: Deadline in seconds for ``run_command``; ``0`` disables it.
-        help_timeout: Deadline in seconds for each help call.
-        max_expands: Maximum help pages a single search may fetch.
-        max_depth: Maximum command-tree levels a single search may walk.
+        help_timeout: Deadline in seconds for each help call (discovery only).
+        max_expands: Maximum help pages a single search may fetch (discovery
+            only).
+        max_depth: Maximum command-tree levels a single search may walk
+            (discovery only).
         max_help_chars: Cap for the raw help text in ``get_command_help``;
-            ``0`` omits it. Parsed flags are unaffected.
+            ``0`` omits it (discovery only). Parsed flags are unaffected.
 
     Returns:
-        A :class:`CLITools` list with ``search_commands``,
-        ``get_command_help``, and ``run_command``. Call :meth:`refresh` to
+        A :class:`CLITools` list. With ``commands=...`` it contains one tool
+        per command. Otherwise it contains ``search_commands``,
+        ``get_command_help``, and ``run_command``; call :meth:`refresh` to
         clear cached help pages.
 
-    Example:
+    Examples:
         >>> from dspy_agent_tools import CLI
         >>> gh = CLI("gh")
         >>> agent = dspy.ReAct("question -> answer", tools=gh)
+
+        >>> from dspy_agent_tools import Argument, CLI, Command, Option
+        >>> gh = CLI(
+        ...     "gh",
+        ...     commands=[
+        ...         Command(
+        ...             "pr_list",
+        ...             "pr list",
+        ...             "List pull requests in a repository.",
+        ...             args={
+        ...                 "repo": Argument(help="owner/name"),
+        ...                 "state": Option(
+        ...                     "open",
+        ...                     "--state",
+        ...                     choices=("open", "closed", "merged"),
+        ...                 ),
+        ...                 "limit": Option(30, "--limit", type=int),
+        ...             },
+        ...             fixed=("--json",),
+        ...         )
+        ...     ],
+        ... )
     """
     if mode not in _MODES:
         raise ValueError(f"Unknown mode {mode!r}: expected 'search' or 'code'")
@@ -905,27 +1344,45 @@ def CLI(
     if max_help_chars < 0:
         raise ValueError("max_help_chars must be >= 0")
 
+    command_list = None if commands is None else list(commands)
+    if command_list is not None and not command_list:
+        raise ValueError("commands must contain at least one Command")
+
     try:
         local[executable]
     except CommandNotFound as exc:
         raise FileNotFoundError(f"Executable not found: {executable}") from exc
 
     resolved_cwd = _resolve_cwd(str(cwd)) if cwd is not None else None
-    discovery = _Discovery(
-        executable,
-        base_args=[str(item) for item in base_args],
-        cwd=resolved_cwd,
-        env=env,
-        timeout=timeout,
-        help_timeout=help_timeout,
-        max_expands=max_expands,
-        max_depth=max_depth,
-    )
     prefix = _default_prefix(executable) if name_prefix is None else name_prefix
-    tools = _build_tools(
-        discovery, prefix=prefix, mode=mode, max_help_chars=max_help_chars
-    )
+    resolved_base_args = [str(item) for item in base_args]
+
+    discovery: _Discovery | None = None
+    if command_list is not None:
+        tools = _build_command_tools(
+            command_list,
+            executable=executable,
+            base_args=resolved_base_args,
+            prefix=prefix,
+            cwd=resolved_cwd,
+            env=env,
+            timeout=timeout,
+        )
+    else:
+        discovery = _Discovery(
+            executable,
+            base_args=resolved_base_args,
+            cwd=resolved_cwd,
+            env=env,
+            timeout=timeout,
+            help_timeout=help_timeout,
+            max_expands=max_expands,
+            max_depth=max_depth,
+        )
+        tools = _build_tools(
+            discovery, prefix=prefix, mode=mode, max_help_chars=max_help_chars
+        )
     return CLITools(tools, discovery)
 
 
-__all__ = ["CLI", "CLITools"]
+__all__ = ["CLI", "Arg", "Argument", "CLITools", "Command", "Option"]
