@@ -46,8 +46,9 @@ Three families of tools:
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
 
-It also ships an **MCP bridge** (`dspy_agent_tools.mcp`) that turns any stdio
-MCP server into a list of DSPy tools you can mix with the built-ins.
+It also ships an **MCP bridge** (`dspy_agent_tools.mcp`) that turns local
+stdio or remote Streamable HTTP/SSE MCP servers into lists of DSPy tools you
+can mix with the built-ins.
 
 Tools are just Python functions, exactly as
 [DSPy's docs describe](https://dspy.ai/current/getting-started/react-and-tools/#tools-are-just-python-functions):
@@ -210,8 +211,8 @@ from dspy_agent_tools import (
 ### With MCP servers
 
 `mcp` launches a stdio MCP server, converts every tool it advertises into a
-`dspy.Tool`, and returns them as a list. The server keeps running until you
-call `close()` or the process exits, so repeated tool calls reuse one session:
+`dspy.Tool`, and returns them as a list. The server keeps running while the
+tools are referenced, so repeated calls reuse one session:
 
 ```python
 import dspy
@@ -228,12 +229,35 @@ result = agent(question="List the files inside /tmp")
 print(result.answer)
 ```
 
+Remote servers use the transport-specific factory:
+
+```python
+from dspy_agent_tools import mcp_http, mcp_sse
+
+tools = mcp_http(
+    "https://example.com/mcp",
+    headers={"Authorization": "Bearer <token>"},
+)
+
+legacy = mcp_sse("https://example.com/sse")  # only for pre-Streamable-HTTP servers
+```
+
+- `mcp_http(url, ...)` speaks **Streamable HTTP**, the transport used by most
+  hosted MCP servers.
+- `mcp_sse(url, ...)` speaks the legacy **HTTP+SSE** transport.
+- `mcp_transport(factory)` connects any custom MCP transport: `factory` is a
+  zero-argument callable returning an async context manager that yields a
+  read/write pair.
+- All three accept `headers`, `auth`, `startup_timeout`, `name_prefix`, and
+  `result_mode`; `mcp_http` also accepts an `http_client_factory` for custom
+  HTTP clients (proxies, OAuth providers).
+
 Both paths work out of the box: `agent(...)` synchronously converts the
 async MCP calls (scoped to those tools, no global DSPy setting), and
 `await agent.acall(...)` runs fully asynchronously in async applications.
-No cleanup is required: the server keeps running while the tools or the
-`MCPTools` list are referenced, then stops when they are garbage-collected,
-with an interpreter-exit fallback. Call `files.close()` only to stop it
+No cleanup is required: the session keeps running while the tools or the
+`MCPTools` list are referenced, then closes when they are garbage-collected,
+with an interpreter-exit fallback. Call `tools.close()` only to stop it
 earlier.
 
 - `mcp(command, *args)` also accepts `env`, `cwd`, `startup_timeout`,
