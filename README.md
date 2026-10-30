@@ -40,12 +40,13 @@ DSPy Agent Tools is a library of **tool functions** for
 function with a tool-optimized docstring, so you can hand them straight to
 `dspy.ReAct` or `dspy.RLM` — no adapters, no wrappers.
 
-Three built-in tool families, plus an optional MCP bridge:
+Three built-in tool families, plus a generic Toolbox and optional MCP bridge:
 
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
+- **Toolbox** — `Toolbox([...], mode="search"|"code")` applies the same progressive-discovery facade to any mix of MCP servers, `dspy.Tool` objects, and plain Python functions.
 
 Tools are just Python functions, exactly as
 [DSPy's docs describe](https://dspy.ai/current/getting-started/react-and-tools/#tools-are-just-python-functions):
@@ -294,6 +295,73 @@ earlier.
 - The return value, `MCPTools`, is a `list` subclass: passing it as `tools=`,
   concatenating with `+` on either side, and unpacking all work. It is also a
   context manager (`with MCP(...) as tools:`) that closes the server on exit.
+
+### Tool discovery with Toolbox
+
+A 46-tool server such as GitHub's MCP endpoint costs roughly 14k tokens of
+function definitions on every turn when every tool is passed as its own
+`dspy.Tool`. `Toolbox` keeps the catalog in the Python process and exposes
+three discovery tools instead. It accepts any mix of MCP servers, regular
+`dspy.Tool` objects, and plain sync or async Python functions:
+
+```python
+from dspy_agent_tools import MCP, Toolbox, bash_exec, read_file
+
+
+def lookup_ticket(ticket_id: str) -> dict:
+    """Look up one support ticket by its id."""
+    ...
+
+
+catalog = Toolbox(
+    [
+        MCP(
+            url="https://api.githubcopilot.com/mcp/",
+            headers={"Authorization": f"Bearer {token}"},
+        ),
+        bash_exec,
+        read_file,
+        lookup_ticket,
+    ],
+    mode="search",
+)
+
+agent = dspy.ReActV2("question -> answer", tools=catalog)
+```
+
+`mode="search"` returns three tools instead of the whole catalog:
+
+| Tool | Purpose |
+| --- | --- |
+| `search_tools(query, limit=5)` | BM25 ranking over tool names, descriptions, and parameter names; returns names with their required arguments. |
+| `get_tool_details(name)` | Full description and JSON input schema for one tool. |
+| `call_tool(name, arguments)` | Runs that tool; MCP calls stay on the live session. |
+
+The catalog stays in the Python process, so only the tools the agent searches,
+inspects, or calls are sent to the model. `mode="code"` returns the same three
+tools with structured results — `list[dict]` from `search_tools`, `dict` from
+`get_tool_details` — so `dspy.RLM` code can compose calls without parsing
+text:
+
+```python
+worker = dspy.RLM(
+    "task -> report",
+    tools=Toolbox(
+        [MCP(url="https://api.githubcopilot.com/mcp/", headers={...}), bash_exec],
+        mode="code",
+    ),
+)
+```
+
+- Plain functions and `dspy.Tool` instances are catalogued from their DSPy
+  metadata: function name, docstring, type hints, and defaults.
+- Names must be unique (case-insensitively); pass `name_prefix="..."` or rename
+  the function. `MCP(..., name_prefix=...)` still works for MCP-side names.
+- `Toolbox` owns its sources, so `catalog.close()` (or a `with` block) stops
+  every MCP server it was given. Addition (`catalog + [other_tool]`) keeps
+  that ownership.
+- `MCP` always returns the eager tool list; pass it to `Toolbox` to get
+  discovery mode.
 
 ### Batching
 
