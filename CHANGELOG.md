@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.1.7 (2026-10-30)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.6...v0.1.7)
+
+### 🚀 Enhancements
+
+- add tool search modes (#8) (#8) ([9b50e53](https://github.com/thememium/dspy-agent-tools/commit/9b50e53eac6de73f6920853ce003cc8c12a03284))
+- add mcp tool (#7) (#7) ([10ee278](https://github.com/thememium/dspy-agent-tools/commit/10ee27878b45efc888d0e9d0ca2bc4f1be2f4b97))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.6 (2026-10-30)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.5...v0.1.6)
