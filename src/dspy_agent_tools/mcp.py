@@ -5,12 +5,13 @@ are used. The factories here hide that lifecycle: they connect on a background
 event loop, convert every advertised tool with ``dspy.Tool.from_mcp_tool``,
 and return the tools as an :class:`MCPTools` list that owns the live session.
 
-Transports:
+Transports are chosen by :func:`MCP`:
 
-- :func:`mcp` - local stdio server process (``npx``, ``python script.py``, ...)
-- :func:`mcp_http` - remote Streamable HTTP endpoint (the current MCP default)
-- :func:`mcp_sse` - remote legacy HTTP+SSE endpoint
-- :func:`mcp_transport` - any custom async transport yielding a read/write pair
+- ``command=`` launches a local stdio server process (``npx``, a script, ...).
+- ``url=`` connects to a remote Streamable HTTP endpoint (the MCP default).
+- ``transport="sse"`` selects the legacy HTTP+SSE transport for an ``url``.
+- ``transport=factory`` uses any custom async transport yielding a read/write
+  pair (WebSocket, in-memory, ...).
 
 The returned tools work from both DSPy paths without extra configuration:
 ``agent(question=...)`` uses DSPy's async-to-sync conversion for the MCP call
@@ -36,11 +37,10 @@ import importlib
 import inspect
 import threading
 import weakref
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
-from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar, cast
 
 if TYPE_CHECKING:
     from dspy import Tool
@@ -373,74 +373,30 @@ def _close_all() -> None:
 atexit.register(_close_all)
 
 
-def mcp(
+def _stdio_transport(
     command: str,
-    *args: str,
-    env: dict[str, str] | None = None,
-    cwd: str | Path | None = None,
-    startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
-    name_prefix: str = "",
-    result_mode: Literal["text", "structured"] = "text",
-) -> MCPTools:
-    """Start a stdio MCP server and return its tools as DSPy tools.
+    *,
+    args: Sequence[str],
+    env: dict[str, str] | None,
+    cwd: str | Path | None,
+) -> Callable[[], Any]:
+    """Build the stdio transport context-manager factory."""
 
-    The server process is launched immediately (``command`` + ``args``) and
-    kept alive on a background thread. Every tool the server advertises is
-    converted with ``dspy.Tool.from_mcp_tool``, so the returned list can go
-    straight into ``dspy.ReAct``, ``dspy.RLM``, or any other DSPy module.
+    @asynccontextmanager
+    async def transport():
+        from mcp import StdioServerParameters
+        from mcp.client.stdio import stdio_client
 
-    MCP tools are asynchronous under the hood; the returned tools enable
-    DSPy's async-to-sync conversion for their sync path, so both
-    ``agent(question=...)`` and ``await agent.acall(question=...)`` work
-    without extra configuration.
+        server = StdioServerParameters(
+            command=command,
+            args=list(args),
+            env=env,
+            cwd=None if cwd is None else str(cwd),
+        )
+        async with stdio_client(server) as streams:
+            yield streams
 
-    Args:
-        command: Executable to launch (e.g. ``"npx"`` or ``"python"``).
-        *args: Arguments passed to the server command.
-        env: Environment for the server process; ``None`` inherits the
-            current environment.
-        cwd: Working directory for the server process.
-        startup_timeout: Seconds to wait for initialization and tool listing.
-        name_prefix: Prepended to every tool name, useful when combining
-            servers that expose identically named tools.
-        result_mode: ``"text"`` (default) flattens MCP text content to a
-            string/list; ``"structured"`` returns ``structuredContent``
-            when the server provides it.
-
-    Returns:
-        An :class:`MCPTools` list of ``dspy.Tool`` owning the live session.
-        The server stops automatically when the tools (or the list) are no
-        longer referenced, and at interpreter exit; call ``close()`` only to
-        stop it earlier.
-
-    Example:
-        >>> import dspy
-        >>> from dspy_agent_tools import bash_exec, mcp
-        >>> files = mcp(
-        ...     "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"
-        ... )
-        >>> agent = dspy.ReAct(
-        ...     "question -> answer",
-        ...     tools=files + [bash_exec],
-        ... )
-        >>> result = agent(question="List the files in /tmp")
-    """
-    from mcp import StdioServerParameters
-    from mcp.client.stdio import stdio_client
-
-    server = StdioServerParameters(
-        command=command,
-        args=list(args),
-        env=env,
-        cwd=None if cwd is None else str(cwd),
-    )
-    return _build_tools(
-        partial(stdio_client, server),
-        label=command,
-        startup_timeout=startup_timeout,
-        name_prefix=name_prefix,
-        result_mode=result_mode,
-    )
+    return transport
 
 
 def _build_tools(
@@ -474,40 +430,6 @@ def _build_tools(
 
     _CONNECTIONS.add(connection)
     return MCPTools(tools, [connection])
-
-
-def mcp_transport(
-    transport: Callable[[], Any],
-    *,
-    startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
-    name_prefix: str = "",
-    result_mode: Literal["text", "structured"] = "text",
-) -> MCPTools:
-    """Connect with a custom MCP transport and return its tools.
-
-    ``transport`` is a zero-argument callable returning an async context
-    manager that yields a ``(read, write)`` pair, e.g.
-    ``lambda: streamable_http_client(url)`` or a WebSocket/in-memory transport
-    from the MCP SDK. Use this escape hatch when neither stdio, Streamable
-    HTTP, nor SSE fits.
-
-    Args:
-        transport: Factory for the async transport context manager.
-        startup_timeout: Seconds to wait for initialization and tool listing.
-        name_prefix: Prepended to every tool name.
-        result_mode: ``"text"`` flattens MCP text content; ``"structured"``
-            returns ``structuredContent`` when the server provides it.
-
-    Returns:
-        An :class:`MCPTools` list of ``dspy.Tool`` owning the live session.
-    """
-    return _build_tools(
-        transport,
-        label=getattr(transport, "__name__", "custom transport"),
-        startup_timeout=startup_timeout,
-        name_prefix=name_prefix,
-        result_mode=result_mode,
-    )
 
 
 def _http_transport(
@@ -573,62 +495,6 @@ def _http_transport(
     return transport
 
 
-def mcp_http(
-    url: str,
-    *,
-    headers: dict[str, str] | None = None,
-    timeout: float = 30.0,
-    sse_read_timeout: float = 300.0,
-    auth: Any = None,
-    http_client_factory: Any = None,
-    terminate_on_close: bool = True,
-    startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
-    name_prefix: str = "",
-    result_mode: Literal["text", "structured"] = "text",
-) -> MCPTools:
-    """Connect to a remote MCP server over Streamable HTTP.
-
-    This is the transport used by most hosted MCP servers (including OAuth
-    providers); the legacy HTTP+SSE transport is :func:`mcp_sse`.
-
-    Args:
-        url: Server endpoint, e.g. ``"https://example.com/mcp"``.
-        headers: Extra HTTP headers, e.g. an ``Authorization`` bearer token.
-        timeout: HTTP timeout for regular requests, in seconds.
-        sse_read_timeout: How long to wait for the server stream, in seconds.
-        auth: Optional ``httpx``/``httpx2`` auth handler (for example an MCP
-            OAuth client provider).
-        http_client_factory: Optional zero-argument callable returning an async
-            HTTP client. It is created and closed on the connection's event
-            loop, so it is safe for clients with loop affinity. When given,
-            ``headers``, ``timeout``, and ``auth`` are ignored.
-        terminate_on_close: Ask the server to terminate the session on close.
-        startup_timeout: Seconds to wait for initialization and tool listing.
-        name_prefix: Prepended to every tool name.
-        result_mode: ``"text"`` flattens MCP text content; ``"structured"``
-            returns ``structuredContent`` when the server provides it.
-
-    Returns:
-        An :class:`MCPTools` list of ``dspy.Tool`` owning the live session.
-    """
-
-    return _build_tools(
-        _http_transport(
-            url,
-            headers=headers,
-            timeout=timeout,
-            sse_read_timeout=sse_read_timeout,
-            auth=auth,
-            http_client_factory=http_client_factory,
-            terminate_on_close=terminate_on_close,
-        ),
-        label=url,
-        startup_timeout=startup_timeout,
-        name_prefix=name_prefix,
-        result_mode=result_mode,
-    )
-
-
 def _sse_transport(
     url: str,
     *,
@@ -661,56 +527,165 @@ def _sse_transport(
     return transport
 
 
-def mcp_sse(
-    url: str,
+def _transport_kind(transport: str, *, command: str | None, url: str | None) -> str:
+    """Validate the request and resolve ``"auto"`` to a concrete transport."""
+    if transport == "auto":
+        if command is not None and url is not None:
+            raise ValueError("Pass either command=... or url=..., not both")
+        if command is not None:
+            return "stdio"
+        if url is not None:
+            return "http"
+        raise ValueError("MCP() requires command=... or url=...")
+
+    if transport not in ("stdio", "http", "sse"):
+        raise ValueError(
+            f"Unknown transport {transport!r}: expected 'auto', 'stdio', "
+            "'http', 'sse', or a transport factory"
+        )
+    if transport == "stdio":
+        if url is not None:
+            raise ValueError("transport='stdio' does not accept url=...")
+        if command is None:
+            raise ValueError("transport='stdio' requires command=...")
+    elif command is not None:
+        raise ValueError(f"transport={transport!r} does not accept command=...")
+    elif url is None:
+        raise ValueError(f"transport={transport!r} requires url=...")
+    return transport
+
+
+def MCP(
     *,
+    command: str | None = None,
+    args: Sequence[str] = (),
+    env: dict[str, str] | None = None,
+    cwd: str | Path | None = None,
+    url: str | None = None,
+    transport: str | Callable[[], Any] = "auto",
     headers: dict[str, str] | None = None,
-    timeout: float = 5.0,
+    timeout: float | None = None,
     sse_read_timeout: float = 300.0,
     auth: Any = None,
-    httpx_client_factory: Any = None,
+    http_client_factory: Any = None,
+    terminate_on_close: bool = True,
     startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
     name_prefix: str = "",
     result_mode: Literal["text", "structured"] = "text",
 ) -> MCPTools:
-    """Connect to a remote MCP server over the legacy HTTP+SSE transport.
+    """Connect to an MCP server and return its tools as DSPy tools.
 
-    Use this only for servers that predate Streamable HTTP; prefer
-    :func:`mcp_http` otherwise.
+    One entry point for every transport. With the default ``transport="auto"``
+    the transport is inferred from the arguments:
+
+    - ``command=...`` starts a local stdio server process; ``args``, ``env``,
+      and ``cwd`` configure it.
+    - ``url=...`` connects to a remote server over Streamable HTTP (the MCP
+      default).
+
+    Pass ``transport="sse"`` with ``url=...`` for the legacy HTTP+SSE
+    transport, or pass a zero-argument callable returning an async context
+    manager that yields a ``(read, write)`` pair to use any custom transport.
+    The explicit string forms are ``"stdio"``, ``"http"``, and ``"sse"``.
+
+    The server starts immediately and stays alive on a background thread while
+    the returned tools or list are referenced. Every advertised tool is
+    converted with ``dspy.Tool.from_mcp_tool``, so the result can go straight
+    into ``dspy.ReAct``, ``dspy.RLM``, or any other DSPy module. MCP tools are
+    asynchronous under the hood; the returned tools enable DSPy's
+    async-to-sync conversion for their sync path, so both
+    ``agent(question=...)`` and ``await agent.acall(question=...)`` work
+    without extra configuration.
 
     Args:
-        url: SSE endpoint, e.g. ``"https://example.com/sse"``.
+        command: Executable to launch for a stdio server (e.g. ``"npx"``).
+        args: Arguments passed to the stdio server command.
+        env: Environment for the stdio server; ``None`` inherits the current
+            environment.
+        cwd: Working directory for the stdio server.
+        url: Remote MCP endpoint, e.g. ``"https://example.com/mcp"``.
+        transport: ``"auto"`` (default), ``"stdio"``, ``"http"``, ``"sse"``, or
+            a custom async transport factory.
         headers: Extra HTTP headers, e.g. an ``Authorization`` bearer token.
-        timeout: HTTP timeout for regular requests, in seconds.
-        sse_read_timeout: How long to wait for a new SSE event, in seconds.
-        auth: Optional ``httpx``/``httpx2`` auth handler.
-        httpx_client_factory: Optional zero-argument callable returning an async
+        timeout: HTTP timeout in seconds; defaults to 30 for Streamable HTTP
+            and 5 for legacy SSE.
+        sse_read_timeout: How long to wait for the server stream, in seconds.
+        auth: Optional ``httpx``/``httpx2`` auth handler (for example an MCP
+            OAuth client provider).
+        http_client_factory: Optional zero-argument callable returning an async
             HTTP client. It is created and closed on the connection's event
-            loop; when given, ``headers``, ``timeout``, and ``auth`` are
-            ignored.
+            loop, so it is safe for clients with loop affinity. When given,
+            ``headers``, ``timeout``, and ``auth`` are ignored.
+        terminate_on_close: Ask the server to terminate the HTTP session on
+            close.
         startup_timeout: Seconds to wait for initialization and tool listing.
-        name_prefix: Prepended to every tool name.
-        result_mode: ``"text"`` flattens MCP text content; ``"structured"``
-            returns ``structuredContent`` when the server provides it.
+        name_prefix: Prepended to every tool name, useful when combining
+            servers that expose identically named tools.
+        result_mode: ``"text"`` (default) flattens MCP text content to a
+            string/list; ``"structured"`` returns ``structuredContent`` when
+            the server provides it.
 
     Returns:
         An :class:`MCPTools` list of ``dspy.Tool`` owning the live session.
+        The server stops automatically when the tools (or the list) are no
+        longer referenced, and at interpreter exit; call ``close()`` only to
+        stop it earlier.
+
+    Example:
+        >>> import dspy
+        >>> from dspy_agent_tools import MCP, bash_exec
+        >>> files = MCP(
+        ...     command="npx",
+        ...     args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+        ... )
+        >>> hosted = MCP(url="https://example.com/mcp")
+        >>> legacy = MCP(url="https://example.com/sse", transport="sse")
+        >>> agent = dspy.ReAct(
+        ...     "question -> answer",
+        ...     tools=files + [bash_exec],
+        ... )
+        >>> result = agent(question="List the files in /tmp")
     """
+    factory: Callable[[], Any]
+    if callable(transport):
+        if command is not None or url is not None:
+            raise ValueError("Pass either a transport factory or command/url, not both")
+        factory = transport
+        label = getattr(transport, "__name__", "custom transport")
+    else:
+        kind = _transport_kind(transport, command=command, url=url)
+        if kind == "stdio":
+            factory = _stdio_transport(cast(str, command), args=args, env=env, cwd=cwd)
+            label = cast(str, command)
+        elif kind == "http":
+            factory = _http_transport(
+                cast(str, url),
+                headers=headers,
+                timeout=30.0 if timeout is None else timeout,
+                sse_read_timeout=sse_read_timeout,
+                auth=auth,
+                http_client_factory=http_client_factory,
+                terminate_on_close=terminate_on_close,
+            )
+            label = cast(str, url)
+        else:
+            factory = _sse_transport(
+                cast(str, url),
+                headers=headers,
+                timeout=5.0 if timeout is None else timeout,
+                sse_read_timeout=sse_read_timeout,
+                auth=auth,
+                httpx_client_factory=http_client_factory,
+            )
+            label = cast(str, url)
 
     return _build_tools(
-        _sse_transport(
-            url,
-            headers=headers,
-            timeout=timeout,
-            sse_read_timeout=sse_read_timeout,
-            auth=auth,
-            httpx_client_factory=httpx_client_factory,
-        ),
-        label=url,
+        factory,
+        label=label,
         startup_timeout=startup_timeout,
         name_prefix=name_prefix,
         result_mode=result_mode,
     )
 
 
-__all__ = ["MCPTools", "mcp", "mcp_http", "mcp_sse", "mcp_transport"]
+__all__ = ["MCP", "MCPTools"]
