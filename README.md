@@ -85,7 +85,7 @@ binaries, which must be on your PATH. The search tools
 ripgrep's and fd's engines as Python modules — so no `rg`/`fd` binary is
 needed.
 
-The MCP bridge is an optional extra (it pulls in DSPy and the MCP SDK):
+The MCP bridge is an optional extra (it pulls in DSPy and MCP SDK 2.x):
 
 ```bash
 uv add "dspy-agent-tools[mcp]"
