@@ -120,6 +120,12 @@ def by_name(tools: CLITools) -> dict[str, dspy.Tool]:
     return {tool.name: tool for tool in tools}
 
 
+def parse_flag(head: str, description: str = "") -> _Flag:
+    flag = _parse_flag_head(head, description)
+    assert flag is not None
+    return flag
+
+
 class TestFactory:
     def test_returns_three_dspy_tools(self, tmp_path):
         tools = make(tmp_path)
@@ -333,12 +339,12 @@ class TestParsingEdges:
         assert flag.kind == "string"
 
     def test_flag_head_parses_inline_defaults(self):
-        assert _parse_flag_head("--mode=auto", "").default == "auto"
-        assert _parse_flag_head("--flag=true", "").kind == "boolean"
-        assert _parse_flag_head("--flag=[]", "").kind == "array"
-        assert _parse_flag_head("--flag=map[]", "").kind == "object"
-        assert _parse_flag_head("--flag=", "").kind == "string"
-        assert _parse_flag_head("--flag=500", "").kind == "integer"
+        assert parse_flag("--mode=auto").default == "auto"
+        assert parse_flag("--flag=true").kind == "boolean"
+        assert parse_flag("--flag=[]").kind == "array"
+        assert parse_flag("--flag=map[]").kind == "object"
+        assert parse_flag("--flag=").kind == "string"
+        assert parse_flag("--flag=500").kind == "integer"
 
     def test_flag_head_parses_repeatable_names(self):
         flag = _parse_flag_head("--tag...", "")
@@ -358,8 +364,8 @@ class TestParsingEdges:
         assert flag.kind == "string"
 
     def test_flag_head_infers_object_and_array(self):
-        assert _parse_flag_head("--map map", "").kind == "object"
-        array = _parse_flag_head("--list list", "")
+        assert parse_flag("--map map").kind == "object"
+        array = parse_flag("--list list")
         assert array.kind == "array"
         assert array.repeatable is True
 
