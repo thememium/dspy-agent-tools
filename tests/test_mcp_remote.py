@@ -5,9 +5,12 @@ import gc
 import socket
 import subprocess
 import sys
+import threading
 import time
 import weakref
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 from mcp.client.sse import sse_client
@@ -135,3 +138,56 @@ class TestCustomTransport:
             assert _call_add(tools) == "5"
         finally:
             tools.close()
+
+
+def _notes(exc: BaseException) -> list[str]:
+    """Collect exception notes from an exception and any nested sub-exceptions."""
+    notes = [str(note) for note in getattr(exc, "__notes__", ())]
+    for sub in getattr(exc, "exceptions", ()) or ():
+        notes.extend(_notes(sub))
+    return notes
+
+
+class TestHTTPRejection:
+    @pytest.mark.parametrize(
+        ("status", "hint"),
+        [
+            (401, "Authorization"),
+            (404, "not found"),
+            (500, None),
+        ],
+    )
+    def test_non_2xx_status_is_reported(self, status, hint):
+        class Rejected(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = b"rejected"
+                self.send_response(status)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Rejected)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with pytest.raises(BaseException) as excinfo:
+                MCP(
+                    url=f"http://127.0.0.1:{server.server_port}/mcp",
+                    startup_timeout=5.0,
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        note = next(
+            (n for n in _notes(excinfo.value) if f"HTTP {status}" in n),
+            None,
+        )
+        assert note is not None
+        if hint is not None:
+            assert hint in note

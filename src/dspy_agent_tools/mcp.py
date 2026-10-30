@@ -129,6 +129,49 @@ def _as_sync_capable(tool: Tool) -> Tool:
     )
 
 
+class _HTTPFailures:
+    """Last failing HTTP response seen by an MCP HTTP client.
+
+    The Streamable HTTP client reports every non-2xx response as the same
+    generic ``INTERNAL_ERROR`` (``"Server returned an error response"``), so a
+    rejected request is otherwise indistinguishable from a broken server.
+    Recording the status here lets the startup error say what was rejected.
+    """
+
+    __slots__ = ("status", "url")
+
+    def __init__(self) -> None:
+        self.status: int | None = None
+        self.url: str | None = None
+
+    async def record(self, response: Any) -> None:
+        if response.status_code >= 400:
+            self.status = response.status_code
+            self.url = str(response.request.url)
+
+    def describe(self) -> str | None:
+        if self.status is None:
+            return None
+        where = f" from {self.url}" if self.url else ""
+        if self.status in (401, 403):
+            hint = (
+                "; pass headers={'Authorization': 'Bearer <token>'} or an "
+                "auth= handler to MCP()"
+            )
+        elif self.status == 404:
+            hint = "; the MCP endpoint was not found, check the URL"
+        else:
+            hint = ""
+        return f"MCP server answered HTTP {self.status}{where}{hint}"
+
+
+def _watch_http_failures(client: Any, failures: _HTTPFailures) -> None:
+    """Attach ``failures`` as a response hook on an HTTP client, if possible."""
+    hooks = getattr(client, "event_hooks", None)
+    if isinstance(hooks, dict):
+        hooks.setdefault("response", []).append(failures.record)
+
+
 class _ServeState:
     """State owned by the serve task; deliberately references no connection.
 
@@ -143,10 +186,12 @@ class _ServeState:
         transport: Callable[[], Any],
         client_session: type[ClientSession],
         ready: concurrent.futures.Future[Any],
+        failures: _HTTPFailures | None = None,
     ) -> None:
         self.transport = transport
         self.client_session = client_session
         self.ready = ready
+        self.failures = failures
         self.stop: asyncio.Event | None = None
         self.session: ClientSession | None = None
 
@@ -174,6 +219,9 @@ async def _serve(state: _ServeState) -> None:
             state.ready.set_result(session)
             await state.stop.wait()
     except BaseException as exc:
+        note = state.failures.describe() if state.failures is not None else None
+        if note:
+            exc.add_note(note)
         if not state.ready.done():
             state.ready.set_exception(exc)
         raise
@@ -197,6 +245,7 @@ class _Connection:
         client_session: type[ClientSession],
         label: str,
         startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
+        failures: _HTTPFailures | None = None,
     ) -> None:
         self._label = label
         self._loop = asyncio.new_event_loop()
@@ -210,6 +259,7 @@ class _Connection:
             transport,
             client_session,
             concurrent.futures.Future(),
+            failures,
         )
         self._serve_future: concurrent.futures.Future[None] | None = None
         self._session: ClientSession | None = None
@@ -406,11 +456,12 @@ def _build_tools(
     startup_timeout: float,
     name_prefix: str,
     result_mode: Literal["text", "structured"],
+    failures: _HTTPFailures | None = None,
 ) -> MCPTools:
     """Connect a transport, list its tools, and build the owning list."""
     Tool, ClientSession = _load()
 
-    connection = _Connection(transport, ClientSession, label, startup_timeout)
+    connection = _Connection(transport, ClientSession, label, startup_timeout, failures)
     try:
         session = connection.session
         if session is None:
@@ -441,6 +492,7 @@ def _http_transport(
     auth: Any,
     http_client_factory: Any,
     terminate_on_close: bool,
+    failures: _HTTPFailures | None = None,
 ) -> Callable[[], Any]:
     """Build the Streamable HTTP transport context-manager factory."""
 
@@ -465,6 +517,8 @@ def _http_transport(
                 timeout=httpx2.Timeout(timeout, read=sse_read_timeout),
                 auth=auth,
             )
+        if failures is not None:
+            _watch_http_failures(client, failures)
 
         async with (
             client,
@@ -631,6 +685,7 @@ def MCP(
         >>> result = agent(question="List the files in /tmp")
     """
     factory: Callable[[], Any]
+    failures = _HTTPFailures()
     if callable(transport):
         if command is not None or url is not None:
             raise ValueError("Pass either a transport factory or command/url, not both")
@@ -650,6 +705,7 @@ def MCP(
                 auth=auth,
                 http_client_factory=http_client_factory,
                 terminate_on_close=terminate_on_close,
+                failures=failures,
             )
             label = cast(str, url)
         else:
@@ -669,6 +725,7 @@ def MCP(
         startup_timeout=startup_timeout,
         name_prefix=name_prefix,
         result_mode=result_mode,
+        failures=failures,
     )
 
 
