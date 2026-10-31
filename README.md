@@ -356,6 +356,14 @@ CLI("git", include_search=True)
   for discovery, so `search_commands` (when enabled) keeps working. A
   `--json` argument you declare in `args` or `fixed` is passed through
   unchanged.
+- `max_output_chars` caps one command result (default `0`, unlimited). Use it
+  for token-heavy commands; prefer the CLI's own `--limit` or
+  `--token-budget` when available. Truncation is head-only and appends a
+  marker, so keep it off when the agent parses JSON.
+- Command paths resolve lazily inside `run_command`; fetching help first is
+  optional. Run a command directly when you know its path, and call
+  `get_command_help` only when a run fails or flags are unclear. Independent
+  calls can be batched in one `tool_calls` list.
 
 The parsed flag table is best-effort. `--help` is the schema, and the raw help
 is authoritative: positional grammars such as kubectl's usage line are
@@ -406,7 +414,7 @@ gh = CLI(
 # gh == [gh_pr_list]; no search_commands/get_command_help/run_command.
 ```
 
-`commands=` replaces discovery for that CLI group; the three `--help` tools are
+`commands=` replaces discovery for that CLI group; the `--help` tools are
 not created. Each tool name is `name_prefix + Command.name` (default prefix is
 the executable name).
 
@@ -428,6 +436,8 @@ the executable name).
   argument is required.
 - `repeatable=True` repeats the flag for each value in a list.
 - `choices=` adds an enum to the schema.
+- `max_output_chars` (or the CLI's own `--limit`/`--token-budget`) keeps
+  search-style results from dominating the context.
 - `fixed=` adds always-present argv items, such as `("--json",)`.
 - `ok_codes=` suppresses the `[exit code N]` notice for accepted exits.
 - `Command.command` accepts `"pr list"`, `"db:migrate"` (one token), or

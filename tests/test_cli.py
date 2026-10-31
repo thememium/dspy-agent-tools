@@ -202,6 +202,10 @@ class TestFactory:
         with pytest.raises(ValueError, match="Unknown mode"):
             make(tmp_path, mode="eager")
 
+    def test_rejects_negative_output_cap(self, tmp_path):
+        with pytest.raises(ValueError, match="max_output_chars"):
+            make(tmp_path, max_output_chars=-1)
+
 
 class TestToolboxIntegration:
     def test_toolbox_accepts_the_facade(self, tmp_path):
@@ -293,6 +297,22 @@ class TestRun:
         result = tools["fake_run_command"](command="fail", args=[])
         assert "boom" in result
         assert "[exit code 3]" in result
+
+    def test_output_can_be_capped(self, tmp_path):
+        tools = by_name(make(tmp_path, max_output_chars=5))
+        result = tools["fake_run_command"](command="status", args=[])
+        assert "[output truncated:" in result
+        assert "status ok" not in result
+
+    def test_explicit_output_can_be_capped(self, tmp_path):
+        tools = make(
+            tmp_path,
+            max_output_chars=5,
+            commands=[Command(command=("status",), name="status", description="Show")],
+        )
+        result = tools[0]()
+        assert "[output truncated:" in result
+        assert "status ok" not in result
 
     def test_empty_command_runs_root(self, tmp_path):
         tools = by_name(make(tmp_path, env={"FAKE_ROOT_ONLY": "1"}))

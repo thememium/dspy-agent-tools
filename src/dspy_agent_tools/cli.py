@@ -52,6 +52,7 @@ DEFAULT_HELP_TIMEOUT = 10.0
 DEFAULT_MAX_EXPANDS = 8
 DEFAULT_MAX_DEPTH = 3
 DEFAULT_MAX_HELP_CHARS = 20_000
+DEFAULT_MAX_OUTPUT_CHARS = 0
 
 _MODES = ("search", "code")
 _MISSING = object()
@@ -241,14 +242,17 @@ _SEARCH_DESC = (
 _DETAILS_DESC = (
     "Return help for one command path: usage, subcommands, parsed flags, and "
     "JSON help when available. Raw help is included only as a fallback. "
-    "command='' returns the root command list. Call directly for a known "
-    "command; call before run_command when flags are unclear."
+    "command='' returns the root command list. Prefer run_command first and "
+    "fetch help only when the run fails or flags are genuinely unclear; "
+    "independent help calls can share one tool_calls list."
 )
 _RUN_DESC = (
     "Run one command path of this CLI with argv strings. command='' runs the "
-    "executable itself, for CLIs without subcommands. args is a list such as "
-    "['--limit', '5']; no shell is used. Returns output with the exit code "
-    "and wall time."
+    "executable itself, for CLIs without subcommands. Command paths are "
+    "resolved lazily, so no prior help call is required. Put the query or "
+    "positional arguments first, then flags, e.g. ['search', 'coverage', "
+    "'--limit', '3']; no shell is used. Returns the output and wall time, "
+    "plus the exit code on failure."
 )
 
 
@@ -649,6 +653,17 @@ def _flag_was_rejected(output: str, flag: str) -> bool:
     return mentioned and bool(_FLAG_UNSUPPORTED.search(output))
 
 
+def _truncate_output(text: str, limit: int) -> str:
+    """Cap one command result and say how much was omitted."""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    marker = (
+        f"\n\n[output truncated: set max_output_chars=0 for the full {len(text)} chars]"
+    )
+    keep = max(0, limit - len(marker))
+    return text[:keep].rstrip() + marker
+
+
 def _run_argv(
     executable: str,
     base_args: Sequence[str],
@@ -660,6 +675,7 @@ def _run_argv(
     timeout: float,
     ok_codes: frozenset[int] = frozenset(),
     json_flag: str | None = None,
+    max_output_chars: int = 0,
 ) -> str:
     """Execute one argv tail, trying ``json_flag`` first and falling back.
 
@@ -674,13 +690,15 @@ def _run_argv(
                 json_argv, cwd=cwd, timeout=timeout, env=env, ok_codes=ok_codes
             )
             if returncode == 0 or not _flag_was_rejected(output, json_flag):
-                return _render(output, notices, elapsed)
+                return _render(
+                    _truncate_output(output, max_output_chars), notices, elapsed
+                )
         output, notices, elapsed, _returncode = _execute(
             argv, cwd=cwd, timeout=timeout, env=env, ok_codes=ok_codes
         )
     except CommandNotFound:
         return f"[command not found: {executable}]"
-    return _render(output, notices, elapsed)
+    return _render(_truncate_output(output, max_output_chars), notices, elapsed)
 
 
 class _Discovery:
@@ -699,6 +717,7 @@ class _Discovery:
         max_depth: int,
         help_tokens: tuple[str, ...],
         json_flag: str | None,
+        max_output_chars: int = 0,
     ) -> None:
         self.executable = executable
         self.base_args = tuple(base_args)
@@ -709,6 +728,7 @@ class _Discovery:
         self.help_timeout = help_timeout
         self.help_tokens = help_tokens
         self.json_flag = json_flag
+        self.max_output_chars = max_output_chars
         self.max_expands = max_expands
         self.max_depth = max_depth
         self._lock = threading.RLock()
@@ -948,6 +968,7 @@ class _Discovery:
             env=self.env,
             timeout=self.timeout,
             json_flag=self.json_flag,
+            max_output_chars=self.max_output_chars,
         )
 
 
@@ -1273,6 +1294,7 @@ def _build_command_tools(
     env: dict[str, str] | None,
     timeout: float,
     json_flag: str | None,
+    max_output_chars: int,
 ) -> list[Tool]:
     """Build one ``dspy.Tool`` per explicitly defined command."""
     tool_cls = _load_tool()
@@ -1300,6 +1322,7 @@ def _build_command_tools(
                 timeout=timeout,
                 ok_codes=command.ok_codes,
                 json_flag=json_flag,
+                max_output_chars=max_output_chars,
             )
 
         run.__name__ = tool_name
@@ -1409,6 +1432,7 @@ def CLI(
     max_help_chars: int = DEFAULT_MAX_HELP_CHARS,
     help_flag: str | Sequence[str] | None = "--help",
     json_flag: str | None = None,
+    max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
     include_search: bool = False,
 ) -> CLITools:
     """Expose one executable as explicit DSPy tools or a discovery facade.
@@ -1458,6 +1482,11 @@ def CLI(
             run and help call and fall back when the CLI rejects it. An
             already-declared ``--json`` argument is always passed through
             unchanged.
+        max_output_chars: Cap one command result before it reaches the model.
+            ``0`` (default) keeps the full output. Truncation is head-only and
+            appends a marker; JSON output can become invalid, so keep this
+            off when the agent parses it. Prefer the CLI's own limits such as
+            ``--limit`` or ``--token-budget`` when available.
         include_search: Add ``search_commands`` to the discovery tools.
             It is off by default because ``get_command_help(command="")``
             already lists root commands and avoids an extra lookup turn.
@@ -1508,6 +1537,8 @@ def CLI(
         raise ValueError("max_depth must be >= 1")
     if max_help_chars < 0:
         raise ValueError("max_help_chars must be >= 0")
+    if max_output_chars < 0:
+        raise ValueError("max_output_chars must be >= 0")
     if json_flag is not None and not json_flag.startswith("-"):
         raise ValueError("json_flag must start with '-' or be None")
     if help_flag is None:
@@ -1543,6 +1574,7 @@ def CLI(
             env=env,
             timeout=timeout,
             json_flag=json_flag,
+            max_output_chars=max_output_chars,
         )
     else:
         discovery = _Discovery(
@@ -1556,6 +1588,7 @@ def CLI(
             max_depth=max_depth,
             help_tokens=help_tokens,
             json_flag=json_flag,
+            max_output_chars=max_output_chars,
         )
         tools = _build_tools(
             discovery,
