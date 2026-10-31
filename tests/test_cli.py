@@ -43,6 +43,7 @@ Commands:
   where     Show environment
   jsonable  Emit JSON
   legacy    Legacy command without JSON
+  no_help   Command without a help flag
 
 Options:
   --verbose    Be loud
@@ -84,14 +85,17 @@ Usage:
 """
 
 args = sys.argv[1:]
-help_flag = next((arg for arg in args if arg in ("--help", "-h")), None)
+help_flag = next((arg for arg in args if arg in ("--help", "-h", "help")), None)
 if help_flag:
-    path = [arg for arg in args if arg not in ("--help", "-h", "--json")]
+    path = [arg for arg in args if arg not in ("--help", "-h", "help", "--json")]
     if "--json" in args and path == ["pr", "list"]:
         sys.stdout.write('{"usage": "fake-cli pr list", "flags": ["--limit"]}')
         raise SystemExit(0)
     if "--json" in args and path == ["legacy"]:
         print("unknown flag: --json")
+        raise SystemExit(2)
+    if path == ["no_help"]:
+        print(f"unknown flag: {help_flag}")
         raise SystemExit(2)
     if os.environ.get("FAKE_MAN") and help_flag == "--help":
         sys.stdout.write("N\bNA\bAM\bME\n     fake-cli\n")
@@ -112,7 +116,9 @@ if help_flag:
     raise SystemExit(0)
 
 json_requested = "--json" in args
-if args and args[0] == "legacy":
+if args == ["no_help"]:
+    print("no_help output")
+elif args and args[0] == "legacy":
     if json_requested:
         print("unknown flag: --json")
         print()
@@ -280,11 +286,47 @@ class TestRun:
         assert "env=hello" in result
         assert f"cwd={workdir.resolve()}" in result
 
-    def test_man_page_help_falls_back_to_short_help(self, tmp_path):
-        tools = by_name(make(tmp_path, env={"FAKE_MAN": "1"}))
+    def test_custom_short_help_flag(self, tmp_path):
+        tools = by_name(
+            make(
+                tmp_path,
+                env={"FAKE_MAN": "1"},
+                help_flag=("-h",),
+            )
+        )
         result = tools["fake_get_command_help"](command="pr")
         assert "Usage:" in result
         assert "Manage pull requests." in result
+
+    def test_help_argument(self, tmp_path):
+        tools = by_name(make(tmp_path, help_flag="help"))
+        result = tools["fake_get_command_help"](command="")
+        assert "fake-cli does fake things." in result
+
+    def test_falls_back_to_main_command_when_help_rejected(self, tmp_path):
+        tools = by_name(make(tmp_path))
+        result = tools["fake_get_command_help"](command="no_help")
+        assert "no_help output" in result
+
+    def test_help_flag_none_runs_command(self, tmp_path):
+        tools = make(tmp_path, help_flag=None)
+        discovery = tools._discovery
+        assert discovery is not None
+        text, _code, _json_help = discovery._help_text(("no_help",))
+        assert "no_help output" in text
+
+    def test_man_page_is_returned_when_no_short_help_configured(self, tmp_path):
+        tools = make(tmp_path, env={"FAKE_MAN": "1"})
+        discovery = tools._discovery
+        assert discovery is not None
+        text, _code, _json_help = discovery._help_text(("pr",))
+        assert "fake-cli" in text
+
+    def test_rejects_invalid_help_flag(self, tmp_path):
+        with pytest.raises(ValueError, match="help_flag"):
+            make(tmp_path, help_flag="")
+        with pytest.raises(ValueError, match="help_flag"):
+            make(tmp_path, help_flag=cast(Any, (1,)))
 
 
 class TestCodeMode:
@@ -434,7 +476,7 @@ class TestParsingEdges:
 
 class TestDiscoveryEdges:
     @staticmethod
-    def discovery(json_flag=None):
+    def discovery(json_flag=None, help_tokens=("--help",)):
         return cli_module._Discovery(
             sys.executable,
             base_args=[],
@@ -444,6 +486,7 @@ class TestDiscoveryEdges:
             help_timeout=1,
             max_expands=2,
             max_depth=2,
+            help_tokens=help_tokens,
             json_flag=json_flag,
         )
 
