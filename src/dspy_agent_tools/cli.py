@@ -30,6 +30,7 @@ Example:
 from __future__ import annotations
 
 import inspect
+import json
 import re
 import shlex
 import threading
@@ -197,6 +198,13 @@ _PIPE_CHOICES = re.compile(r"\((\w+(?:\|\w+)+)\)")
 _USAGE = re.compile(r"^\s*usage:\s*(.*)$", re.IGNORECASE)
 _USAGE_HEADER = re.compile(r"^\s*USAGE\s*$")
 _OR_LINE = re.compile(r"^\s*or:", re.IGNORECASE)
+_FLAG_UNSUPPORTED = re.compile(
+    r"(?:unknown|unrecognized|invalid|unexpected|not defined|no such)"
+    r"[^\n]*\b(?:flag|option|argument|switch)\b"
+    r"|\bflag provided but not defined\b"
+    r"|\bwas(?:n't| not) expected\b",
+    re.IGNORECASE,
+)
 
 _META_COMMANDS = {
     "__complete",
@@ -596,12 +604,42 @@ class _Node:
     description: str = ""
     usage: str = ""
     help: str = ""
+    json_help: str = ""
     flags: dict[str, _Flag] = field(default_factory=dict)
     children: dict[str, _Node] = field(default_factory=dict)
     expanded: bool = False
 
     def label(self) -> str:
         return " ".join(self.path) or "(root)"
+
+
+def _json_document(text: str) -> str | None:
+    """Return ``text`` when it is a complete JSON document, else ``None``."""
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "[{":
+        return None
+    try:
+        json.loads(stripped)
+    except ValueError:
+        return None
+    return stripped
+
+
+def _has_flag(argv: Sequence[str], flag: str) -> bool:
+    """Return whether an argv list already carries ``flag`` (or ``flag=...``)."""
+    return any(item == flag or item.startswith(f"{flag}=") for item in argv)
+
+
+def _flag_was_rejected(output: str, flag: str) -> bool:
+    """Recognize a CLI rejecting an unknown flag, e.g. ``gh --json``.
+
+    Git renders the rejected option without dashes (``unknown option `json'``),
+    so the bare name counts when it is long enough to be unambiguous.
+    """
+    lowered = output.casefold()
+    bare = flag.lstrip("-").split("=", 1)[0].casefold()
+    mentioned = flag.casefold() in lowered or (len(bare) >= 3 and bare in lowered)
+    return mentioned and bool(_FLAG_UNSUPPORTED.search(output))
 
 
 def _run_argv(
@@ -614,10 +652,22 @@ def _run_argv(
     env: dict[str, str] | None,
     timeout: float,
     ok_codes: frozenset[int] = frozenset(),
+    json_flag: str | None = None,
 ) -> str:
-    """Execute one argv tail and render it like the bash tools."""
+    """Execute one argv tail, trying ``json_flag`` first and falling back.
+
+    The JSON attempt is retried without the flag only when the CLI explicitly
+    rejects it as an unknown flag; real command failures are returned as-is.
+    """
     argv = [executable, *base_args, *path, *args]
     try:
+        if json_flag is not None and not _has_flag(argv, json_flag):
+            json_argv = [executable, *base_args, *path, json_flag, *args]
+            output, notices, elapsed, returncode = _execute(
+                json_argv, cwd=cwd, timeout=timeout, env=env, ok_codes=ok_codes
+            )
+            if returncode == 0 or not _flag_was_rejected(output, json_flag):
+                return _render(output, notices, elapsed)
         output, notices, elapsed, _returncode = _execute(
             argv, cwd=cwd, timeout=timeout, env=env, ok_codes=ok_codes
         )
@@ -640,6 +690,7 @@ class _Discovery:
         help_timeout: float,
         max_expands: int,
         max_depth: int,
+        json_flag: str | None,
     ) -> None:
         self.executable = executable
         self.base_args = tuple(base_args)
@@ -648,6 +699,7 @@ class _Discovery:
         self.help_env = {**self.env, **_HELP_ENV}
         self.timeout = timeout
         self.help_timeout = help_timeout
+        self.json_flag = json_flag
         self.max_expands = max_expands
         self.max_depth = max_depth
         self._lock = threading.RLock()
@@ -660,10 +712,41 @@ class _Discovery:
             self.root = _Node("", ())
             self._nodes = {(): self.root}
 
-    def _help_text(self, path: tuple[str, ...]) -> tuple[str, int | None]:
-        """Fetch help for a path, retrying ``-h`` after a man page or failure."""
+    def _help_text(self, path: tuple[str, ...]) -> tuple[str, int | None, str]:
+        """Fetch help, trying ``json_flag`` when the CLI advertises it.
+
+        Returns ``(text, returncode, json_help)``. JSON help is kept alongside
+        the text help used for command discovery, so ``search_commands`` keeps
+        working when a CLI supports structured help.
+        """
         last: tuple[str, int | None] = ("", 1)
+        json_help = ""
         for flag in ("--help", "-h"):
+            if self.json_flag is not None:
+                json_argv = [
+                    self.executable,
+                    *self.base_args,
+                    *path,
+                    flag,
+                    self.json_flag,
+                ]
+                try:
+                    output, _notices, _elapsed, returncode = _execute(
+                        json_argv,
+                        cwd=self.cwd,
+                        timeout=self.help_timeout,
+                        env=self.help_env,
+                    )
+                except Exception as exc:  # noqa: BLE001 - surfaced as help text
+                    last = (str(exc), 1)
+                else:
+                    if output.strip() and not _is_man_page(output):
+                        document = _json_document(output)
+                        if document is not None:
+                            json_help = document
+                        elif not _flag_was_rejected(output, self.json_flag):
+                            return _clean(output), returncode, json_help
+                    last = (output, returncode)
             try:
                 output, _notices, _elapsed, returncode = _execute(
                     [self.executable, *self.base_args, *path, flag],
@@ -675,9 +758,9 @@ class _Discovery:
                 last = (str(exc), 1)
                 continue
             if output.strip() and not _is_man_page(output):
-                return _clean(output), returncode
+                return _clean(output), returncode, json_help
             last = (output, returncode)
-        return _clean(last[0]), last[1]
+        return _clean(last[0]), last[1], json_help
 
     def expand(self, path: tuple[str, ...]) -> _Node:
         """Fetch and parse one node's help exactly once."""
@@ -687,8 +770,9 @@ class _Discovery:
                 raise KeyError(" ".join(path))
             if node.expanded:
                 return node
-            text, returncode = self._help_text(path)
+            text, returncode, json_help = self._help_text(path)
             node.help = text
+            node.json_help = json_help
             usage, description, commands, flags = _parse_help(text, is_root=not path)
             node.usage = usage
             node.flags = flags
@@ -825,6 +909,7 @@ class _Discovery:
             cwd=self.cwd,
             env=self.env,
             timeout=self.timeout,
+            json_flag=self.json_flag,
         )
 
 
@@ -873,6 +958,11 @@ def _details_text(node: _Node, max_help_chars: int) -> str:
         parts.append(
             "Flags:\n" + "\n".join(flag.line() for flag in node.flags.values())
         )
+    if node.json_help and max_help_chars:
+        data = node.json_help
+        if len(data) > max_help_chars:
+            data = data[:max_help_chars].rstrip() + "\n[help truncated]"
+        parts.append("JSON help:\n" + data.rstrip())
     if node.help and max_help_chars:
         raw = node.help
         if len(raw) > max_help_chars:
@@ -887,6 +977,11 @@ def _details_record(node: _Node, max_help_chars: int) -> dict[str, Any]:
         raw = node.help
         if len(raw) > max_help_chars:
             raw = raw[:max_help_chars].rstrip() + "\n[help truncated]"
+    json_help = ""
+    if node.json_help and max_help_chars:
+        json_help = node.json_help
+        if len(json_help) > max_help_chars:
+            json_help = json_help[:max_help_chars].rstrip() + "\n[help truncated]"
     return {
         "command": node.label(),
         "description": node.description,
@@ -896,6 +991,7 @@ def _details_record(node: _Node, max_help_chars: int) -> dict[str, Any]:
         },
         "flags": {name: flag.record() for name, flag in node.flags.items()},
         "help": raw,
+        "json_help": json_help,
     }
 
 
@@ -1134,6 +1230,7 @@ def _build_command_tools(
     cwd: Path | None,
     env: dict[str, str] | None,
     timeout: float,
+    json_flag: str | None,
 ) -> list[Tool]:
     """Build one ``dspy.Tool`` per explicitly defined command."""
     tool_cls = _load_tool()
@@ -1160,6 +1257,7 @@ def _build_command_tools(
                 env=env,
                 timeout=timeout,
                 ok_codes=command.ok_codes,
+                json_flag=json_flag,
             )
 
         run.__name__ = tool_name
@@ -1261,6 +1359,7 @@ def CLI(
     max_expands: int = DEFAULT_MAX_EXPANDS,
     max_depth: int = DEFAULT_MAX_DEPTH,
     max_help_chars: int = DEFAULT_MAX_HELP_CHARS,
+    json_flag: str | None = None,
 ) -> CLITools:
     """Expose one executable as explicit DSPy tools or a discovery facade.
 
@@ -1298,6 +1397,11 @@ def CLI(
             (discovery only).
         max_help_chars: Cap for the raw help text in ``get_command_help``;
             ``0`` omits it (discovery only). Parsed flags are unaffected.
+        json_flag: Optional machine-readable output flag to probe. It is
+            disabled by default; pass ``"--json"`` to try it on every command
+            run and help call and fall back when the CLI rejects it. An
+            already-declared ``--json`` argument is always passed through
+            unchanged.
 
     Returns:
         A :class:`CLITools` list. With ``commands=...`` it contains one tool
@@ -1344,6 +1448,8 @@ def CLI(
         raise ValueError("max_depth must be >= 1")
     if max_help_chars < 0:
         raise ValueError("max_help_chars must be >= 0")
+    if json_flag is not None and not json_flag.startswith("-"):
+        raise ValueError("json_flag must start with '-' or be None")
 
     command_list = None if commands is None else list(commands)
     if command_list is not None and not command_list:
@@ -1368,6 +1474,7 @@ def CLI(
             cwd=resolved_cwd,
             env=env,
             timeout=timeout,
+            json_flag=json_flag,
         )
     else:
         discovery = _Discovery(
@@ -1379,6 +1486,7 @@ def CLI(
             help_timeout=help_timeout,
             max_expands=max_expands,
             max_depth=max_depth,
+            json_flag=json_flag,
         )
         tools = _build_tools(
             discovery, prefix=prefix, mode=mode, max_help_chars=max_help_chars
