@@ -2,13 +2,14 @@
 
 Unlike MCP, a plain command-line program has no machine-readable protocol for
 its commands or arguments. The only schema it exposes is its own help output.
-``CLI`` therefore returns a three-tool discovery facade instead of one tool per
-command:
+``CLI`` therefore returns two discovery tools by default -- help and run --
+instead of one tool per command:
 
-- ``search_commands`` finds command paths by name and description.
 - ``get_command_help`` returns the CLI's real help: usage, subcommands,
-  parsed flags, and the raw help text.
+  parsed flags, and JSON help when available.
 - ``run_command`` executes one command path with an argv list.
+- ``search_commands`` is optional (``include_search=True``) for callers that
+  need name/description lookup over a large command tree.
 
 Discovery happens on demand: the root help is fetched on the first tool call,
 each branch is expanded only when a search or lookup reaches it, and every
@@ -233,14 +234,15 @@ _ARRAY_TYPES = {"array", "list", "slice", "strings"}
 _OBJECT_TYPES = {"map", "object"}
 
 _SEARCH_DESC = (
-    "Search this CLI's command tree. Returns matching command paths and "
-    "one-line descriptions. Discovery is lazy: deeper commands are read from "
-    "their help on demand and cached."
+    "Search this CLI's command tree by name or description. Use this only "
+    "when you do not know the exact command path; if you know it, call "
+    "get_command_help directly. Returns matching paths and descriptions."
 )
 _DETAILS_DESC = (
-    "Return this CLI's own help for one command path: usage, subcommands, "
-    "parsed flags, and the raw help text. Call before run_command when the "
-    "flags are unclear."
+    "Return help for one command path: usage, subcommands, parsed flags, and "
+    "JSON help when available. Raw help is included only as a fallback. "
+    "command='' returns the root command list. Call directly for a known "
+    "command; call before run_command when flags are unclear."
 )
 _RUN_DESC = (
     "Run one command path of this CLI with argv strings. command='' runs the "
@@ -926,8 +928,8 @@ class _Discovery:
                     known = ", ".join(list(node.children)[:8]) or "none"
                     raise ValueError(
                         f"Unknown command {token!r} under "
-                        f"{node.label()!r}; call search_commands "
-                        f"first. Known commands: {known}."
+                        f"{node.label()!r}; call get_command_help first. "
+                        f"Known commands: {known}."
                     )
                 node = child
             if not node.expanded:
@@ -951,7 +953,10 @@ class _Discovery:
 
 def _search_text(nodes: Sequence[_Node]) -> str:
     if not nodes:
-        return "[no matching commands]"
+        return (
+            "[no matching commands; call get_command_help(command='') for the "
+            "root command list]"
+        )
     lines = []
     for index, node in enumerate(nodes, 1):
         label = node.label()
@@ -999,7 +1004,8 @@ def _details_text(node: _Node, max_help_chars: int) -> str:
         if len(data) > max_help_chars:
             data = data[:max_help_chars].rstrip() + "\n[help truncated]"
         parts.append("JSON help:\n" + data.rstrip())
-    if node.help and max_help_chars:
+    structured = bool(node.flags or node.children or node.json_help)
+    if node.help and max_help_chars and not structured:
         raw = node.help
         if len(raw) > max_help_chars:
             raw = raw[:max_help_chars].rstrip() + "\n[help truncated]"
@@ -1319,6 +1325,7 @@ def _build_tools(
     prefix: str,
     mode: Literal["search", "code"],
     max_help_chars: int,
+    include_search: bool,
 ) -> list[Tool]:
     """Build the three discovery tools over one executable."""
     Tool = _load_tool()
@@ -1341,12 +1348,7 @@ def _build_tools(
         """Run a command path with argv strings; no shell is used."""
         return discovery.run(str(command or ""), _normalize_args(args))
 
-    return [
-        Tool(
-            search_commands,
-            name=f"{prefix}search_commands",
-            desc=_SEARCH_DESC,
-        ),
+    tools = [
         Tool(
             get_command_help,
             name=f"{prefix}get_command_help",
@@ -1354,14 +1356,24 @@ def _build_tools(
         ),
         Tool(run_command, name=f"{prefix}run_command", desc=_RUN_DESC),
     ]
+    if include_search:
+        tools.insert(
+            0,
+            Tool(
+                search_commands,
+                name=f"{prefix}search_commands",
+                desc=_SEARCH_DESC,
+            ),
+        )
+    return tools
 
 
 class CLITools(list):
     """List of ``dspy.Tool`` backed by one executable.
 
     Behaves like a normal list, so it can be passed directly as ``tools=`` or
-    concatenated with other tools. In discovery mode the three tools share one
-    cache, and :meth:`refresh` drops its help pages. Explicit-command mode has
+    concatenated with other tools. Discovery tools share one cache, and
+    :meth:`refresh` drops its help pages. Explicit-command mode has
     no discovery cache, so :meth:`refresh` is a no-op.
     """
 
@@ -1397,21 +1409,22 @@ def CLI(
     max_help_chars: int = DEFAULT_MAX_HELP_CHARS,
     help_flag: str | Sequence[str] | None = "--help",
     json_flag: str | None = None,
+    include_search: bool = False,
 ) -> CLITools:
     """Expose one executable as explicit DSPy tools or a discovery facade.
 
     With ``commands=...``, each :class:`Command` becomes its own typed
     ``dspy.Tool`` and discovery is skipped entirely. Without it, the CLI's
-    own help is the schema: ``search_commands`` reads the root help, expands
-    the best matching branches, and caches every page; ``get_command_help``
-    expands exactly the requested path; ``run_command`` resolves that path
-    and executes it.
+    own help is the schema: ``get_command_help`` reads the root command list
+    and expands exactly the requested path; ``run_command`` resolves that
+    path and executes it. ``search_commands`` is added only with
+    ``include_search=True``.
 
     Args:
         executable: Program to run, resolved through ``PATH`` (or a path).
             Only this program is reachable; arguments are never passed to a
             shell.
-        commands: Explicit command definitions. When provided, the three
+        commands: Explicit command definitions. When provided, the
             ``--help`` discovery tools are skipped; each command becomes one
             tool. The sequence must contain at least one command. Commands can
             declare required and optional arguments, flags, positionals,
@@ -1429,11 +1442,12 @@ def CLI(
         timeout: Deadline in seconds for ``run_command``; ``0`` disables it.
         help_timeout: Deadline in seconds for each help call (discovery only).
         max_expands: Maximum help pages a single search may fetch (discovery
-            only).
+            only, with ``include_search=True``).
         max_depth: Maximum command-tree levels a single search may walk
-            (discovery only).
-        max_help_chars: Cap for the raw help text in ``get_command_help``;
-            ``0`` omits it (discovery only). Parsed flags are unaffected.
+            (discovery only, with ``include_search=True``).
+        max_help_chars: Cap for the JSON/raw help text in
+            ``get_command_help``; ``0`` omits it (discovery only). Parsed
+            flags are unaffected.
         help_flag: Help invocation tokens, default ``"--help"``. Pass ``"-h"``,
             ``"help"``, or a sequence such as ``("help", "commands")`` when the
             CLI uses something else. ``None`` skips help and runs the command
@@ -1444,12 +1458,16 @@ def CLI(
             run and help call and fall back when the CLI rejects it. An
             already-declared ``--json`` argument is always passed through
             unchanged.
+        include_search: Add ``search_commands`` to the discovery tools.
+            It is off by default because ``get_command_help(command="")``
+            already lists root commands and avoids an extra lookup turn.
 
     Returns:
         A :class:`CLITools` list. With ``commands=...`` it contains one tool
-        per command. Otherwise it contains ``search_commands``,
-        ``get_command_help``, and ``run_command``; call :meth:`refresh` to
-        clear cached help pages.
+        per command. Otherwise it contains ``get_command_help`` and
+        ``run_command``; ``search_commands`` is added with
+        ``include_search=True``. Call :meth:`refresh` to clear cached help
+        pages.
 
     Examples:
         >>> from dspy_agent_tools import CLI
@@ -1540,7 +1558,11 @@ def CLI(
             json_flag=json_flag,
         )
         tools = _build_tools(
-            discovery, prefix=prefix, mode=mode, max_help_chars=max_help_chars
+            discovery,
+            prefix=prefix,
+            mode=mode,
+            max_help_chars=max_help_chars,
+            include_search=include_search,
         )
     return CLITools(tools, discovery)
 
