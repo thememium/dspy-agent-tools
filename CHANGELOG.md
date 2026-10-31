@@ -1,5 +1,67 @@
 # Changelog
 
+## v0.1.8 (2026-10-31)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.7...v0.1.8)
+
+### 🚀 Enhancements
+
+- **cli**: add arguments parsing, usage hints, and docs updates ([1e09f47](https://github.com/thememium/dspy-agent-tools/commit/1e09f4791849c19d72b86db9280aac230e583893))
+- **cli**: add max_output_chars to cap command output size ([bcf5505](https://github.com/thememium/dspy-agent-tools/commit/bcf5505d5440cdbb3ce95acc22d524e3bad56fbd))
+- **cli**: add include_search flag to factory and toolbox ([980f8bc](https://github.com/thememium/dspy-agent-tools/commit/980f8bc240fe3ceec73835413399da9cd77e5bb6))
+- **cli**: support help flag as command and add no_help command ([219a7ef](https://github.com/thememium/dspy-agent-tools/commit/219a7efe671d05f3a6b8e486814751fff1af6eff))
+- **cli**: support custom help flag for discovery ([22a337c](https://github.com/thememium/dspy-agent-tools/commit/22a337c61ed05b9e00fa39995ae011ffe899e379))
+- **cli**: add JSON flag support and legacy command ([5a87854](https://github.com/thememium/dspy-agent-tools/commit/5a8785454258b502be93d5d1bbbdd7116afb25dd))
+- **cli**: add JSON support flag to CLI discovery and command execution ([583dad5](https://github.com/thememium/dspy-agent-tools/commit/583dad567689c6d33864886f6972b76a9ae2796d))
+- **dspy_agent_tools/__init__**: expose CLI helper classes Arg, Argument, Command, Option ([4a534a3](https://github.com/thememium/dspy-agent-tools/commit/4a534a3c04f22f4dd4c454944a1f8c07b217b2db))
+- **cli**: add explicit command definitions and refactor CLI tool builder ([9ab8315](https://github.com/thememium/dspy-agent-tools/commit/9ab8315b2f4e7a8aea1c28de14966c9048478521))
+- **cli**: add lazy discovery of executable commands via --help ([318dc03](https://github.com/thememium/dspy-agent-tools/commit/318dc0392ad29dc49ecb1580c76e35bc241d3b95))
+- **dspy_agent_tools**: expose CLI and CLITools in package __all__ ([07638f0](https://github.com/thememium/dspy-agent-tools/commit/07638f059545ab517903b4821adc051fa7c4af92))
+- **bash.py**: add optional env to subprocess execution ([d58beab](https://github.com/thememium/dspy-agent-tools/commit/d58beab2d9514cd720285461e906bacefeef6e99))
+- **dspy_agent_tools**: add CLI discovery tools ([4066217](https://github.com/thememium/dspy-agent-tools/commit/4066217763a12853c18e28fa22034f391bc23014))
+
+### 🩹 Fixes
+
+- **test_cli**: correct flag kind, enrich error suggestions ([7e6ca75](https://github.com/thememium/dspy-agent-tools/commit/7e6ca75ce2eb7c715a10e4a7c57d91ba23201e54))
+
+### 💅 Refactors
+
+- **dspy_agent_tools/cli.py**: add include_search flag to control search_commands, adjust discovery behavior and update documentation ([3917c21](https://github.com/thememium/dspy-agent-tools/commit/3917c212a5632953b9b5e5a82904c20628f8b09e))
+- **dspy_agent_tools**: relocate Arg to cli module, remove from exports ([b83d3cc](https://github.com/thememium/dspy-agent-tools/commit/b83d3cccaabf956724f05a9aaee2c325b0d1cca5))
+- **dspy_agent_tools**: remove unused Arg from CLI imports ([17e6b59](https://github.com/thememium/dspy-agent-tools/commit/17e6b59c5f068d642f5e75ba37588c1669d2ea46))
+- **cli.py**: remove legacy Arg from public API and update docs ([8e028ae](https://github.com/thememium/dspy-agent-tools/commit/8e028aec58642575f43d977113ca1bdf3968bbd5))
+- **cli**: update Command constructor usage to keyword arguments ([8e10539](https://github.com/thememium/dspy-agent-tools/commit/8e10539f157f214729cc12e3f860ce7416d54a87))
+- **dspy_agent_tools/cli.py**: make CLI argument classes keyword‑only and rename path to command ([73e1848](https://github.com/thememium/dspy-agent-tools/commit/73e1848d5bb8fb55e8d2d694b1e6dbb2f589b347))
+- **cli.py**: add pragma no cover to defensive flag name check ([9ef48dc](https://github.com/thememium/dspy-agent-tools/commit/9ef48dcd51cc04fa0cdb3a097864a00926f1022b))
+
+### 📖 Documentation
+
+- **contributing**: improve project structure diagram and add import section ([5774e17](https://github.com/thememium/dspy-agent-tools/commit/5774e179944c51bdefeb79a57b2b2cbe27f6df2f))
+- clarify CLI tool behavior and include_search option ([fcc18ed](https://github.com/thememium/dspy-agent-tools/commit/fcc18ed09101538ce52d55bc87fe2440dcdb2725))
+- **readme**: add detailed help_flag description for better CLI usage ([55849f9](https://github.com/thememium/dspy-agent-tools/commit/55849f95a47a6adfd6adc2a7b49e09af8ce3a697))
+- **README**: clarify Argument and Option as the only public declaration helpers ([0697452](https://github.com/thememium/dspy-agent-tools/commit/0697452dc1b88928d992e84181bbf49bc9a4d1fe))
+- add json_flag description to README ([dbddbd8](https://github.com/thememium/dspy-agent-tools/commit/dbddbd8734a02e8d631768e8518c14621e1baf64))
+- **README**: update CLI example syntax for clarity and consistency ([68bde6d](https://github.com/thememium/dspy-agent-tools/commit/68bde6d47ccc5b55fec21f18a86e54b4dae309ac))
+- **README**: add explicit CLI commands section and update CLI description ([961eb1c](https://github.com/thememium/dspy-agent-tools/commit/961eb1cbf6769a6adaacf2f7a90ec19fde7c6490))
+- add CLI documentation and update tool families list ([17a360d](https://github.com/thememium/dspy-agent-tools/commit/17a360d76e64d4f4453f1bcc9b71ecfc2d40f242))
+
+### ✅ Tests
+
+- extend smoke test to include Arg, Argument, Command, Option ([13c4b38](https://github.com/thememium/dspy-agent-tools/commit/13c4b3886c2519f4c4c49fe8bff4ba2af73793c7))
+- add explicit command and argument handling tests ([79b7657](https://github.com/thememium/dspy-agent-tools/commit/79b76578eddd84d74783d41dfaec7f07ddcdae07))
+- **test_cli**: add parse_flag helper to simplify flag parsing tests ([9db9702](https://github.com/thememium/dspy-agent-tools/commit/9db9702570df733844cedeafa7a6c802bef2d514))
+- add comprehensive edge case tests for CLI parsing and discovery ([0401673](https://github.com/thememium/dspy-agent-tools/commit/04016734621af4377cd79b8cbf2706200a14bb13))
+- **cli**: add extensive test suite for CLI module ([ec07069](https://github.com/thememium/dspy-agent-tools/commit/ec070690232b4356ed530ea859694ab10d4ccf74))
+- **test_smoke**: include CLI and CLITools in EXPECTED_EXPORTS ([767e589](https://github.com/thememium/dspy-agent-tools/commit/767e589fe0e5e33477248f9f991ccea3c48ff737))
+
+### Other Changes
+
+- Merge pull request #9 from thememium/eboswell/feat/add-cli-tool-caller (#9) ([324795b](https://github.com/thememium/dspy-agent-tools/commit/324795b738d7065adb72b920bfca89671acd83e6))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.7 (2026-10-30)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.6...v0.1.7)
