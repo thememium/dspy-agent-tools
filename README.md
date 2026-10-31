@@ -340,6 +340,12 @@ tools["git_run_command"](command="status", args=["--short"])
   discovery call; `max_help_chars` caps the raw help in `get_command_help`.
 - `mode="search"` (default) returns text for `dspy.ReAct`; `mode="code"`
   returns `list[dict]` / `dict` for `dspy.RLM`.
+- `json_flag` is disabled by default. Pass `json_flag="--json"` to try it for
+  every command run and help call, inserted after the command path. If the
+  CLI rejects it as an unknown flag, the attempt is retried without it; real
+  failures are not retried. JSON help is kept alongside the text help used
+  for discovery, so `search_commands` keeps working. A `--json` argument you
+  declare in `args` or `fixed` is passed through unchanged.
 
 The parsed flag table is best-effort. `--help` is the schema, and the raw help
 is authoritative: positional grammars such as kubectl's usage line are
@@ -420,8 +426,9 @@ remains available when you want to set `positional=` or `flag=` directly.
 
 Arguments are built as
 `[executable, *base_args, *command_tokens, *positionals, *fixed, *flags]` and
-run without a shell. Explicit commands do not probe `--help`, so they also
-work for hidden commands and plugin commands that do not appear in help.
+run without a shell. The same `json_flag` probe applies to explicit commands.
+Explicit commands do not probe `--help`, so they also work for hidden
+commands and plugin commands that do not appear in help.
 
 ### Tool discovery with Toolbox
 
