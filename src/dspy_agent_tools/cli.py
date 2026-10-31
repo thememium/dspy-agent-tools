@@ -89,8 +89,8 @@ class Command:
     as ``("pr", "list")`` or a space-separated string such as ``"pr list"``.
     Colons stay inside one token (``"db:migrate"`` is one command).
     ``name`` is the tool name before the CLI's ``name_prefix``. ``args`` maps
-    tool argument names to :class:`Arg` definitions; use :func:`Argument` and
-    :func:`Option` for the common cases. ``fixed`` arguments are always
+    tool argument names to argument definitions; use :func:`Argument` and
+    :func:`Option`. ``fixed`` arguments are always
     appended before user flags.
     """
 
@@ -1494,4 +1494,4 @@ def CLI(
     return CLITools(tools, discovery)
 
 
-__all__ = ["CLI", "Arg", "Argument", "CLITools", "Command", "Option"]
+__all__ = ["CLI", "Argument", "CLITools", "Command", "Option"]
