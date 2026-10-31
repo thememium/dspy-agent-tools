@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.9 (2026-10-31)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.8...v0.1.9)
+
+### 🩹 Fixes
+
+- adds mcp server retry for read only tools (#10) (#10) ([9fae39b](https://github.com/thememium/dspy-agent-tools/commit/9fae39b9e8ea5037740ae46543da4686142de812))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.8 (2026-10-31)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.7...v0.1.8)
