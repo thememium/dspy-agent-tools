@@ -400,8 +400,7 @@ gh = CLI(
 not created. Each tool name is `name_prefix + Command.name` (default prefix is
 the executable name).
 
-`Argument` and `Option` are the usecli-style helpers; the lower-level `Arg`
-remains available when you want to set `positional=` or `flag=` directly.
+`Argument` and `Option` are the two public declaration helpers.
 
 - `Argument(...)` is a required positional; `Argument(default=...)` is
   optional. Positional indices are assigned in `Command.args` order. Indices
