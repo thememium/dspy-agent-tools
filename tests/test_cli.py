@@ -16,6 +16,8 @@ from dspy_agent_tools.cli import (
     _default_prefix,
     _description,
     _Flag,
+    _flag_was_rejected,
+    _json_document,
     _normalize_args,
     _parse_commands,
     _parse_flag_head,
@@ -38,6 +40,8 @@ Commands:
   pr        Manage pull requests
   fail      Fail on purpose
   where     Show environment
+  jsonable  Emit JSON
+  legacy    Legacy command without JSON
 
 Options:
   --verbose    Be loud
@@ -72,10 +76,22 @@ Options:
   --state string       Filter state: {open|closed} (default "open")
 """
 
+LEGACY = """Legacy command without JSON.
+
+Usage:
+  fake-cli legacy
+"""
+
 args = sys.argv[1:]
-help_flag = args[-1] if args and args[-1] in ("--help", "-h") else None
+help_flag = next((arg for arg in args if arg in ("--help", "-h")), None)
 if help_flag:
-    path = args[:-1]
+    path = [arg for arg in args if arg not in ("--help", "-h", "--json")]
+    if "--json" in args and path == ["pr", "list"]:
+        sys.stdout.write('{"usage": "fake-cli pr list", "flags": ["--limit"]}')
+        raise SystemExit(0)
+    if "--json" in args and path == ["legacy"]:
+        print("unknown flag: --json")
+        raise SystemExit(2)
     if os.environ.get("FAKE_MAN") and help_flag == "--help":
         sys.stdout.write("N\bNA\bAM\bME\n     fake-cli\n")
         raise SystemExit(0)
@@ -87,23 +103,43 @@ if help_flag:
         sys.stdout.write(PR)
     elif path == ["pr", "list"]:
         sys.stdout.write(LIST)
+    elif path == ["legacy"]:
+        sys.stdout.write(LEGACY)
     else:
         sys.stdout.write("unknown command\n")
         raise SystemExit(1)
     raise SystemExit(0)
 
-if args == ["where"]:
-    print("cwd=" + os.getcwd())
-    print("env=" + os.environ.get("FAKE_ENV", ""))
-elif args == ["fail"]:
-    print("boom")
-    raise SystemExit(3)
-elif args[:2] == ["pr", "list"]:
-    print("pr list " + " ".join(args[2:]))
-elif args == ["status"]:
-    print("status ok")
+json_requested = "--json" in args
+if args and args[0] == "legacy":
+    if json_requested:
+        print("unknown flag: --json")
+        print()
+        print("Usage: fake-cli <command> <subcommand> [flags]")
+        print()
+        print("Available commands:")
+        print("  legacy")
+        raise SystemExit(2)
+    print("legacy ok")
+elif args and args[0] == "jsonable":
+    if json_requested:
+        print(f'{{"ok": true, "json_args": {args.count("--json")}}}')
+    else:
+        print("jsonable ok")
 else:
-    print("ran " + " ".join(args))
+    args = [arg for arg in args if arg != "--json"]
+    if args == ["where"]:
+        print("cwd=" + os.getcwd())
+        print("env=" + os.environ.get("FAKE_ENV", ""))
+    elif args == ["fail"]:
+        print("boom")
+        raise SystemExit(3)
+    elif args[:2] == ["pr", "list"]:
+        print("pr list " + " ".join(args[2:]))
+    elif args == ["status"]:
+        print("status ok")
+    else:
+        print("ran " + " ".join(args))
 '''
 
 
@@ -397,7 +433,7 @@ class TestParsingEdges:
 
 class TestDiscoveryEdges:
     @staticmethod
-    def discovery():
+    def discovery(json_flag=None):
         return cli_module._Discovery(
             sys.executable,
             base_args=[],
@@ -407,6 +443,7 @@ class TestDiscoveryEdges:
             help_timeout=1,
             max_expands=2,
             max_depth=2,
+            json_flag=json_flag,
         )
 
     def test_help_text_reports_execution_errors(self, monkeypatch):
@@ -414,9 +451,25 @@ class TestDiscoveryEdges:
             raise RuntimeError("no help")
 
         monkeypatch.setattr(cli_module, "_execute", boom)
-        text, code = self.discovery()._help_text(())
+        text, code, json_help = self.discovery()._help_text(())
         assert text == "no help"
         assert code == 1
+        assert json_help == ""
+
+    def test_help_text_reports_json_attempt_errors(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise RuntimeError("no help")
+
+        monkeypatch.setattr(cli_module, "_execute", boom)
+        text, code, json_help = self.discovery(json_flag="--json")._help_text(())
+        assert text == "no help"
+        assert code == 1
+        assert json_help == ""
+
+    def test_json_document_detection(self):
+        assert _json_document('{"ok": true}') == '{"ok": true}'
+        assert _json_document("{not json") is None
+        assert _json_document("Usage: fake-cli") is None
 
     def test_expand_unknown_path_raises(self):
         with pytest.raises(KeyError):
@@ -526,14 +579,14 @@ class TestExplicitCommands:
                     flag="--state", choices=("open", "closed"), default="open"
                 ),
                 "label": Arg(flag="--label", repeatable=True),
-                "json": Arg(flag="--json", type=bool),
+                "draft": Arg(flag="--draft", type=bool),
             },
             fixed=("--fixed",),
         )
         tool = make(tmp_path, commands=[command])[0]
-        result = tool(limit=2, state="closed", label=["a", "b"], json=True)
+        result = tool(limit=2, state="closed", label=["a", "b"], draft=True)
         assert result.startswith(
-            "pr list --fixed --limit 2 --state closed --label a --label b --json"
+            "pr list --fixed --limit 2 --state closed --label a --label b --draft"
         )
         assert tool(limit=2).startswith("pr list --fixed --limit 2 --state open")
 
@@ -547,7 +600,7 @@ class TestExplicitCommands:
                     description="View a pull request.",
                     args={
                         "number": Arg(positional=0, type=int, help="PR number"),
-                        "json": Arg(flag="--json", type=bool),
+                        "stat": Arg(flag="--stat", type=bool),
                     },
                 ),
                 Command(
@@ -558,7 +611,7 @@ class TestExplicitCommands:
                 ),
             ],
         )
-        assert tools[0](number=5, json=True).startswith("ran view 5 --json")
+        assert tools[0](number=5, stat=True).startswith("ran view 5 --stat")
         assert tools[1](paths=["a", "b"]).startswith("ran many a b")
 
     def test_choices_and_required_are_validated_in_runner(self, tmp_path):
@@ -867,3 +920,105 @@ class TestExplicitCommands:
         result = tool()
         assert "env=hello" in result
         assert f"cwd={workdir.resolve()}" in result
+
+
+class TestJsonFlag:
+    def test_tries_json_when_supported(self, tmp_path):
+        tool = make(
+            tmp_path,
+            json_flag="--json",
+            commands=[Command(command=("jsonable",), name="jsonable")],
+        )[0]
+        result = tool()
+        assert result.startswith('{"ok": true, "json_args": 1}')
+
+    def test_falls_back_when_json_is_rejected(self, tmp_path):
+        tool = make(
+            tmp_path,
+            json_flag="--json",
+            commands=[Command(command=("legacy",), name="legacy")],
+        )[0]
+        assert tool().startswith("legacy ok")
+
+    def test_discovery_run_tries_json_and_falls_back(self, tmp_path):
+        tools = by_name(make(tmp_path, json_flag="--json"))
+        json_result = tools["fake_run_command"](command="jsonable", args=[])
+        assert json_result.startswith('{"ok": true, "json_args": 1}')
+        legacy_result = tools["fake_run_command"](command="legacy", args=[])
+        assert legacy_result.startswith("legacy ok")
+
+    def test_json_is_off_by_default(self, tmp_path):
+        tools = by_name(make(tmp_path))
+        assert "JSON help:" not in tools["fake_get_command_help"](command="pr list")
+        assert tools["fake_run_command"](command="jsonable", args=[]).startswith(
+            "jsonable ok"
+        )
+        tool = make(
+            tmp_path,
+            commands=[Command(command=("jsonable",), name="jsonable")],
+        )[0]
+        assert tool().startswith("jsonable ok")
+
+    def test_explicit_json_is_not_duplicated(self, tmp_path):
+        tools = by_name(make(tmp_path))
+        result = tools["fake_run_command"](command="jsonable", args=["--json"])
+        assert result.startswith('{"ok": true, "json_args": 1}')
+
+    def test_real_failure_is_not_retried(self, tmp_path):
+        tools = by_name(make(tmp_path, json_flag="--json"))
+        result = tools["fake_run_command"](command="fail", args=[])
+        assert "[exit code 3]" in result
+
+    def test_rejects_invalid_json_flag(self, tmp_path):
+        with pytest.raises(ValueError, match="json_flag"):
+            make(tmp_path, json_flag="json")
+
+    def test_recognizes_flag_without_dashes(self):
+        assert _flag_was_rejected("error: unknown option `json'", "--json")
+        assert _flag_was_rejected(
+            "error: Found argument '--json' which wasn't expected", "--json"
+        )
+        assert not _flag_was_rejected("error: unknown option `other'", "--json")
+        assert not _flag_was_rejected("real command failure", "--json")
+
+
+class TestJsonHelp:
+    def test_details_include_json_help_when_available(self, tmp_path):
+        tools = by_name(make(tmp_path, json_flag="--json"))
+        result = tools["fake_get_command_help"](command="pr list")
+        assert "JSON help:" in result
+        assert '"usage": "fake-cli pr list"' in result
+        assert "Flags:" in result
+
+    def test_search_still_uses_text_help(self, tmp_path):
+        tools = by_name(make(tmp_path, json_flag="--json"))
+        result = tools["fake_search_commands"](query="pull requests")
+        assert result.splitlines()[0].startswith("1. pr list")
+
+    def test_code_mode_includes_json_help(self, tmp_path):
+        tools = by_name(make(tmp_path, json_flag="--json", mode="code"))
+        result = tools["fake_get_command_help"](command="pr list")
+        assert '"usage": "fake-cli pr list"' in result["json_help"]
+
+    def test_json_help_is_truncated(self, tmp_path):
+        tools = by_name(make(tmp_path, json_flag="--json", max_help_chars=10))
+        result = tools["fake_get_command_help"](command="pr list")
+        assert "JSON help:" in result
+        assert "[help truncated]" in result
+
+        code = by_name(
+            make(
+                tmp_path,
+                json_flag="--json",
+                mode="code",
+                max_help_chars=10,
+            )
+        )
+        record = code["fake_get_command_help"](command="pr list")
+        assert record["json_help"].endswith("[help truncated]")
+
+    def test_json_help_falls_back_when_rejected(self, tmp_path):
+        tools = by_name(make(tmp_path, json_flag="--json"))
+        result = tools["fake_get_command_help"](command="legacy")
+        assert "Legacy command without JSON." in result
+        assert "JSON help:" not in result
