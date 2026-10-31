@@ -159,6 +159,7 @@ class TestErrorPayload:
             {"ok": True},
             {"error": ""},
             b"bytes",
+            "{not json",
         ],
     )
     def test_ignores_success_shapes(self, value):
