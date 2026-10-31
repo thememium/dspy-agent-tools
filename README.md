@@ -340,6 +340,10 @@ tools["git_run_command"](command="status", args=["--short"])
   discovery call; `max_help_chars` caps the raw help in `get_command_help`.
 - `mode="search"` (default) returns text for `dspy.ReAct`; `mode="code"`
   returns `list[dict]` / `dict` for `dspy.RLM`.
+- `help_flag="--help"` (default) controls the help invocation. Use `"-h"`,
+  `"help"`, or a token sequence such as `("help", "commands")`; `None` skips
+  help entirely. If the help invocation is rejected or returns nothing, the
+  command itself runs so the agent can inspect that output.
 - `json_flag` is disabled by default. Pass `json_flag="--json"` to try it for
   every command run and help call, inserted after the command path. If the
   CLI rejects it as an unknown flag, the attempt is retried without it; real
