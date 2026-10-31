@@ -14,6 +14,7 @@ import dspy_agent_tools.cli as cli_module
 from dspy_agent_tools import CLI, Argument, CLITools, Command, Option, Toolbox
 from dspy_agent_tools.cli import (
     Arg,
+    _argv_hint,
     _default_prefix,
     _description,
     _Flag,
@@ -76,6 +77,9 @@ Usage:
 Options:
   --limit int          Maximum rows (default 30)
   --state string       Filter state: {open|closed} (default "open")
+
+Arguments:
+  query                Search query
 """
 
 LEGACY = """Legacy command without JSON.
@@ -260,6 +264,8 @@ class TestDetails:
         assert "Usage:" in result
         assert "--limit (integer; default: 30)" in result
         assert '--state (string; choices: open|closed; default: "open")' in result
+        assert "Arguments:" in result
+        assert "query — Search query" in result
 
     def test_lists_subcommands_with_descriptions(self, tmp_path):
         tools = by_name(make(tmp_path))
@@ -297,6 +303,17 @@ class TestRun:
         result = tools["fake_run_command"](command="fail", args=[])
         assert "boom" in result
         assert "[exit code 3]" in result
+
+    def test_usage_error_includes_command_help(self, monkeypatch, tmp_path):
+        tools = by_name(make(tmp_path))
+        monkeypatch.setattr(
+            cli_module,
+            "_run_argv",
+            lambda *args, **kwargs: "usage: nope\n[exit code 2]\n(0.1s)",
+        )
+        result = tools["fake_run_command"](command="pr list", args=[])
+        assert "[command help]" in result
+        assert "--limit" in result
 
     def test_output_can_be_capped(self, tmp_path):
         tools = by_name(make(tmp_path, max_output_chars=5))
@@ -506,8 +523,28 @@ class TestParsingEdges:
         _parse_commands(["  real    Real command"], commands)
         assert commands == {"real": "Real command"}
 
+    def test_parse_help_reads_arguments_section(self):
+        _usage, _desc, _commands, _flags, positionals = _parse_help(
+            "Usage: prog search [OPTIONS] [QUERY]\n"
+            "\nArguments:\n  query    Text to find\n"
+            "           across sessions\njunk\n\n",
+            is_root=False,
+        )
+        assert positionals == {"query": "Text to find across sessions"}
+
+    def test_argv_hint_only_after_failure(self):
+        assert _argv_hint("usage: ok", ["cmd"], 0) == "usage: ok"
+        hinted = _argv_hint("usage: bad", ["cmd", "two words"], 2)
+        assert "[argv: cmd 'two words']" in hinted
+        assert "one item" in hinted
+
+    def test_value_flags_are_not_boolean(self):
+        assert parse_flag("--limit").kind == "value"
+        assert parse_flag("--count").kind == "value"
+        assert parse_flag("--verbose").kind == "boolean"
+
     def test_parse_help_falls_back_for_root_help(self):
-        usage, _, commands, _ = _parse_help(
+        usage, _, commands, _, _ = _parse_help(
             "usage: prog <command>\n\n  alpha    Alpha command\n",
             is_root=True,
         )

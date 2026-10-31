@@ -357,13 +357,16 @@ CLI("git", include_search=True)
   `--json` argument you declare in `args` or `fixed` is passed through
   unchanged.
 - `max_output_chars` caps one command result (default `0`, unlimited). Use it
-  for token-heavy commands; prefer the CLI's own `--limit` or
-  `--token-budget` when available. Truncation is head-only and appends a
-  marker, so keep it off when the agent parses JSON.
+  for token-heavy commands; prefer the CLI's own output-limit flags when
+  available. Truncation is head-only and appends a marker, so keep it off
+  when the agent parses JSON.
 - Command paths resolve lazily inside `run_command`; fetching help first is
   optional. Run a command directly when you know its path, and call
-  `get_command_help` only when a run fails or flags are unclear. Independent
-  calls can be batched in one `tool_calls` list.
+  `get_command_help` when flags or positional arity are unclear.
+- Help output includes parsed `Arguments:` entries and marks value-taking
+  flags as `(value)`, not boolean.
+- A usage failure appends the exact argv, an argv-list hint, and the command's
+  parsed help. The agent can fix one item and retry without another help call.
 
 The parsed flag table is best-effort. `--help` is the schema, and the raw help
 is authoritative: positional grammars such as kubectl's usage line are
@@ -436,8 +439,8 @@ the executable name).
   argument is required.
 - `repeatable=True` repeats the flag for each value in a list.
 - `choices=` adds an enum to the schema.
-- `max_output_chars` (or the CLI's own `--limit`/`--token-budget`) keeps
-  search-style results from dominating the context.
+- `max_output_chars` (or the CLI's own output-limit flags) keeps search-style
+  results from dominating the context.
 - `fixed=` adds always-present argv items, such as `("--json",)`.
 - `ok_codes=` suppresses the `[exit code N]` notice for accepted exits.
 - `Command.command` accepts `"pr list"`, `"db:migrate"` (one token), or

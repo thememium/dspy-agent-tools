@@ -207,6 +207,18 @@ _FLAG_UNSUPPORTED = re.compile(
     r"|\bwas(?:n't| not) expected\b",
     re.IGNORECASE,
 )
+_USAGE_ERROR = re.compile(
+    r"(?:unexpected extra argument|unknown (?:flag|option)|"
+    r"unrecognized (?:flag|option)|requires an argument|missing argument|"
+    r"invalid value|usageerror|^usage:)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_VALUE_NAME = re.compile(
+    r"(?:^|[-_])(?:limit|max|min|count|size|depth|timeout|format|output|"
+    r"file|path|query|ref|state|label|repo|since|until|before|after|number|"
+    r"page|offset|filter|type|mode|level|width|height)$",
+    re.IGNORECASE,
+)
 
 _META_COMMANDS = {
     "__complete",
@@ -242,17 +254,19 @@ _SEARCH_DESC = (
 _DETAILS_DESC = (
     "Return help for one command path: usage, subcommands, parsed flags, and "
     "JSON help when available. Raw help is included only as a fallback. "
-    "command='' returns the root command list. Prefer run_command first and "
-    "fetch help only when the run fails or flags are genuinely unclear; "
-    "independent help calls can share one tool_calls list."
+    "command='' returns the root command list. Fetch this before the first "
+    "run of a subcommand when its flags or positional arity are unclear; "
+    "skip it for obvious commands, and never fetch it for every command."
 )
 _RUN_DESC = (
-    "Run one command path of this CLI with argv strings. command='' runs the "
-    "executable itself, for CLIs without subcommands. Command paths are "
-    "resolved lazily, so no prior help call is required. Put the query or "
-    "positional arguments first, then flags, e.g. ['search', 'coverage', "
-    "'--limit', '3']; no shell is used. Returns the output and wall time, "
-    "plus the exit code on failure."
+    "Run one command path of this CLI with argv strings. command is the path "
+    "only (e.g. 'search'); do not repeat it in args. args is the argv tail: "
+    "one item per argument, so a multi-word query is one item, e.g. "
+    "command='search', args=['coverage python', '--limit', '3']. command='' "
+    "runs the executable itself; use it only when the CLI has no "
+    "subcommands. If help lists an output-limit flag, pass a small value; "
+    "narrow the query instead of fetching many broad results. No shell is "
+    "used. Returns the output and wall time, plus the exit code on failure."
 )
 
 
@@ -306,6 +320,8 @@ def _classify(header: str | None) -> str | None:
         return "commands"
     if "OPTION" in upper or "FLAG" in upper:
         return "flags"
+    if "ARGUMENT" in upper or "POSITIONAL" in upper:
+        return "arguments"
     return None
 
 
@@ -502,6 +518,12 @@ def _parse_flag_head(head: str, description: str) -> _Flag | None:
 
     lowered = (value_spec or "").lower()
     kind = "boolean"
+    if (
+        not lowered
+        and default is None
+        and any(_VALUE_NAME.search(name.lstrip("-")) for name in names)
+    ):
+        kind = "value"
     if lowered:
         if lowered in _INT_TYPES:
             kind = "integer"
@@ -538,6 +560,25 @@ def _parse_flag_head(head: str, description: str) -> _Flag | None:
         repeatable=repeatable,
         description=description.strip(),
     )
+
+
+def _parse_positionals(lines: Sequence[str], positionals: dict[str, str]) -> None:
+    """Collect ``name  description`` rows from an Arguments section."""
+    pending: str | None = None
+    for line in lines:
+        if not line.strip():
+            pending = None
+            continue
+        match = _COMMAND.match(line)
+        if match:
+            name = match.group("name")
+            positionals[name] = match.group("desc").strip()
+            pending = name
+            continue
+        if pending is not None and line.startswith((" ", "\t")):
+            positionals[pending] = (f"{positionals[pending]} {line.strip()}").strip()
+        else:
+            pending = None
 
 
 def _parse_flags(lines: Sequence[str], flags: dict[str, _Flag]) -> None:
@@ -580,18 +621,21 @@ def _parse_commands(lines: Sequence[str], commands: dict[str, str]) -> None:
 
 def _parse_help(
     text: str, *, is_root: bool
-) -> tuple[str, str, dict[str, str], dict[str, _Flag]]:
-    """Extract usage, description, commands, and flags from one help page."""
+) -> tuple[str, str, dict[str, str], dict[str, _Flag], dict[str, str]]:
+    """Extract usage, description, commands, flags, and arguments."""
     usage = _usage(text)
     description = _description(text)
     commands: dict[str, str] = {}
     flags: dict[str, _Flag] = {}
+    positionals: dict[str, str] = {}
     for header, lines in _sections(text):
         kind = _classify(header)
         if kind == "commands":
             _parse_commands(lines, commands)
         elif kind == "flags":
             _parse_flags(lines, flags)
+        elif kind == "arguments":
+            _parse_positionals(lines, positionals)
     if not flags:
         _parse_flags(text.splitlines(), flags)
     if (
@@ -600,7 +644,7 @@ def _parse_help(
         and re.search(r"<command>|\[command\]|\bsubcommand", usage, re.IGNORECASE)
     ):
         _parse_commands(text.splitlines(), commands)
-    return usage, description, commands, flags
+    return usage, description, commands, flags, positionals
 
 
 @dataclass(slots=True)
@@ -612,6 +656,7 @@ class _Node:
     help: str = ""
     json_help: str = ""
     flags: dict[str, _Flag] = field(default_factory=dict)
+    positionals: dict[str, str] = field(default_factory=dict)
     children: dict[str, _Node] = field(default_factory=dict)
     expanded: bool = False
 
@@ -653,6 +698,19 @@ def _flag_was_rejected(output: str, flag: str) -> bool:
     return mentioned and bool(_FLAG_UNSUPPORTED.search(output))
 
 
+def _argv_hint(output: str, argv: Sequence[str], returncode: int | None) -> str:
+    """Show the exact argv after a usage error so the agent can fix one item."""
+    if returncode == 0 or not _USAGE_ERROR.search(output):
+        return output
+    rendered = " ".join(shlex.quote(item) for item in argv)
+    return (
+        f"{output.rstrip()}\n"
+        f"[argv: {rendered}]\n"
+        "[args is an argv list: one item per argument; a multi-word query is "
+        "one item, and do not repeat the command path in args.]"
+    )
+
+
 def _truncate_output(text: str, limit: int) -> str:
     """Cap one command result and say how much was omitted."""
     if limit <= 0 or len(text) <= limit:
@@ -690,14 +748,16 @@ def _run_argv(
                 json_argv, cwd=cwd, timeout=timeout, env=env, ok_codes=ok_codes
             )
             if returncode == 0 or not _flag_was_rejected(output, json_flag):
+                output = _argv_hint(output, json_argv, returncode)
                 return _render(
                     _truncate_output(output, max_output_chars), notices, elapsed
                 )
-        output, notices, elapsed, _returncode = _execute(
+        output, notices, elapsed, returncode = _execute(
             argv, cwd=cwd, timeout=timeout, env=env, ok_codes=ok_codes
         )
     except CommandNotFound:
         return f"[command not found: {executable}]"
+    output = _argv_hint(output, argv, returncode)
     return _render(_truncate_output(output, max_output_chars), notices, elapsed)
 
 
@@ -717,6 +777,7 @@ class _Discovery:
         max_depth: int,
         help_tokens: tuple[str, ...],
         json_flag: str | None,
+        max_help_chars: int = DEFAULT_MAX_HELP_CHARS,
         max_output_chars: int = 0,
     ) -> None:
         self.executable = executable
@@ -728,6 +789,7 @@ class _Discovery:
         self.help_timeout = help_timeout
         self.help_tokens = help_tokens
         self.json_flag = json_flag
+        self.max_help_chars = max_help_chars
         self.max_output_chars = max_output_chars
         self.max_expands = max_expands
         self.max_depth = max_depth
@@ -831,9 +893,12 @@ class _Discovery:
             text, returncode, json_help = self._help_text(path)
             node.help = text
             node.json_help = json_help
-            usage, description, commands, flags = _parse_help(text, is_root=not path)
+            usage, description, commands, flags, positionals = _parse_help(
+                text, is_root=not path
+            )
             node.usage = usage
             node.flags = flags
+            node.positionals = positionals
             if not node.description and returncode == 0:
                 node.description = description
             for name, child_description in commands.items():
@@ -959,7 +1024,7 @@ class _Discovery:
     def run(self, command: str, args: Sequence[str]) -> str:
         """Resolve ``command`` and execute it with an argv tail."""
         node = self.resolve(command)
-        return _run_argv(
+        result = _run_argv(
             self.executable,
             self.base_args,
             node.path,
@@ -970,6 +1035,11 @@ class _Discovery:
             json_flag=self.json_flag,
             max_output_chars=self.max_output_chars,
         )
+        if "[exit code" in result and _USAGE_ERROR.search(result):
+            help_text = _details_text(node, self.max_help_chars)
+            if help_text:
+                result = f"{result.rstrip()}\n\n[command help]\n{help_text}"
+        return result
 
 
 def _search_text(nodes: Sequence[_Node]) -> str:
@@ -1007,6 +1077,14 @@ def _details_text(node: _Node, max_help_chars: int) -> str:
     if node.usage:
         parts.append(
             "Usage:\n" + "\n".join("  " + line for line in node.usage.splitlines())
+        )
+    if node.positionals:
+        parts.append(
+            "Arguments:\n"
+            + "\n".join(
+                f"  {name} — {description}" if description else f"  {name}"
+                for name, description in node.positionals.items()
+            )
         )
     if node.children:
         parts.append(
@@ -1049,6 +1127,7 @@ def _details_record(node: _Node, max_help_chars: int) -> dict[str, Any]:
         "command": node.label(),
         "description": node.description,
         "usage": node.usage,
+        "arguments": dict(node.positionals),
         "subcommands": {
             name: child.description for name, child in node.children.items()
         },
@@ -1485,8 +1564,8 @@ def CLI(
         max_output_chars: Cap one command result before it reaches the model.
             ``0`` (default) keeps the full output. Truncation is head-only and
             appends a marker; JSON output can become invalid, so keep this
-            off when the agent parses it. Prefer the CLI's own limits such as
-            ``--limit`` or ``--token-budget`` when available.
+            off when the agent parses it. Prefer the CLI's own output-limit
+            flags when available.
         include_search: Add ``search_commands`` to the discovery tools.
             It is off by default because ``get_command_help(command="")``
             already lists root commands and avoids an extra lookup turn.
@@ -1588,6 +1667,7 @@ def CLI(
             max_depth=max_depth,
             help_tokens=help_tokens,
             json_flag=json_flag,
+            max_help_chars=max_help_chars,
             max_output_chars=max_output_chars,
         )
         tools = _build_tools(
