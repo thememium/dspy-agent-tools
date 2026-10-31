@@ -172,16 +172,23 @@ def parse_flag(head: str, description: str = "") -> _Flag:
 
 
 class TestFactory:
-    def test_returns_three_dspy_tools(self, tmp_path):
+    def test_returns_help_and_run_by_default(self, tmp_path):
         tools = make(tmp_path)
         assert isinstance(tools, CLITools)
         assert isinstance(tools, list)
+        assert [tool.name for tool in tools] == [
+            "fake_get_command_help",
+            "fake_run_command",
+        ]
+        assert all(isinstance(tool, dspy.Tool) for tool in tools)
+
+    def test_include_search_adds_search_tool(self, tmp_path):
+        tools = make(tmp_path, include_search=True)
         assert {tool.name for tool in tools} == {
             "fake_search_commands",
             "fake_get_command_help",
             "fake_run_command",
         }
-        assert all(isinstance(tool, dspy.Tool) for tool in tools)
 
     def test_missing_executable_raises(self):
         with pytest.raises(FileNotFoundError, match="Executable not found"):
@@ -198,7 +205,7 @@ class TestFactory:
 
 class TestToolboxIntegration:
     def test_toolbox_accepts_the_facade(self, tmp_path):
-        box = Toolbox(make(tmp_path))
+        box = Toolbox(make(tmp_path, include_search=True))
         assert {tool.name for tool in box} == {
             "fake_search_commands",
             "fake_get_command_help",
@@ -208,23 +215,36 @@ class TestToolboxIntegration:
 
 class TestSearch:
     def test_discovers_nested_commands(self, tmp_path):
-        tools = by_name(make(tmp_path))
+        tools = by_name(make(tmp_path, include_search=True))
         result = tools["fake_search_commands"](query="pull requests")
         assert result.splitlines()[0] == "1. pr list: List pull requests"
         assert "pr view" in result
 
     def test_reports_no_match(self, tmp_path):
-        tools = by_name(make(tmp_path))
-        assert tools["fake_search_commands"](query="zzzz") == "[no matching commands]"
+        tools = by_name(make(tmp_path, include_search=True))
+        result = tools["fake_search_commands"](query="zzzz")
+        assert result.startswith("[no matching commands;")
+        assert "get_command_help" in result
+
+    def test_scores_exact_path_and_name(self, tmp_path):
+        tools = by_name(make(tmp_path, include_search=True))
+        assert tools["fake_search_commands"](query="status").startswith("1. status")
+        assert tools["fake_search_commands"](query="pr list").startswith("1. pr list")
 
     def test_empty_query_lists_root_commands(self, tmp_path):
-        tools = by_name(make(tmp_path))
+        tools = by_name(make(tmp_path, include_search=True))
         result = tools["fake_search_commands"](query="")
         assert "status" in result
         assert "pr" in result
 
     def test_root_only_cli_returns_root(self, tmp_path):
-        tools = by_name(make(tmp_path, env={"FAKE_ROOT_ONLY": "1"}))
+        tools = by_name(
+            make(
+                tmp_path,
+                env={"FAKE_ROOT_ONLY": "1"},
+                include_search=True,
+            )
+        )
         result = tools["fake_search_commands"](query="anything")
         assert result == "1. (root): root-only tool."
 
@@ -250,8 +270,9 @@ class TestDetails:
         assert "--verbose (boolean)" in result
 
     def test_raw_help_can_be_truncated(self, tmp_path):
-        tools = by_name(make(tmp_path, max_help_chars=40))
-        result = tools["fake_get_command_help"](command="pr list")
+        tools = by_name(make(tmp_path, max_help_chars=10))
+        result = tools["fake_get_command_help"](command="no_help")
+        assert "Raw help:" in result
         assert result.endswith("[help truncated]")
 
     def test_unknown_command_raises(self, tmp_path):
@@ -296,7 +317,7 @@ class TestRun:
         )
         result = tools["fake_get_command_help"](command="pr")
         assert "Usage:" in result
-        assert "Manage pull requests." in result
+        assert "Manage pull requests" in result
 
     def test_help_argument(self, tmp_path):
         tools = by_name(make(tmp_path, help_flag="help"))
@@ -331,7 +352,7 @@ class TestRun:
 
 class TestCodeMode:
     def test_search_returns_records(self, tmp_path):
-        tools = by_name(make(tmp_path, mode="code"))
+        tools = by_name(make(tmp_path, mode="code", include_search=True))
         result = tools["fake_search_commands"](query="pull requests")
         assert isinstance(result, list)
         assert result[0] == {
@@ -357,7 +378,7 @@ class TestCodeMode:
 class TestCache:
     def test_refresh_clears_expanded_help(self, tmp_path):
         tools = make(tmp_path)
-        tools[0](query="status")
+        tools[0](command="")
         discovery = tools._discovery
         assert discovery is not None
         assert discovery.root.expanded
@@ -525,12 +546,12 @@ class TestDiscoveryEdges:
         assert cli_module._Discovery._score(node, ["atu"], "atu") > 0
 
     def test_search_honors_expansion_budget(self, tmp_path):
-        tools = by_name(make(tmp_path, max_expands=1))
+        tools = by_name(make(tmp_path, max_expands=1, include_search=True))
         assert tools["fake_search_commands"](query="pull requests")
 
     def test_run_reports_command_not_found(self, monkeypatch, tmp_path):
         tools = by_name(make(tmp_path))
-        tools["fake_search_commands"](query="")
+        tools["fake_get_command_help"](command="")
 
         def boom(*args, **kwargs):
             raise CommandNotFound("fake", [])
@@ -1035,7 +1056,7 @@ class TestJsonHelp:
         assert "Flags:" in result
 
     def test_search_still_uses_text_help(self, tmp_path):
-        tools = by_name(make(tmp_path, json_flag="--json"))
+        tools = by_name(make(tmp_path, json_flag="--json", include_search=True))
         result = tools["fake_search_commands"](query="pull requests")
         assert result.splitlines()[0].startswith("1. pr list")
 
