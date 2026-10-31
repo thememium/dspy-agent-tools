@@ -46,7 +46,7 @@ optional MCP bridge:
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
-- **CLI** — `CLI("gh")` turns any executable into a three-tool discovery facade (`search_commands`, `get_command_help`, `run_command`); pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable.
+- **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable.
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
 - **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
 
@@ -301,8 +301,9 @@ earlier.
 ### With any CLI
 
 `CLI` wraps an executable that has no MCP server. By default it exposes a
-three-tool discovery facade and reads the program's own `--help` on demand;
-pass `commands=` to define typed tools explicitly instead (see below).
+two-tool discovery facade (`get_command_help`, `run_command`) and reads the
+program's own help on demand; add `include_search=True` for name lookup, or
+pass `commands=` to define typed tools explicitly (see below).
 
 ```python
 import dspy
@@ -316,28 +317,32 @@ worker = dspy.RLM("task -> report", tools=CLI("docker", mode="code"))
 
 | Tool | Purpose |
 | --- | --- |
-| `search_commands(query, limit=8)` | Rank known command paths and one-line descriptions. Only the best matching branches are expanded. |
-| `get_command_help(command="")` | Usage, subcommands, a parsed flag table, and the raw help for one path. `command=""` is the executable itself. |
+| `get_command_help(command="")` | Usage, subcommands, parsed flags, and JSON help for one path. `command=""` returns the root command list. |
 | `run_command(command="", args=[])` | Execute `[executable, *base_args, *command_path, *args]`; no shell. |
+| `search_commands(query, limit=8)` | Optional (`include_search=True`): rank command paths by name/description. Usually unnecessary because root help lists commands. |
 
 Discovery starts on the first tool call, not when `CLI()` is called. Every
-help page is cached; `tools.refresh()` drops the cache. A search expands at
-most `max_expands` pages to depth `max_depth`, so searching for `pr list`
-costs two help calls (root, then `pr`); asking for its details then fetches
-`pr list`. Nothing walks the whole tree.
+help page is cached; `tools.refresh()` drops the cache. With
+`include_search=True`, a search expands at most `max_expands` pages to depth
+`max_depth`, so searching for `pr list` costs two help calls (root, then
+`pr`); asking for its details then fetches `pr list`. Nothing walks the whole
+tree.
 
 ```python
 git = CLI("git")
 tools = {tool.name: tool for tool in git}
-tools["git_search_commands"](query="status")
-tools["git_get_command_help"](command="status")
+tools["git_get_command_help"](command="")  # root command list
+tools["git_get_command_help"](command="status")  # usage + flags
 tools["git_run_command"](command="status", args=["--short"])
+
+# Optional name lookup over a large command tree:
+CLI("git", include_search=True)
 ```
 
 - `base_args=["-m", "mytool"]` handles wrappers such as `python -m mytool`.
 - `name_prefix` defaults to the executable name (`gh_`).
 - `cwd`, `env`, and `timeout` configure execution; `help_timeout` bounds each
-  discovery call; `max_help_chars` caps the raw help in `get_command_help`.
+  discovery call; `max_help_chars` caps JSON/raw help in `get_command_help`.
 - `mode="search"` (default) returns text for `dspy.ReAct`; `mode="code"`
   returns `list[dict]` / `dict` for `dspy.RLM`.
 - `help_flag="--help"` (default) controls the help invocation. Use `"-h"`,
@@ -348,8 +353,9 @@ tools["git_run_command"](command="status", args=["--short"])
   every command run and help call, inserted after the command path. If the
   CLI rejects it as an unknown flag, the attempt is retried without it; real
   failures are not retried. JSON help is kept alongside the text help used
-  for discovery, so `search_commands` keeps working. A `--json` argument you
-  declare in `args` or `fixed` is passed through unchanged.
+  for discovery, so `search_commands` (when enabled) keeps working. A
+  `--json` argument you declare in `args` or `fixed` is passed through
+  unchanged.
 
 The parsed flag table is best-effort. `--help` is the schema, and the raw help
 is authoritative: positional grammars such as kubectl's usage line are
@@ -632,14 +638,15 @@ Shared behaviour across the bash tools:
 
 ### CLI (`dspy_agent_tools.cli`)
 
-`CLI(executable, ...)` returns three generated `dspy.Tool`s. Names are
-prefixed by the executable (or `name_prefix`). With `commands=[...]`, it
+`CLI(executable, ...)` returns `get_command_help` and `run_command` by
+default. Names are prefixed by the executable (or `name_prefix`).
+`include_search=True` adds `search_commands`. With `commands=[...]`, it
 returns one tool per explicit `Command` instead and skips discovery:
 
 | Tool | Use it for |
 | --- | --- |
-| **`search_commands`** | Find command paths by name or description. Discovery is lazy and cached. |
-| **`get_command_help`** | Read one path's usage, subcommands, parsed flags, and raw help before running it. |
+| **`get_command_help`** | Read one path's usage, subcommands, parsed flags, JSON help, and fallback raw help before running it. |
+| **`search_commands`** | Optional (`include_search=True`): find command paths by name or description. |
 | **`run_command`** | Run one resolved path with raw argv strings. No shell; only the configured executable is reachable. |
 
 The parsed flag table supports the common help formats (argparse, click,
