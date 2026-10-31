@@ -11,8 +11,9 @@ import pytest
 from plumbum import CommandNotFound
 
 import dspy_agent_tools.cli as cli_module
-from dspy_agent_tools import CLI, Arg, Argument, CLITools, Command, Option, Toolbox
+from dspy_agent_tools import CLI, Argument, CLITools, Command, Option, Toolbox
 from dspy_agent_tools.cli import (
+    Arg,
     _default_prefix,
     _description,
     _Flag,
