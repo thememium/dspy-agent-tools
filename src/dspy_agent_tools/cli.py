@@ -200,7 +200,7 @@ _USAGE_HEADER = re.compile(r"^\s*USAGE\s*$")
 _OR_LINE = re.compile(r"^\s*or:", re.IGNORECASE)
 _FLAG_UNSUPPORTED = re.compile(
     r"(?:unknown|unrecognized|invalid|unexpected|not defined|no such)"
-    r"[^\n]*\b(?:flag|option|argument|switch)\b"
+    r"[^\n]*\b(?:flag|option|argument|switch|command)\b"
     r"|\bflag provided but not defined\b"
     r"|\bwas(?:n't| not) expected\b",
     re.IGNORECASE,
@@ -630,6 +630,11 @@ def _has_flag(argv: Sequence[str], flag: str) -> bool:
     return any(item == flag or item.startswith(f"{flag}=") for item in argv)
 
 
+def _tokens_rejected(output: str, tokens: Sequence[str]) -> bool:
+    """Return whether any token in ``tokens`` was rejected by the CLI."""
+    return any(_flag_was_rejected(output, token) for token in tokens if token)
+
+
 def _flag_was_rejected(output: str, flag: str) -> bool:
     """Recognize a CLI rejecting an unknown flag, e.g. ``gh --json``.
 
@@ -690,6 +695,7 @@ class _Discovery:
         help_timeout: float,
         max_expands: int,
         max_depth: int,
+        help_tokens: tuple[str, ...],
         json_flag: str | None,
     ) -> None:
         self.executable = executable
@@ -699,6 +705,7 @@ class _Discovery:
         self.help_env = {**self.env, **_HELP_ENV}
         self.timeout = timeout
         self.help_timeout = help_timeout
+        self.help_tokens = help_tokens
         self.json_flag = json_flag
         self.max_expands = max_expands
         self.max_depth = max_depth
@@ -713,21 +720,24 @@ class _Discovery:
             self._nodes = {(): self.root}
 
     def _help_text(self, path: tuple[str, ...]) -> tuple[str, int | None, str]:
-        """Fetch help, trying ``json_flag`` when the CLI advertises it.
+        """Fetch help, trying ``help_tokens`` and falling back to the command.
 
-        Returns ``(text, returncode, json_help)``. JSON help is kept alongside
-        the text help used for command discovery, so ``search_commands`` keeps
-        working when a CLI supports structured help.
+        The configured help invocation is tried first (``--help`` by default).
+        If the CLI rejects it or returns nothing, the command itself is run so
+        the agent can inspect whatever it prints. JSON help is kept alongside
+        the text help used for command discovery.
         """
         last: tuple[str, int | None] = ("", 1)
         json_help = ""
-        for flag in ("--help", "-h"):
+        rejected = False
+
+        if self.help_tokens:
             if self.json_flag is not None:
                 json_argv = [
                     self.executable,
                     *self.base_args,
                     *path,
-                    flag,
+                    *self.help_tokens,
                     self.json_flag,
                 ]
                 try:
@@ -739,27 +749,53 @@ class _Discovery:
                     )
                 except Exception as exc:  # noqa: BLE001 - surfaced as help text
                     last = (str(exc), 1)
+                    rejected = True
                 else:
                     if output.strip() and not _is_man_page(output):
                         document = _json_document(output)
                         if document is not None:
                             json_help = document
-                        elif not _flag_was_rejected(output, self.json_flag):
+                        elif not _tokens_rejected(
+                            output, [*self.help_tokens, self.json_flag]
+                        ):
                             return _clean(output), returncode, json_help
                     last = (output, returncode)
+                    rejected = rejected or _tokens_rejected(
+                        output, [*self.help_tokens, self.json_flag]
+                    )
+
             try:
                 output, _notices, _elapsed, returncode = _execute(
-                    [self.executable, *self.base_args, *path, flag],
+                    [self.executable, *self.base_args, *path, *self.help_tokens],
                     cwd=self.cwd,
                     timeout=self.help_timeout,
                     env=self.help_env,
                 )
             except Exception as exc:  # noqa: BLE001 - surfaced as help text
                 last = (str(exc), 1)
-                continue
-            if output.strip() and not _is_man_page(output):
-                return _clean(output), returncode, json_help
-            last = (output, returncode)
+                rejected = True
+            else:
+                if (
+                    output.strip()
+                    and not _is_man_page(output)
+                    and not _tokens_rejected(output, self.help_tokens)
+                ):
+                    return _clean(output), returncode, json_help
+                last = (output, returncode)
+                rejected = rejected or _tokens_rejected(output, self.help_tokens)
+
+        if not self.help_tokens or rejected or not last[0].strip():
+            try:
+                output, _notices, _elapsed, returncode = _execute(
+                    [self.executable, *self.base_args, *path],
+                    cwd=self.cwd,
+                    timeout=self.help_timeout,
+                    env=self.help_env,
+                )
+            except Exception as exc:  # noqa: BLE001 - surfaced as help text
+                return _clean(str(exc)), 1, json_help
+            return _clean(output), returncode, json_help
+
         return _clean(last[0]), last[1], json_help
 
     def expand(self, path: tuple[str, ...]) -> _Node:
@@ -1359,6 +1395,7 @@ def CLI(
     max_expands: int = DEFAULT_MAX_EXPANDS,
     max_depth: int = DEFAULT_MAX_DEPTH,
     max_help_chars: int = DEFAULT_MAX_HELP_CHARS,
+    help_flag: str | Sequence[str] | None = "--help",
     json_flag: str | None = None,
 ) -> CLITools:
     """Expose one executable as explicit DSPy tools or a discovery facade.
@@ -1397,6 +1434,11 @@ def CLI(
             (discovery only).
         max_help_chars: Cap for the raw help text in ``get_command_help``;
             ``0`` omits it (discovery only). Parsed flags are unaffected.
+        help_flag: Help invocation tokens, default ``"--help"``. Pass ``"-h"``,
+            ``"help"``, or a sequence such as ``("help", "commands")`` when the
+            CLI uses something else. ``None`` skips help and runs the command
+            itself. If the help invocation is rejected or returns nothing, the
+            command is run so the agent can inspect its output.
         json_flag: Optional machine-readable output flag to probe. It is
             disabled by default; pass ``"--json"`` to try it on every command
             run and help call and fall back when the CLI rejects it. An
@@ -1450,6 +1492,14 @@ def CLI(
         raise ValueError("max_help_chars must be >= 0")
     if json_flag is not None and not json_flag.startswith("-"):
         raise ValueError("json_flag must start with '-' or be None")
+    if help_flag is None:
+        help_tokens: tuple[str, ...] = ()
+    elif isinstance(help_flag, str):
+        help_tokens = (help_flag,)
+    else:
+        help_tokens = tuple(help_flag)
+    if any(not isinstance(token, str) or not token for token in help_tokens):
+        raise ValueError("help_flag must be a non-empty string or sequence of strings")
 
     command_list = None if commands is None else list(commands)
     if command_list is not None and not command_list:
@@ -1486,6 +1536,7 @@ def CLI(
             help_timeout=help_timeout,
             max_expands=max_expands,
             max_depth=max_depth,
+            help_tokens=help_tokens,
             json_flag=json_flag,
         )
         tools = _build_tools(
