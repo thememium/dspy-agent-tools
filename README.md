@@ -265,6 +265,15 @@ and `result_mode`: `"text"` (default) flattens MCP text content to strings,
 `"structured"` returns the server's `structuredContent` when it provides it.
 The stdio transport ignores the HTTP-only options.
 
+MCP servers often finish startup work after the handshake — an index
+reconcile, a cache warm-up — advertising their tools immediately and answering
+calls with an error payload (`{"error": ...}` or `{"ok": false}`) until it
+ends. Read-only tools (`readOnlyHint`) are therefore replayed while they
+answer with such a payload: `retry_timeout` (default 30 s) bounds the replay
+and `0` disables it. The last payload is returned unchanged when the budget
+runs out. Tools without the annotation are never replayed, so a side effect
+cannot be duplicated.
+
 Remote transports (`url=`, `transport="http"` or `"sse"`) additionally accept:
 
 - `headers` — extra HTTP headers such as an `Authorization` bearer token.

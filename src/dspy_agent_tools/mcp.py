@@ -18,6 +18,13 @@ model context, wrap the result in :class:`dspy_agent_tools.Toolbox` with
 ``mode="search"`` or ``mode="code"``; ``Toolbox`` also accepts regular
 ``dspy.Tool`` objects and plain Python functions.
 
+A tool the server annotates as read-only (``readOnlyHint``) is replayed while
+it answers with an error payload (``{"error": ...}`` or ``{"ok": false}``),
+which is how servers commonly report that startup work — an index reconcile,
+a cache warm-up — is still running. ``retry_timeout`` (default 30 s, ``0``
+disables) bounds the replay; other tools are never retried, so side effects
+cannot be duplicated.
+
 The returned tools work from both DSPy paths without extra configuration:
 ``agent(question=...)`` uses DSPy's async-to-sync conversion for the MCP call
 only (the global setting is untouched), and ``await agent.acall(...)`` runs
@@ -38,9 +45,12 @@ from __future__ import annotations
 import asyncio
 import atexit
 import concurrent.futures
+import functools
 import importlib
 import inspect
+import json
 import threading
+import time
 import weakref
 from collections.abc import Callable, Coroutine, Sequence
 from contextlib import asynccontextmanager
@@ -56,7 +66,10 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 DEFAULT_STARTUP_TIMEOUT = 60.0  # seconds
+DEFAULT_TOOL_RETRY_TIMEOUT = 30.0  # seconds
 _CLOSE_TIMEOUT = 10.0  # seconds
+_RETRY_INITIAL_DELAY = 0.5  # seconds
+_RETRY_MAX_DELAY = 2.0  # seconds
 
 _IMPORT_HINT = (
     "dspy_agent_tools.mcp requires DSPy and the MCP SDK. "
@@ -137,19 +150,91 @@ def _mcp_signature(
     return inspect.Signature(parameters)
 
 
-def _as_sync_capable(tool: Tool, signature: inspect.Signature | None = None) -> Tool:
+def _as_sync_capable(
+    tool: Tool,
+    signature: inspect.Signature | None = None,
+    *,
+    func: Callable[..., Any] | None = None,
+) -> Tool:
     """Rebuild an MCP tool so its synchronous path also works."""
     cls = _sync_tool_class(drop_nulls=True)
+    call = tool.func if func is None else func
     if signature is not None:
-        cast(Any, tool.func).__signature__ = signature
+        cast(Any, call).__signature__ = signature
     return cls(
-        func=tool.func,
+        func=call,
         name=tool.name,
         desc=tool.desc,
         args=tool.args,
         arg_types=tool.arg_types,
         arg_desc=tool.arg_desc,
     )
+
+
+def _error_payload(value: Any) -> bool:
+    """Whether a tool result carries the usual MCP error shape.
+
+    Servers normally report a failed call with ``isError``, which DSPy turns
+    into an exception. Some servers instead answer with an ordinary payload —
+    typically ``{"error": ...}`` or ``{"ok": false}`` — while a temporary
+    condition (startup work, an index rebuild) clears. Structured results
+    arrive as mappings, text results as JSON strings.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if not text.startswith("{"):
+            return False
+        try:
+            value = json.loads(text)
+        except ValueError:
+            return False
+    if isinstance(value, dict):
+        return bool(value.get("error")) or value.get("ok") is False
+    if isinstance(value, list | tuple):
+        return any(_error_payload(item) for item in value)
+    return False
+
+
+def _read_only(tool: Any) -> bool:
+    """Whether the server annotates ``tool`` as free of side effects."""
+    annotations = getattr(tool, "annotations", None)
+    if annotations is None:
+        return False
+    if isinstance(annotations, dict):
+        value = annotations.get("readOnlyHint", annotations.get("read_only_hint"))
+    else:
+        value = getattr(annotations, "read_only_hint", None)
+        if value is None:
+            value = getattr(annotations, "readOnlyHint", None)
+    return bool(value)
+
+
+def _retrying(func: Callable[..., Any], *, timeout: float) -> Callable[..., Any]:
+    """Replay a read-only tool while it answers with an error payload.
+
+    MCP servers commonly finish startup work (an index reconcile, a cache
+    warm-up) after the handshake, advertising their tools immediately and
+    answering read calls with an error until it ends. A side-effect-free tool
+    can be replayed safely, so the agent sees the answer instead of a
+    dead-end observation. The retry gives up at ``timeout`` and returns the
+    last error payload unchanged; non-read-only tools are never wrapped.
+    """
+    if timeout <= 0:
+        return func
+
+    @functools.wraps(func)
+    async def call(*args: Any, **kwargs: Any) -> Any:
+        deadline = time.monotonic() + timeout
+        delay = _RETRY_INITIAL_DELAY
+        while True:
+            result = await func(*args, **kwargs)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not _error_payload(result):
+                return result
+            await asyncio.sleep(min(delay, remaining))
+            delay = min(delay * 2, _RETRY_MAX_DELAY)
+
+    return call
 
 
 class _HTTPFailures:
@@ -489,6 +574,7 @@ def _build_tools(
     startup_timeout: float,
     name_prefix: str,
     result_mode: Literal["text", "structured"],
+    retry_timeout: float = DEFAULT_TOOL_RETRY_TIMEOUT,
     failures: _HTTPFailures | None = None,
 ) -> MCPTools:
     """Connect a transport, list its tools, and build the owning list."""
@@ -507,7 +593,10 @@ def _build_tools(
             signature = _mcp_signature(
                 advertised, tool.args or {}, tool.arg_types or {}
             )
-            tool = _as_sync_capable(tool, signature)
+            func = tool.func
+            if _read_only(advertised):
+                func = _retrying(func, timeout=retry_timeout)
+            tool = _as_sync_capable(tool, signature, func=func)
             if name_prefix:
                 tool.name = f"{name_prefix}{tool.name}"
             schema = getattr(advertised, "input_schema", None) or getattr(
@@ -655,6 +744,7 @@ def MCP(
     startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
     name_prefix: str = "",
     result_mode: Literal["text", "structured"] = "text",
+    retry_timeout: float = DEFAULT_TOOL_RETRY_TIMEOUT,
 ) -> MCPTools:
     """Connect to an MCP server and return its tools as DSPy tools.
 
@@ -714,6 +804,12 @@ def MCP(
         result_mode: ``"text"`` (default) flattens MCP text content to a
             string/list; ``"structured"`` returns ``structuredContent`` when
             the server provides it.
+        retry_timeout: Seconds to replay a tool annotated ``readOnlyHint``
+            while it answers with an error payload (``{"error": ...}`` or
+            ``{"ok": false}``), the usual way a server reports that startup
+            work such as an index reconcile is still running. The last payload
+            is returned unchanged once the budget runs out; ``0`` disables the
+            replay. Tools without the annotation are never replayed.
 
     Returns:
         An :class:`MCPTools` list of ``dspy.Tool`` owning the live session.
@@ -777,6 +873,7 @@ def MCP(
         startup_timeout=startup_timeout,
         name_prefix=name_prefix,
         result_mode=result_mode,
+        retry_timeout=retry_timeout,
         failures=failures,
     )
 

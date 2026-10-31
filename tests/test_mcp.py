@@ -5,8 +5,10 @@ import concurrent.futures
 import gc
 import importlib
 import inspect
+import json
 import sys
 import threading
+import time
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +24,9 @@ from dspy_agent_tools.mcp import (
     _accepted_kwargs,
     _close_all,
     _Connection,
+    _error_payload,
     _http_transport,
+    _read_only,
     _read_write,
     _SessionProxy,
 )
@@ -30,10 +34,15 @@ from dspy_agent_tools.mcp import (
 mcp_module = importlib.import_module("dspy_agent_tools.mcp")
 
 SERVER = Path(__file__).parent / "fixtures" / "mcp_server.py"
+RETRY_SERVER = Path(__file__).parent / "fixtures" / "retry_server.py"
 
 
 def start(**kwargs):
     return MCP(command=sys.executable, args=[str(SERVER)], **kwargs)
+
+
+def start_retry(**kwargs):
+    return MCP(command=sys.executable, args=[str(RETRY_SERVER)], **kwargs)
 
 
 @pytest.fixture()
@@ -83,6 +92,97 @@ class TestToolCalls:
         by_name = {tool.name: tool for tool in tools}
         assert by_name["add"](a=40, b=2) == "42"
         assert not dspy.settings.allow_tool_async_sync_conversion
+
+
+class TestReadOnlyRetry:
+    def test_replays_read_only_tool_until_it_answers(self):
+        with start_retry(retry_timeout=5) as tools:
+            by_name = {tool.name: tool for tool in tools}
+            assert json.loads(by_name["flaky_read"](text="hi")) == {"echo": "hi"}
+
+    def test_async_path_replays_too(self):
+        with start_retry(retry_timeout=5) as tools:
+            by_name = {tool.name: tool for tool in tools}
+            result = asyncio.run(by_name["flaky_read"].acall(text="hi"))
+            assert json.loads(result) == {"echo": "hi"}
+
+    def test_structured_mode_replays_mapping_payloads(self):
+        with start_retry(retry_timeout=5, result_mode="structured") as tools:
+            by_name = {tool.name: tool for tool in tools}
+            result = by_name["flaky_read"](text="hi")
+            payload = json.loads(result) if isinstance(result, str) else result
+            assert payload == {"echo": "hi"}
+
+    def test_write_tools_are_never_replayed(self):
+        with start_retry(retry_timeout=5) as tools:
+            by_name = {tool.name: tool for tool in tools}
+            started = time.monotonic()
+            result = by_name["flaky_write"](text="hi")
+            assert time.monotonic() - started < 1.0
+            assert json.loads(result)["error"] == "write refused"
+
+    def test_zero_retry_timeout_disables_replay(self):
+        with start_retry(retry_timeout=0) as tools:
+            by_name = {tool.name: tool for tool in tools}
+            result = by_name["flaky_read"](text="hi")
+            assert json.loads(result)["error"] == "still starting"
+
+    def test_retry_budget_bounds_a_persistent_error(self):
+        with start_retry(retry_timeout=0.2) as tools:
+            by_name = {tool.name: tool for tool in tools}
+            started = time.monotonic()
+            result = by_name["always_fails"](text="hi")
+            elapsed = time.monotonic() - started
+            assert 0.2 <= elapsed < 2.0
+            assert json.loads(result)["error"] == "still unavailable"
+
+
+class TestErrorPayload:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"error": "still starting"},
+            '{"error": "still starting"}',
+            {"ok": False, "condition": "index_updating"},
+            ['{"ok": false}'],
+        ],
+    )
+    def test_detects_error_shapes(self, value):
+        assert _error_payload(value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"results": []},
+            '{"results": []}',
+            "plain text",
+            {"ok": True},
+            {"error": ""},
+            b"bytes",
+            "{not json",
+        ],
+    )
+    def test_ignores_success_shapes(self, value):
+        assert not _error_payload(value)
+
+
+class TestReadOnlyAnnotation:
+    def test_reads_both_sdk_spellings(self):
+        assert _read_only(
+            SimpleNamespace(annotations=SimpleNamespace(read_only_hint=True))
+        )
+        assert _read_only(
+            SimpleNamespace(annotations=SimpleNamespace(readOnlyHint=True))
+        )
+        assert _read_only(SimpleNamespace(annotations={"readOnlyHint": True}))
+
+    def test_rejects_missing_or_false_annotations(self):
+        assert not _read_only(SimpleNamespace(annotations=None))
+        assert not _read_only(SimpleNamespace(annotations=SimpleNamespace()))
+        assert not _read_only(
+            SimpleNamespace(annotations=SimpleNamespace(read_only_hint=False))
+        )
+        assert not _read_only(SimpleNamespace())
 
 
 class TestComposition:
