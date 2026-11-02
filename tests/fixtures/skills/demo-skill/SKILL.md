@@ -3,6 +3,7 @@ name: demo-skill
 description: Demonstrate the Agent Skills layout. Use when a test needs scripts, references, and assets.
 license: MIT
 compatibility: Requires Python 3.13+
+allowed-tools: Bash(git:*) Bash(jq:*)
 metadata:
   author: dspy-agent-tools
 ---
