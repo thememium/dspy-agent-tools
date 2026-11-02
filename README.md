@@ -473,7 +473,7 @@ model context. The body loads when the agent activates the skill.
 
 ```python
 import dspy
-from dspy_agent_tools import Skills, bash_exec, read_file
+from dspy_agent_tools import CLI, Skills, bash_exec, read_file
 
 skills = Skills("~/.agents/skills", ".agents/skills")
 
@@ -483,8 +483,8 @@ worker = dspy.RLM("task -> report", tools=Skills("./skills", mode="code"))
 
 | Tool | Purpose |
 | --- | --- |
-| `list_skills()` | Names, descriptions, and bundled scripts for every skill. |
-| `activate_skill(skill)` | The skill's full `SKILL.md` body plus its bundled file list. |
+| `list_skills()` | Names, descriptions, declared `allowed-tools`, and bundled scripts for every skill. |
+| `activate_skill(skill)` | The skill's full `SKILL.md` body plus its bundled file list and frontmatter (`allowed-tools`, `license`, `compatibility`, `metadata`). |
 | `read_skill_resource(skill, path)` | One file from `references/` or `assets/`, addressed relative to the skill folder. |
 | `run_skill_script(skill, script, args=[])` | One file from `scripts/`, run in the sandbox below. |
 
@@ -505,8 +505,12 @@ sqlite-tools/
   Pass `strict=True` to raise instead.
 - A root that is itself a skill (`Skills("./pdf")`) is accepted.
 - `mode="search"` (default) returns text for `dspy.ReAct` / `dspy.ReActV2`;
-  `mode="code"` returns `list[dict]` / `dict` for `dspy.RLM`.
-- `name_prefix="skill_"` avoids tool-name collisions with other tools.
+  `mode="code"` returns `list[dict]` / `dict` for `dspy.RLM`. Under
+  `mode="code"` the model also runs in a REPL, so the injected guidance says
+  that only tool calls reach the machine.
+- `name_prefix="skill_"` avoids tool-name collisions with other tools. It must
+  form valid Python identifiers (required for `dspy.RLM`, whose tools are
+  called from code), so `"skill_"` is accepted and `"sk-"` raises.
 - `scripts=False` omits `run_skill_script` and never executes skill code.
 
 #### Patching an existing agent
@@ -518,6 +522,24 @@ predictor, so it works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`:
 
 ```python
 agent = dspy.ReAct("question -> answer", tools=[bash_exec, read_file])
+Skills("./skills").patch(agent)
+```
+
+The injected block carries the execution rules, not just the catalog: only
+`run_skill_script` can start a bundled file, and the skill's prose may call for
+host commands (`npx skills find ...`, `gh skill search ...`). When the agent
+already holds a shell or CLI tool, `patch` names it in the instructions; when
+it holds none, the model is told to report the exact command instead of
+running it, and never to invent command output, search results, or install
+counts:
+
+```python
+# No shell tool: the model reports `npx skills find "git review"` for you to run.
+agent = dspy.RLM("question -> answer")
+Skills("./skills", mode="code").patch(agent)
+
+# With a CLI tool: the model runs the command for real and quotes the output.
+agent = dspy.ReAct("question -> answer", tools=list(CLI("gh")))
 Skills("./skills").patch(agent)
 ```
 
@@ -793,13 +815,14 @@ progressive-disclosure tools. `scripts=False` omits `run_skill_script`.
 
 | Tool | Use it for |
 | --- | --- |
-| **`list_skills`** | Every discovered skill with its description and bundled files. Corrupt or non-conforming skills are listed at the end. |
-| **`activate_skill`** | The full `SKILL.md` body, plus `scripts/`, `references/`, and `assets/` listings, for one skill. |
+| **`list_skills`** | Every discovered skill with its description, declared `allowed-tools`, and bundled files. Corrupt or non-conforming skills are listed at the end. |
+| **`activate_skill`** | The full `SKILL.md` body, plus `scripts/`, `references/`, and `assets/` listings, and the rest of the frontmatter (`allowed-tools`, `license`, `compatibility`, `metadata`). |
 | **`read_skill_resource`** | One `references/` or `assets/` file, addressed relative to the skill folder. `../` and absolute paths are rejected; binary files are reported rather than decoded. |
 | **`run_skill_script`** | One `scripts/` file with an argv list. The interpreter is allowlisted, the environment is replaced, and the OS sandbox is applied when available. |
 
 `Skills(...)` also exposes `skills` (the parsed `Skill` objects), `errors`
-(skipped directories), `catalog()` (the XML block), and `patch(agent)`.
+(skipped directories), `catalog()` (the XML block), `instructions(tools=())`
+(the full block `patch` injects for a given tool set), and `patch(agent)`.
 `dspy.RLM` gets the same tools with `mode="code"`, where each returns a
 dictionary instead of text.
 
