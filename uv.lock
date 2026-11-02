@@ -726,6 +726,7 @@ dependencies = [
     { name = "ddgs" },
     { name = "markdownify" },
     { name = "plumbum" },
+    { name = "pyyaml" },
     { name = "rgapi" },
     { name = "tree-sitter-language-pack" },
 ]
@@ -762,6 +763,7 @@ requires-dist = [
     { name = "markdownify", specifier = ">=1.2.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2" },
     { name = "plumbum", specifier = ">=2.0.2" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rgapi", specifier = ">=0.2.3" },
     { name = "tree-sitter-language-pack", specifier = ">=1.22.1" },
 ]
