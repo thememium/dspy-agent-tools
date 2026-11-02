@@ -14,7 +14,7 @@ from dspy.utils.dummies import DummyLM
 
 import dspy_agent_tools.sandbox as sandbox_module
 import dspy_agent_tools.skills as skills_module
-from dspy_agent_tools import Skill, Skills, SkillTools, bash_exec
+from dspy_agent_tools import Skill, Skills, SkillTools, bash_exec, web_search
 from dspy_agent_tools.sandbox import (
     ScriptSandbox,
     _family,
@@ -556,6 +556,15 @@ class TestPatch:
 
         instructions = cast(Any, agent.react.signature).instructions
         assert "Host command tools available to you: `bash_exec`." in instructions
+
+    def test_patch_names_fetch_tools_without_a_shell(self):
+        agent = dspy.ReAct(QA, tools=[web_search], max_iters=2)
+
+        Skills(SKILLS).patch(agent)
+
+        instructions = cast(Any, agent.react.signature).instructions
+        assert "Tools available to read a URL a skill points at" in instructions
+        assert "Host command tools available" not in instructions
 
     def test_patch_tells_rlm_the_repl_cannot_spawn_processes(self):
         agent = dspy.RLM(QA, tools=[], max_iters=2)

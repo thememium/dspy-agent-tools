@@ -527,11 +527,12 @@ Skills("./skills").patch(agent)
 
 The injected block carries the execution rules, not just the catalog: only
 `run_skill_script` can start a bundled file, and the skill's prose may call for
-host commands (`npx skills find ...`, `gh skill search ...`). When the agent
-already holds a shell or CLI tool, `patch` names it in the instructions; when
-it holds none, the model is told to report the exact command instead of
-running it, and never to invent command output, search results, or install
-counts:
+host commands (`npx skills find ...`, `gh skill search ...`) or a page to read.
+`patch` names whichever it finds on the agent — host command tools
+(`bash_exec`, `CLI(...)`), fetch tools (`web_search`, `bash_curl`), or both.
+When the agent holds neither, the model is told to report the exact command
+instead of running it, and never to invent command output, search results, or
+install counts:
 
 ```python
 # No shell tool: the model reports `npx skills find "git review"` for you to run.

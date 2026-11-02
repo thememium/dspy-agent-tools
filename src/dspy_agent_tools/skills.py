@@ -134,10 +134,15 @@ _REPL_NOTE = (
 )
 
 _HOST_TOOLS_NOTE = "Host command tools available to you: {names}."
+_NETWORK_TOOLS_NOTE = (
+    "Tools available to read a URL a skill points at (no shell needed): {names}."
+)
 
 #: Tools from this package that execute host commands; used to tell the model
 #: whether it can follow a skill's CLI instructions.
 _HOST_TOOL_MODULES = frozenset({"dspy_agent_tools.bash", "dspy_agent_tools.cli"})
+#: Tools that fetch a URL; a skill may ask for a page rather than a command.
+_NETWORK_TOOL_MODULES = frozenset({"dspy_agent_tools.search"})
 _SHELL_TOOL_NAMES = frozenset(
     {
         "bash",
@@ -846,6 +851,13 @@ class SkillTools(list):
             parts.append(
                 _HOST_TOOLS_NOTE.format(names=", ".join(f"`{name}`" for name in found))
             )
+        fetchers = _network_tools(tools)
+        if fetchers:
+            parts.append(
+                _NETWORK_TOOLS_NOTE.format(
+                    names=", ".join(f"`{name}`" for name in fetchers)
+                )
+            )
         return "\n\n".join(parts)
 
     def instructions(self, tools: Sequence[Any] = ()) -> str:
@@ -974,6 +986,24 @@ def _agent_tools(agent: Any, kind: str) -> dict[str, Any]:
     return dict(tools)
 
 
+def _named_tools(
+    tools: Sequence[Any],
+    *,
+    modules: frozenset[str],
+    names: frozenset[str] = frozenset(),
+    suffixes: tuple[str, ...] = (),
+) -> list[str]:
+    """Names of the tools whose function matches one of the given signals."""
+    found = set()
+    for tool in tools:
+        func = getattr(tool, "func", None)
+        name = getattr(tool, "name", None) or getattr(func, "__name__", "")
+        module = getattr(func, "__module__", "") or ""
+        if module in modules or name in names or name.endswith(suffixes):
+            found.add(str(name))
+    return sorted(name for name in found if name)
+
+
 def _host_command_tools(tools: Sequence[Any]) -> list[str]:
     """Names of the tools that can run a host command.
 
@@ -981,18 +1011,21 @@ def _host_command_tools(tools: Sequence[Any]) -> list[str]:
     :mod:`dspy_agent_tools.cli`, or when its name matches a common shell
     spelling, so the model is told which commands it can actually run.
     """
-    found = set()
-    for tool in tools:
-        func = getattr(tool, "func", None)
-        name = getattr(tool, "name", None) or getattr(func, "__name__", "")
-        module = getattr(func, "__module__", "") or ""
-        if (
-            module in _HOST_TOOL_MODULES
-            or name in _SHELL_TOOL_NAMES
-            or name.endswith(_SHELL_TOOL_SUFFIXES)
-        ):
-            found.add(str(name))
-    return sorted(name for name in found if name)
+    return _named_tools(
+        tools,
+        modules=_HOST_TOOL_MODULES,
+        names=_SHELL_TOOL_NAMES,
+        suffixes=_SHELL_TOOL_SUFFIXES,
+    )
+
+
+def _network_tools(tools: Sequence[Any]) -> list[str]:
+    """Names of the tools that fetch a URL or search the web.
+
+    Skills routinely ask the agent to read a page (a leaderboard, a changelog);
+    that step needs a fetch tool, not a shell.
+    """
+    return _named_tools(tools, modules=_NETWORK_TOOL_MODULES)
 
 
 # ---------------------------------------------------------------------------
