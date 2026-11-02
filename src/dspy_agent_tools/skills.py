@@ -98,12 +98,59 @@ _GUIDANCE = """## Agent Skills
 Skills are folders of instructions, scripts, and reference files. The catalog
 below lists every installed skill; activate one before following it.
 
-- `list_skills` — names, descriptions, and bundled scripts.
-- `activate_skill` — load one skill's full SKILL.md instructions.
-- `read_skill_resource` — read a file from a skill's references/ or assets/.
-- `run_skill_script` — run a file from a skill's scripts/ in a sandbox."""
+- `{list_skills}` — names, descriptions, bundled files, and any declared
+  `allowed-tools`.
+- `{activate_skill}` — load one skill's full SKILL.md instructions.
+- `{read_skill_resource}` — read a file from a skill's references/ or assets/.
+- `{run_skill_script}` — run a file from a skill's scripts/ in a sandbox."""
 
 _GUIDANCE_NO_SCRIPTS = _GUIDANCE.rsplit("\n", 1)[0]
+
+_HOST_RULES = (
+    "A skill's instructions may also call for host commands (for example "
+    "`npx skills find ...` or `gh skill search ...`): run them only with a "
+    "shell or CLI tool you were given. If you were given none, name the exact "
+    "command and tell the user to run it; never claim you ran a command and "
+    "never invent its output, search results, install counts, or repository "
+    "names."
+)
+
+_EXECUTION_NOTE = (
+    "Run a skill through its tools; never simulate a result. `{run_skill_script}` "
+    "starts one file from `scripts/` on the machine inside a sandbox, and "
+    "nothing else bundled with a skill can be executed. " + _HOST_RULES
+)
+
+_EXECUTION_NOTE_NO_SCRIPTS = (
+    "Run a skill through its tools; never simulate a result. Bundled scripts "
+    "cannot be executed here: script running is disabled for this catalog, so "
+    "a skill that needs a script can only be followed by hand. " + _HOST_RULES
+)
+
+_REPL_NOTE = (
+    "Your code runs in a REPL that cannot spawn processes or open network "
+    "connections, so shell commands fail from code. Tool calls, including "
+    "`{run_skill_script}`, run on the machine instead."
+)
+
+_HOST_TOOLS_NOTE = "Host command tools available to you: {names}."
+
+#: Tools from this package that execute host commands; used to tell the model
+#: whether it can follow a skill's CLI instructions.
+_HOST_TOOL_MODULES = frozenset({"dspy_agent_tools.bash", "dspy_agent_tools.cli"})
+_SHELL_TOOL_NAMES = frozenset(
+    {
+        "bash",
+        "bash_exec",
+        "exec",
+        "execute",
+        "run_shell",
+        "shell",
+        "sh",
+        "terminal",
+    }
+)
+_SHELL_TOOL_SUFFIXES = ("_run_command", "_bash_exec")
 
 _LIST_DESC = (
     "List the installed agent skills with their descriptions and bundled "
@@ -128,11 +175,12 @@ _RUN_DESC = (
 )
 _CODE_LIST_DESC = (
     "List the installed agent skills as a list of {name, description, "
-    "scripts, references, assets} dicts, sorted by name."
+    "allowed_tools, scripts, references, assets} dicts, sorted by name."
 )
 _CODE_ACTIVATE_DESC = (
     "Load one skill's full SKILL.md instructions as a dict with name, "
-    "description, path, instructions, scripts, references, and assets."
+    "description, path, instructions, allowed_tools, scripts, references, "
+    "assets, license, compatibility, and metadata."
 )
 _CODE_READ_DESC = (
     "Read one reference or asset file from a skill and return {path, "
@@ -407,17 +455,24 @@ def _catalog(skills: Sequence[Skill], max_chars: int) -> str:
     used = len(lines[0])
     omitted = 0
     for skill in skills:
-        block = (
-            "<skill>\n"
-            f"<name>{html.escape(skill.name)}</name>\n"
-            f"<description>{html.escape(skill.description, quote=False)}</description>\n"
-            "</skill>"
-        )
-        if max_chars and used + len(block) > max_chars:
+        block = [
+            "<skill>",
+            f"<name>{html.escape(skill.name)}</name>",
+            f"<description>{html.escape(skill.description, quote=False)}</description>",
+        ]
+        if skill.allowed_tools:
+            block.append(
+                "<allowed-tools>"
+                f"{html.escape(skill.allowed_tools, quote=False)}"
+                "</allowed-tools>"
+            )
+        block.append("</skill>")
+        rendered = "\n".join(block)
+        if max_chars and used + len(rendered) + 1 > max_chars:
             omitted += 1
             continue
-        lines.append(block)
-        used += len(block)
+        lines.append(rendered)
+        used += len(rendered) + 1
     lines.append("</available_skills>")
     if omitted:
         lines.append(f"({omitted} more skills omitted to fit the context budget)")
@@ -470,6 +525,8 @@ class _Registry:
         for skill in self.skills:
             lines.append(f"**{skill.name}**")
             lines.append(f"  {skill.description}")
+            if skill.allowed_tools:
+                lines.append(f"  allowed-tools: {skill.allowed_tools}")
             for label, files in (
                 ("scripts", skill.scripts()),
                 ("references", skill.references()),
@@ -489,6 +546,7 @@ class _Registry:
             {
                 "name": skill.name,
                 "description": skill.description,
+                "allowed_tools": skill.allowed_tools,
                 "scripts": skill.scripts(),
                 "references": skill.references(),
                 "assets": skill.assets(),
@@ -519,7 +577,7 @@ class _Registry:
             parts += ["", "---", "## Bundled files", ""]
             parts.extend(bundled)
         if skill.allowed_tools:
-            parts += ["", f"Pre-approved tools: {skill.allowed_tools}"]
+            parts += ["", f"Declared tools (allowed-tools): {skill.allowed_tools}"]
         return "\n".join(parts)
 
     def activate_record(self, name: str) -> dict[str, Any]:
@@ -530,9 +588,13 @@ class _Registry:
                 "description": skill.description,
                 "path": str(skill.path),
                 "instructions": skill.instructions(),
+                "allowed_tools": skill.allowed_tools,
                 "scripts": skill.scripts(),
                 "references": skill.references(),
                 "assets": skill.assets(),
+                "license": skill.license,
+                "compatibility": skill.compatibility,
+                "metadata": dict(skill.metadata),
             }
         except (KeyError, OSError, ValueError) as exc:
             return {"error": _message(exc)}
@@ -646,11 +708,21 @@ def _read_text(path: Path, limit: int) -> tuple[str, bool]:
 # ---------------------------------------------------------------------------
 
 
+def _tool_names(prefix: str) -> dict[str, str]:
+    """Tool names for one ``name_prefix``."""
+    return {
+        "list_skills": f"{prefix}list_skills",
+        "activate_skill": f"{prefix}activate_skill",
+        "read_skill_resource": f"{prefix}read_skill_resource",
+        "run_skill_script": f"{prefix}run_skill_script",
+    }
+
+
 def _build_tools(
     registry: _Registry,
     *,
     mode: Literal["search", "code"],
-    prefix: str,
+    names: Mapping[str, str],
     scripts: bool,
     tool_cls: Any,
 ) -> list[Tool]:
@@ -698,11 +770,11 @@ def _build_tools(
         )
 
     tools: list[Tool] = [
-        tool_cls(list_skills, name=f"{prefix}list_skills", desc=list_desc),
-        tool_cls(activate_skill, name=f"{prefix}activate_skill", desc=activate_desc),
+        tool_cls(list_skills, name=names["list_skills"], desc=list_desc),
+        tool_cls(activate_skill, name=names["activate_skill"], desc=activate_desc),
         tool_cls(
             read_skill_resource,
-            name=f"{prefix}read_skill_resource",
+            name=names["read_skill_resource"],
             desc=read_desc,
         ),
     ]
@@ -710,7 +782,7 @@ def _build_tools(
         tools.append(
             tool_cls(
                 run_skill_script,
-                name=f"{prefix}run_skill_script",
+                name=names["run_skill_script"],
                 desc=run_desc,
             )
         )
@@ -741,27 +813,64 @@ class SkillTools(list):
         skills: Sequence[Skill],
         errors: Sequence[str],
         catalog: str,
-        block: str,
         scripts: bool,
+        names: Mapping[str, str] | None = None,
+        mode: Literal["search", "code"] = "search",
     ) -> None:
         super().__init__(tools)
         self.skills = tuple(skills)
         self.errors = tuple(errors)
         self.scripts = scripts
+        self._mode = mode
         self._catalog = catalog
-        self._block = block
+        names = dict(names) if names is not None else _tool_names("")
+        discovered = {tool.name for tool in tools}
+        present = {key: value for key, value in names.items() if value in discovered}
+        self._names = present or names
 
     def catalog(self) -> str:
         """The ``<available_skills>`` XML block injected by :meth:`patch`."""
         return self._catalog
 
+    def _guidance(self) -> str:
+        block = _GUIDANCE if self.scripts else _GUIDANCE_NO_SCRIPTS
+        return block.format(**self._names)
+
+    def _execution_note(self, tools: Sequence[Any]) -> str:
+        template = _EXECUTION_NOTE if self.scripts else _EXECUTION_NOTE_NO_SCRIPTS
+        parts = [template.format(**self._names)]
+        if self._mode == "code" and self.scripts:
+            parts.append(_REPL_NOTE.format(**self._names))
+        found = _host_command_tools(tools)
+        if found:
+            parts.append(
+                _HOST_TOOLS_NOTE.format(names=", ".join(f"`{name}`" for name in found))
+            )
+        return "\n\n".join(parts)
+
+    def instructions(self, tools: Sequence[Any] = ()) -> str:
+        """Guidance, execution rules, and the catalog for an agent with ``tools``.
+
+        Pass the agent's full tool list so the model is told which host
+        commands it can actually run (see :func:`_host_command_tools`).
+        """
+        return "\n\n".join(
+            [self._guidance(), self._execution_note(tools), self._catalog]
+        )
+
     def patch(self, agent: Any) -> Any:
         """Append the skill tools to ``agent`` and inject the catalog.
 
         The agent is reinitialized in place: its signature gets the skill
-        catalog appended to its instructions, and its tool list gains the
-        four skill tools. Works for ``dspy.ReAct``, ``dspy.ReActV2``, and
-        ``dspy.RLM``; other module types raise ``TypeError``.
+        guidance, the execution rules, and the ``<available_skills>`` catalog
+        appended to its instructions, and its tool list gains the four skill
+        tools. The execution rules name the tools the agent already has that
+        can run host commands, so a skill whose instructions call a CLI is
+        either followed for real or reported as a command the user must run;
+        the model is told never to invent command output.
+
+        Works for ``dspy.ReAct``, ``dspy.ReActV2``, and ``dspy.RLM``; other
+        module types raise ``TypeError``.
 
         Calling ``patch`` twice on the same agent is a no-op. Patching an
         agent that already received these tools through ``tools=`` only adds
@@ -810,8 +919,9 @@ class SkillTools(list):
                 )
 
         instructions = agent.signature.instructions
+        block = self.instructions([*existing.values(), *additions])
         signature = agent.signature.with_instructions(
-            f"{instructions}\n\n{self._block}" if instructions else self._block
+            f"{instructions}\n\n{block}" if instructions else block
         )
 
         if kind == "ReAct":
@@ -864,6 +974,27 @@ def _agent_tools(agent: Any, kind: str) -> dict[str, Any]:
     return dict(tools)
 
 
+def _host_command_tools(tools: Sequence[Any]) -> list[str]:
+    """Names of the tools that can run a host command.
+
+    A tool counts when it comes from :mod:`dspy_agent_tools.bash` or
+    :mod:`dspy_agent_tools.cli`, or when its name matches a common shell
+    spelling, so the model is told which commands it can actually run.
+    """
+    found = set()
+    for tool in tools:
+        func = getattr(tool, "func", None)
+        name = getattr(tool, "name", None) or getattr(func, "__name__", "")
+        module = getattr(func, "__module__", "") or ""
+        if (
+            module in _HOST_TOOL_MODULES
+            or name in _SHELL_TOOL_NAMES
+            or name.endswith(_SHELL_TOOL_SUFFIXES)
+        ):
+            found.add(str(name))
+    return sorted(name for name in found if name)
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
@@ -899,7 +1030,8 @@ def Skills(
             ``dspy.ReActV2``; ``"code"`` returns dictionaries for
             ``dspy.RLM``.
         name_prefix: Prepended to every tool name, for example
-            ``name_prefix="skill_"``.
+            ``name_prefix="skill_"``. It must form a valid Python identifier,
+            so ``"sk-"`` is rejected and ``"sk_"`` is not.
         strict: Raise ``ValueError`` for the first invalid skill instead of
             skipping it.
         scripts: Include ``run_skill_script``. When ``False``, no script is
@@ -949,6 +1081,15 @@ def Skills(
         raise ValueError("max_catalog_chars must be >= 0")
 
     paths = [Path(root).expanduser() for root in roots]
+    names = _tool_names(name_prefix)
+    if scripts is False:
+        names.pop("run_skill_script")
+    invalid = sorted(name for name in names.values() if not name.isidentifier())
+    if invalid:
+        raise ValueError(
+            "name_prefix must form valid Python identifiers for every tool name; "
+            f"got {name_prefix!r} producing {invalid[0]!r}"
+        )
     tool_cls = _load_tool()
     discovered, errors = _discover(paths, strict=strict)
     sandbox_runner = (
@@ -971,11 +1112,10 @@ def Skills(
         max_resource_chars=max_resource_chars,
     )
     catalog = _catalog(discovered, max_catalog_chars)
-    block = f"{_GUIDANCE if scripts else _GUIDANCE_NO_SCRIPTS}\n\n{catalog}"
     tools = _build_tools(
         registry,
         mode=mode,
-        prefix=name_prefix,
+        names=names,
         scripts=scripts,
         tool_cls=tool_cls,
     )
@@ -984,8 +1124,9 @@ def Skills(
         skills=discovered,
         errors=errors,
         catalog=catalog,
-        block=block,
         scripts=scripts,
+        names=names,
+        mode=mode,
     )
 
 
