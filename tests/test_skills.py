@@ -14,7 +14,7 @@ from dspy.utils.dummies import DummyLM
 
 import dspy_agent_tools.sandbox as sandbox_module
 import dspy_agent_tools.skills as skills_module
-from dspy_agent_tools import Skill, Skills, SkillTools
+from dspy_agent_tools import Skill, Skills, SkillTools, bash_exec
 from dspy_agent_tools.sandbox import (
     ScriptSandbox,
     _family,
@@ -125,6 +125,17 @@ class TestToolSurface:
 
         assert "skill_list_skills" in by_name(tools)
 
+    def test_name_prefix_must_form_identifiers(self):
+        with pytest.raises(ValueError, match="valid Python identifiers"):
+            Skills(SKILLS, name_prefix="sk-")
+
+    def test_identifier_prefix_patches_rlm(self):
+        agent = dspy.RLM(QA, tools=[])
+
+        Skills(SKILLS, mode="code", name_prefix="sk_").patch(agent)
+
+        assert "sk_activate_skill" in cast(Any, agent._user_tools)
+
     def test_rejects_unknown_mode_and_empty_roots(self):
         with pytest.raises(ValueError, match="Unknown mode"):
             Skills(SKILLS, mode=cast(Any, "tools"))
@@ -147,6 +158,7 @@ class TestListAndActivate:
 
         assert [record["name"] for record in records] == ["demo-skill", "second-skill"]
         assert "greet.py" in records[0]["scripts"]
+        assert records[0]["allowed_tools"] == "Bash(git:*) Bash(jq:*)"
 
     def test_activate_returns_instructions_and_files(self):
         tools = by_name(Skills(SKILLS))
@@ -158,7 +170,7 @@ class TestListAndActivate:
         assert "scripts: escape.py" in text
         assert "references: guide.md" in text
         assert "assets: template.txt" in text
-        assert "Pre-approved tools: Bash(git:*) Bash(jq:*)" in text
+        assert "Declared tools (allowed-tools): Bash(git:*) Bash(jq:*)" in text
         assert "name:" not in text  # frontmatter is not part of the instructions
 
     def test_activate_code_returns_a_record(self):
@@ -169,6 +181,16 @@ class TestListAndActivate:
         assert record["name"] == "second-skill"
         assert record["instructions"] == "Follow the second skill instructions."
         assert record["scripts"] == []
+
+    def test_activate_code_surfaces_frontmatter(self):
+        tools = by_name(Skills(SKILLS, mode="code"))
+
+        record = tools["activate_skill"](skill="demo-skill")
+
+        assert record["allowed_tools"] == "Bash(git:*) Bash(jq:*)"
+        assert record["license"] == "MIT"
+        assert record["compatibility"] == "Requires Python 3.13+"
+        assert record["metadata"] == {"author": "dspy-agent-tools"}
 
     def test_unknown_skill_lists_available_names(self):
         tools = by_name(Skills(SKILLS))
@@ -517,6 +539,42 @@ class TestPatch:
         with pytest.raises(TypeError, match="supports dspy.ReAct"):
             Skills(SKILLS).patch(agent)
 
+    def test_patch_forbids_inventing_command_output(self):
+        agent = dspy.ReAct(QA, tools=[], max_iters=2)
+
+        Skills(SKILLS).patch(agent)
+
+        instructions = cast(Any, agent.react.signature).instructions
+        assert "never claim you ran a command" in instructions
+        assert "never invent its output" in instructions
+        assert "Host command tools available" not in instructions
+
+    def test_patch_names_the_shell_tools_it_has(self):
+        agent = dspy.ReAct(QA, tools=[bash_exec], max_iters=2)
+
+        Skills(SKILLS).patch(agent)
+
+        instructions = cast(Any, agent.react.signature).instructions
+        assert "Host command tools available to you: `bash_exec`." in instructions
+
+    def test_patch_tells_rlm_the_repl_cannot_spawn_processes(self):
+        agent = dspy.RLM(QA, tools=[], max_iters=2)
+
+        Skills(SKILLS, mode="code").patch(agent)
+
+        instructions = cast(Any, agent.generate_action.signature).instructions
+        assert "cannot spawn processes" in instructions
+        assert "`run_skill_script`" in instructions
+
+    def test_patch_uses_the_prefixed_tool_names(self):
+        agent = dspy.ReAct(QA, tools=[], max_iters=2)
+
+        Skills(SKILLS, name_prefix="sk_").patch(agent)
+
+        instructions = cast(Any, agent.react.signature).instructions
+        assert "`sk_activate_skill`" in instructions
+        assert "`activate_skill`" not in instructions
+
     def test_patched_react_loop_can_use_a_skill(self):
         class QA(dspy.Signature):
             question: str = dspy.InputField()
@@ -795,6 +853,25 @@ class TestCatalogAndCodeMode:
         tools = Skills(SKILLS, max_catalog_chars=10)
 
         assert "more skills omitted" in tools.catalog()
+
+    def test_catalog_declares_allowed_tools(self):
+        tools = Skills(SKILLS)
+
+        assert (
+            "<allowed-tools>Bash(git:*) Bash(jq:*)</allowed-tools>" in tools.catalog()
+        )
+
+    def test_instructions_drop_script_guidance_when_disabled(self):
+        text = Skills(SKILLS, scripts=False).instructions()
+
+        assert "script running is disabled" in text
+        assert "run_skill_script" not in text
+
+    def test_instructions_name_the_script_tool(self):
+        text = Skills(SKILLS).instructions()
+
+        assert "`run_skill_script`" in text
+        assert "<available_skills>" in text
 
     def test_code_mode_activate_reports_unknown_skills(self):
         tools = by_name(Skills(SKILLS, mode="code"))
