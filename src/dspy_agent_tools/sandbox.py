@@ -311,14 +311,7 @@ class ScriptSandbox:
         if not candidate:
             return None, None
         family = _family(candidate)
-        executable = shutil.which(candidate)
-        if (
-            executable is None
-            and Path(candidate).is_absolute()
-            and os.access(candidate, os.X_OK)
-        ):
-            executable = candidate
-        return family, executable
+        return family, shutil.which(candidate)
 
     def _environment(self, skill_dir: Path, tmp: str) -> dict[str, str]:
         """Build a replacement environment for the script process."""
