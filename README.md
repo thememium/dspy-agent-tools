@@ -40,14 +40,15 @@ DSPy Agent Tools is a library of **tool functions** for
 function with a tool-optimized docstring, so you can hand them straight to
 `dspy.ReAct` or `dspy.RLM` — no adapters, no wrappers.
 
-Three built-in tool families, plus a generic Toolbox, a CLI bridge, and an
-optional MCP bridge:
+Three built-in tool families, plus Agent Skills, a generic Toolbox, a CLI
+bridge, and an optional MCP bridge:
 
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
 - **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable.
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
+- **Skills** — `Skills("~/.agents/skills")` loads [Agent Skills](https://agentskills.io/specification) folders and returns progressive-disclosure tools for listing, activating, reading, and running them, with sandboxed script execution. `Skills(...).patch(agent)` appends the catalog and tools to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`.
 - **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
 
 Tools are just Python functions, exactly as
@@ -461,6 +462,109 @@ run without a shell. The same `json_flag` probe applies to explicit commands.
 Explicit commands do not probe `--help`, so they also work for hidden
 commands and plugin commands that do not appear in help.
 
+### With Agent Skills
+
+`Skills` loads folders that follow the [Agent Skills
+specification](https://agentskills.io/specification) — the same `SKILL.md`
+folders Claude Code, Codex, and other clients use. Point it at the folder that
+houses the skills; each immediate subdirectory with a `SKILL.md` is discovered
+at startup from its frontmatter, so only the name and description enter the
+model context. The body loads when the agent activates the skill.
+
+```python
+import dspy
+from dspy_agent_tools import Skills, bash_exec, read_file
+
+skills = Skills("~/.agents/skills", ".agents/skills")
+
+agent = dspy.ReAct("question -> answer", tools=skills + [bash_exec])
+worker = dspy.RLM("task -> report", tools=Skills("./skills", mode="code"))
+```
+
+| Tool | Purpose |
+| --- | --- |
+| `list_skills()` | Names, descriptions, and bundled scripts for every skill. |
+| `activate_skill(skill)` | The skill's full `SKILL.md` body plus its bundled file list. |
+| `read_skill_resource(skill, path)` | One file from `references/` or `assets/`, addressed relative to the skill folder. |
+| `run_skill_script(skill, script, args=[])` | One file from `scripts/`, run in the sandbox below. |
+
+A skill is a directory with a `SKILL.md` (YAML frontmatter carrying `name` and
+`description`) and optional `scripts/`, `references/`, and `assets/` folders:
+
+```
+sqlite-tools/
+├── SKILL.md              # name, description, metadata + instructions
+├── scripts/query.py      # executable code the agent can run
+├── references/schema.md  # documentation loaded on demand
+└── assets/report.html    # templates and data
+```
+
+- `name` must be lowercase, hyphen-separated, at most 64 characters, and match
+  the directory name; `description` is required and at most 1024 characters.
+  Skills that break the spec are skipped and reported on `skills.errors`.
+  Pass `strict=True` to raise instead.
+- A root that is itself a skill (`Skills("./pdf")`) is accepted.
+- `mode="search"` (default) returns text for `dspy.ReAct` / `dspy.ReActV2`;
+  `mode="code"` returns `list[dict]` / `dict` for `dspy.RLM`.
+- `name_prefix="skill_"` avoids tool-name collisions with other tools.
+- `scripts=False` omits `run_skill_script` and never executes skill code.
+
+#### Patching an existing agent
+
+`tools=skills` is enough on its own. `Skills(...).patch(agent)` appends the
+`<available_skills>` catalog to the instructions the model sees and adds the
+four tools to an agent that was already built. It rebuilds the inner
+predictor, so it works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`:
+
+```python
+agent = dspy.ReAct("question -> answer", tools=[bash_exec, read_file])
+Skills("./skills").patch(agent)
+```
+
+- `patch` returns the agent and is idempotent: patching twice changes nothing.
+- Patching an agent that already received `tools=skills` only adds the catalog.
+- It raises when the agent has a *different* tool with one of the skill tool
+  names; pass `name_prefix="skill_"` to resolve the collision.
+- Put every folder into one `Skills(...)` call: an agent accepts one catalog.
+
+#### Sandboxed scripts
+
+Scripts are argv-only (no shell), use an allowlisted interpreter
+(`python`, `bash`, `sh`, `node`, `deno`, `ruby`, `perl` by default), must
+resolve inside the skill folder, and run with a *replacement* environment: no
+ambient secrets, and `HOME`/`TMPDIR` point at a throwaway directory. The
+process runs in its own group, so a timeout kills any children it spawned.
+
+Where an OS sandbox is installed, it wraps the run:
+
+| Platform | Backend | Enforcement |
+| --- | --- | --- |
+| Linux | `bwrap` (preferred) | all namespaces unshared, host read-only, tmpfs `/tmp`, network unshared |
+| Linux | `firejail` (fallback) | read-only root, private `/tmp`, `--net=none` |
+| macOS | `sandbox-exec` | writes denied outside the throwaway temp dir, `network*` denied |
+| any | none | process confinement only (allowlist, path guard, env scrub, timeout) |
+
+`allow_network=False` and `allow_write=False` are the defaults, so a script
+can read the skill and the host but cannot reach the network or modify files;
+`allow_write=True` opens the skill folder, and the throwaway temp directory is
+always writable. `sandbox="auto"` uses an installed OS backend and falls back
+to process confinement with a log warning; `sandbox="required"` refuses to
+fall back; a backend name (`"bwrap"`, `"firejail"`, `"sandbox-exec"`) forces
+one and fails at construction if it is missing; `"off"` skips the OS layer.
+Use `sandbox="required"` when skill scripts are not trusted.
+
+```python
+Skills(
+    "./skills",
+    timeout=60,
+    allow_network=True,
+    allow_write=True,
+    sandbox="required",
+    interpreters=("python", "bash"),
+    max_output_chars=20_000,
+)
+```
+
 ### Tool discovery with Toolbox
 
 `Toolbox` accepts any mix of MCP servers, regular `dspy.Tool` objects, and
@@ -606,6 +710,11 @@ bash_ripgrep_batch(
 - Non-zero exits, timeouts, and failed transfers are reported inline as
   `"[exit code N]"` / `"[command timed out ...]"` notices rather than raised,
   so an agent can read and recover from failures.
+- Skill scripts are sandboxed at the OS level when `bwrap`, `firejail`, or
+  `sandbox-exec` is available. Without one they fall back to process
+  confinement (allowlisted interpreter, path guard, scrubbed environment,
+  timeout), which is not a security boundary — pass `sandbox="required"` when
+  skill scripts are untrusted.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -675,6 +784,24 @@ The parsed flag table supports the common help formats (argparse, click,
 clap, cobra, git short help, kubectl), but it is advisory. The raw help text
 is authoritative, and `mode="code"` returns the same data as dictionaries for
 `dspy.RLM`.
+
+### Skills (`dspy_agent_tools.skills`)
+
+`Skills(*roots, ...)` scans each root's immediate subdirectories for
+`SKILL.md` (a root that is itself a skill is accepted) and returns the
+progressive-disclosure tools. `scripts=False` omits `run_skill_script`.
+
+| Tool | Use it for |
+| --- | --- |
+| **`list_skills`** | Every discovered skill with its description and bundled files. Corrupt or non-conforming skills are listed at the end. |
+| **`activate_skill`** | The full `SKILL.md` body, plus `scripts/`, `references/`, and `assets/` listings, for one skill. |
+| **`read_skill_resource`** | One `references/` or `assets/` file, addressed relative to the skill folder. `../` and absolute paths are rejected; binary files are reported rather than decoded. |
+| **`run_skill_script`** | One `scripts/` file with an argv list. The interpreter is allowlisted, the environment is replaced, and the OS sandbox is applied when available. |
+
+`Skills(...)` also exposes `skills` (the parsed `Skill` objects), `errors`
+(skipped directories), `catalog()` (the XML block), and `patch(agent)`.
+`dspy.RLM` gets the same tools with `mode="code"`, where each returns a
+dictionary instead of text.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
