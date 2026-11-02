@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast, get_args
 
 import dspy
@@ -12,13 +13,24 @@ import pytest
 from dspy.utils.dummies import DummyLM
 
 import dspy_agent_tools.sandbox as sandbox_module
+import dspy_agent_tools.skills as skills_module
 from dspy_agent_tools import Skill, Skills, SkillTools
 from dspy_agent_tools.sandbox import (
     ScriptSandbox,
+    _family,
     bwrap_argv,
     firejail_argv,
     resolve_backend,
     sandbox_exec_profile,
+)
+from dspy_agent_tools.skills import (
+    _agent_tools,
+    _argv,
+    _discover,
+    _load_skill,
+    _Registry,
+    _validate,
+    _validate_name,
 )
 
 SKILLS = Path(__file__).parent / "fixtures" / "skills"
@@ -73,11 +85,13 @@ class TestDiscovery:
         assert isinstance(skill, Skill)
         assert skill.license == "MIT"
         assert skill.compatibility == "Requires Python 3.13+"
+        assert skill.allowed_tools == "Bash(git:*) Bash(jq:*)"
         assert skill.metadata == {"author": "dspy-agent-tools"}
         assert skill.scripts() == [
             "escape.py",
             "fail.py",
             "greet.py",
+            "loud.py",
             "slow.py",
             "write_here.py",
         ]
@@ -144,6 +158,7 @@ class TestListAndActivate:
         assert "scripts: escape.py" in text
         assert "references: guide.md" in text
         assert "assets: template.txt" in text
+        assert "Pre-approved tools: Bash(git:*) Bash(jq:*)" in text
         assert "name:" not in text  # frontmatter is not part of the instructions
 
     def test_activate_code_returns_a_record(self):
@@ -247,6 +262,20 @@ class TestRunScript:
         output = tools["run_skill_script"](skill="demo-skill", script="slow.py")
 
         assert "timed out after 0.5s" in output
+
+    def test_skill_without_scripts_dir(self):
+        tools = by_name(Skills(SKILLS))
+
+        output = tools["run_skill_script"](skill="second-skill", script="anything.py")
+
+        assert "has no scripts/ directory" in output
+
+    def test_empty_script_name(self):
+        tools = by_name(Skills(SKILLS))
+
+        output = tools["run_skill_script"](skill="demo-skill", script="")
+
+        assert "script name is required" in output
 
     def test_missing_script_lists_alternatives(self):
         tools = by_name(Skills(SKILLS))
@@ -527,3 +556,304 @@ class TestPatch:
         assert "Demo Skill" in prediction.trajectory["observation_0"]
         assert "greet: dspy" in prediction.trajectory["observation_1"]
         assert prediction.answer == "ok"
+
+
+class TestSandboxInternals:
+    def test_family_normalization(self):
+        assert _family("python3.13") == "python"
+        assert _family("python.exe") == "python"
+        assert _family("bash") == "bash"
+
+    def test_sandbox_exec_is_unavailable_off_darwin(self, monkeypatch):
+        monkeypatch.setattr(sandbox_module.sys, "platform", "linux")
+
+        assert sandbox_module._available("sandbox-exec") is False
+
+    def test_explicit_backend_that_is_installed(self, monkeypatch):
+        monkeypatch.setattr(sandbox_module, "_available", lambda backend: True)
+
+        assert resolve_backend("bwrap") == "bwrap"
+
+    def test_required_picks_the_first_installed_backend(self, monkeypatch):
+        monkeypatch.setattr(
+            sandbox_module, "_available", lambda backend: backend == "firejail"
+        )
+
+        assert resolve_backend("required") == "firejail"
+
+    def test_auto_falls_back_to_process_confinement(self, monkeypatch):
+        monkeypatch.setattr(sandbox_module, "_available", lambda backend: False)
+
+        assert resolve_backend("auto") is None
+
+    def test_bwrap_network_flag(self, tmp_path):
+        argv = bwrap_argv(
+            ["python", "s.py"],
+            tmp_path,
+            allow_network=True,
+            allow_write=False,
+        )
+
+        assert "--share-net" in argv
+
+    def test_configured_output_truncation(self):
+        tools = by_name(Skills(SKILLS, max_output_chars=20))
+
+        output = tools["run_skill_script"](skill="demo-skill", script="loud.py")
+
+        assert "chars omitted" in output
+
+    def test_constructor_rejects_bad_limits(self):
+        with pytest.raises(ValueError, match="max_output_chars"):
+            ScriptSandbox(max_output_chars=-1)
+        with pytest.raises(ValueError, match="interpreters"):
+            ScriptSandbox(interpreters=())
+
+    def test_missing_interpreter_on_path(self, tmp_path):
+        skill = tmp_path / "s"
+        (skill / "scripts").mkdir(parents=True)
+        script = skill / "scripts" / "run"
+        script.write_text("#!/usr/bin/env golang\nprint(1)\n")
+        sandbox = ScriptSandbox(sandbox="off", interpreters=("golang",))
+
+        with pytest.raises(FileNotFoundError, match="Interpreter not found"):
+            sandbox.run(script, [], skill_dir=skill)
+
+    def test_shebang_edge_cases(self, tmp_path):
+        assert ScriptSandbox._shebang(tmp_path / "missing") == (None, None)
+
+        empty = tmp_path / "empty"
+        empty.write_text("")
+        assert ScriptSandbox._shebang(empty) == (None, None)
+
+        bare = tmp_path / "bare"
+        bare.write_text("#!\n")
+        assert ScriptSandbox._shebang(bare) == (None, None)
+
+        flags = tmp_path / "flags"
+        flags.write_text("#!/usr/bin/env -i\n")
+        assert ScriptSandbox._shebang(flags) == (None, None)
+
+    def test_wrap_uses_the_selected_backend(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sandbox_module, "_available", lambda backend: True)
+
+        assert (
+            ScriptSandbox(sandbox="bwrap")._wrap(["python", "x"], tmp_path, None)[0]
+            == "bwrap"
+        )
+        assert (
+            ScriptSandbox(sandbox="firejail")._wrap(["python", "x"], tmp_path, None)[0]
+            == "firejail"
+        )
+
+    def test_missing_script_file_raises(self, tmp_path):
+        skill = copy_skill(tmp_path)
+
+        with pytest.raises(FileNotFoundError, match="Script not found"):
+            ScriptSandbox(sandbox="off").run(
+                skill / "scripts" / "missing.py", [], skill_dir=skill
+            )
+
+    def test_kill_race_is_tolerated(self, monkeypatch, tmp_path):
+        skill = copy_skill(tmp_path)
+        (skill / "scripts" / "nap.py").write_text("import time; time.sleep(0.3)\n")
+        sandbox = ScriptSandbox(sandbox="off", timeout=0.05)
+
+        def gone(pid: int, sig: int) -> None:
+            raise ProcessLookupError
+
+        monkeypatch.setattr(sandbox_module.os, "killpg", gone)
+
+        result = sandbox.run(skill / "scripts" / "nap.py", [], skill_dir=skill)
+
+        assert result.timed_out is True
+
+
+class TestFrontmatterAndValidation:
+    def test_skill_md_falls_back_to_canonical_name(self, tmp_path):
+        skill = Skill(name="s", description="d", path=tmp_path)
+
+        assert skill.skill_md == tmp_path / "SKILL.md"
+
+    def test_empty_resource_path_is_rejected(self, tmp_path):
+        skill = Skill(name="s", description="d", path=tmp_path)
+
+        with pytest.raises(ValueError, match="resource path"):
+            skill.resource("")
+
+    def test_name_rules(self, tmp_path):
+        assert _validate_name("", tmp_path) == [
+            "Field 'name' must be a non-empty string"
+        ]
+        assert any("64" in p for p in _validate_name("a" * 65, tmp_path / ("a" * 65)))
+        assert any(
+            "lowercase" in p for p in _validate_name("Upper", tmp_path / "Upper")
+        )
+        assert any("start or end" in p for p in _validate_name("-x", tmp_path / "-x"))
+        assert any(
+            "consecutive" in p for p in _validate_name("a--b", tmp_path / "a--b")
+        )
+        assert any(
+            "letters, digits" in p for p in _validate_name("a_b", tmp_path / "a_b")
+        )
+
+    def test_description_and_compatibility_rules(self, tmp_path):
+        problems = _validate(Skill(name="s", description="", path=tmp_path))
+        assert any("description" in p for p in problems)
+
+        problems = _validate(Skill(name="s", description="d" * 1025, path=tmp_path))
+        assert any("1024" in p for p in problems)
+
+        problems = _validate(
+            Skill(name="s", description="d", path=tmp_path, compatibility="c" * 501)
+        )
+        assert any("500" in p for p in problems)
+
+    @pytest.mark.parametrize(
+        ("text", "error"),
+        [
+            ("no frontmatter\n", ValueError),
+            ("---\nname: x\n", ValueError),
+            ("---\nname: [oops\n---\n", ValueError),
+            ("---\n- a\n- b\n---\n", TypeError),
+            ("---\nname: ''\ndescription: d\n---\n", ValueError),
+            ("---\nname: x\ndescription: d\nmetadata:\n  - a\n---\n", TypeError),
+            (
+                "---\nname: x\ndescription: d\nallowed-tools:\n  - Bash\n---\n",
+                TypeError,
+            ),
+            ("---\nname: x\ndescription: d\nlicense: 3\n---\n", TypeError),
+            ("---\nname: x\ndescription: d\ncompatibility: 3\n---\n", TypeError),
+        ],
+    )
+    def test_load_skill_rejects_bad_frontmatter(
+        self, tmp_path: Path, text: str, error: type[Exception]
+    ):
+        skill_dir = tmp_path / "x"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(text)
+
+        with pytest.raises(error):
+            _load_skill(skill_dir)
+
+    def test_load_skill_requires_a_skill_md(self, tmp_path):
+        empty = tmp_path / "empty"
+        empty.mkdir()
+
+        with pytest.raises(ValueError, match="not found"):
+            _load_skill(empty)
+
+    def test_files_skips_directories_hidden_files_and_escaping_symlinks(self, tmp_path):
+        skill_dir = tmp_path / "s"
+        scripts = skill_dir / "scripts"
+        (scripts / "sub").mkdir(parents=True)
+        (scripts / "sub" / "nested.py").write_text("x")
+        (scripts / ".hidden").write_text("x")
+        (scripts / "__pycache__").mkdir()
+        (scripts / "__pycache__" / "x.pyc").write_text("x")
+        outside = tmp_path / "outside.py"
+        outside.write_text("x")
+        (scripts / "link.py").symlink_to(outside)
+        skill = Skill(name="s", description="d", path=skill_dir)
+
+        assert skill.scripts() == ["sub/nested.py"]
+
+
+class TestDiscoveryEdgeCases:
+    def test_unreadable_root_is_reported(self, monkeypatch, tmp_path):
+        def boom(root: Path) -> list[Path]:
+            raise OSError("boom")
+
+        monkeypatch.setattr(skills_module, "_skill_dirs", boom)
+
+        skills, errors = _discover([tmp_path], strict=False)
+
+        assert skills == []
+        assert any("boom" in error for error in errors)
+
+    def test_ignores_subdirectories_without_a_skill_md(self, tmp_path):
+        root = tmp_path / "skills"
+        (root / "notes").mkdir(parents=True)
+        (root / "notes" / "README.md").write_text("x")
+
+        assert _discover([root], strict=False) == ([], [])
+
+    def test_duplicate_names_across_roots_are_reported(self, tmp_path):
+        for root_name in ("one", "two"):
+            skill_dir = tmp_path / root_name / "dup"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: dup\ndescription: d\n---\n")
+
+        skills, errors = _discover([tmp_path / "one", tmp_path / "two"], strict=False)
+
+        assert [skill.name for skill in skills] == ["dup"]
+        assert any("duplicate skill name" in error for error in errors)
+
+
+class TestCatalogAndCodeMode:
+    def test_catalog_budget_omits_skills(self):
+        tools = Skills(SKILLS, max_catalog_chars=10)
+
+        assert "more skills omitted" in tools.catalog()
+
+    def test_code_mode_activate_reports_unknown_skills(self):
+        tools = by_name(Skills(SKILLS, mode="code"))
+
+        assert "error" in tools["activate_skill"](skill="nope")
+
+    def test_code_mode_reads_resources(self):
+        tools = by_name(Skills(SKILLS, mode="code"))
+
+        record = tools["read_skill_resource"](
+            skill="demo-skill", path="references/guide.md"
+        )
+
+        assert record["content"].startswith("# Guide")
+        assert record["truncated"] is False
+
+    def test_code_mode_run_reports_errors(self):
+        tools = by_name(Skills(SKILLS, mode="code"))
+
+        assert "error" in tools["run_skill_script"](
+            skill="demo-skill", script="nope.py"
+        )
+
+    def test_disabled_script_execution_reports_an_error(self):
+        catalog = Skills(SKILLS, scripts=False)
+        registry = _Registry(
+            catalog.skills, catalog.errors, None, max_resource_chars=100
+        )
+
+        assert "disabled" in registry.run_text("demo-skill", "greet.py")
+
+    def test_argv_rejects_non_sequences(self):
+        with pytest.raises(ValueError, match="args must be"):
+            _argv(123)
+
+    def test_binary_and_non_utf8_resources_are_rejected(self, tmp_path):
+        skill_dir = tmp_path / "s"
+        (skill_dir / "assets").mkdir(parents=True)
+        (skill_dir / "assets" / "image.png").write_bytes(b"\x89PNG")
+        (skill_dir / "assets" / "latin1.txt").write_bytes(b"caf\xe9")
+        (skill_dir / "SKILL.md").write_text("---\nname: s\ndescription: d\n---\n")
+        tools = by_name(Skills(tmp_path))
+
+        binary = tools["read_skill_resource"](skill="s", path="assets/image.png")
+        latin = tools["read_skill_resource"](skill="s", path="assets/latin1.txt")
+
+        assert "binary" in binary
+        assert "not UTF-8" in latin
+
+    def test_patch_requires_a_dspy_module(self):
+        with pytest.raises(TypeError, match="signature"):
+            Skills(SKILLS).patch(object())
+
+    def test_unsupported_tool_containers_are_rejected(self):
+        with pytest.raises(TypeError, match="Unsupported ReAct tool container"):
+            _agent_tools(SimpleNamespace(tools=None), "ReAct")
+
+    def test_negative_limits_are_rejected(self):
+        with pytest.raises(ValueError, match="max_resource_chars"):
+            Skills(SKILLS, max_resource_chars=-1)
+        with pytest.raises(ValueError, match="max_catalog_chars"):
+            Skills(SKILLS, max_catalog_chars=-1)
