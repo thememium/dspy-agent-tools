@@ -1,6 +1,7 @@
 """Tests for dspy_agent_tools.bash."""
 
 import os
+import subprocess
 import sys
 import types
 
@@ -138,6 +139,12 @@ class TestBashRipgrep:
     def test_bad_regex_is_a_notice_not_a_raise(self, tmp_path):
         result = bash_ripgrep("[unclosed", path=str(tmp_path))
         assert "[Error]" in result
+
+    def test_missing_rgapi_is_an_error_not_a_raise(self, tmp_path, monkeypatch):
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+        result = bash_ripgrep("x", path=str(tmp_path))
+        assert "[Error]" in result
+        assert "rgapi" in result
 
     def test_missing_path_raises(self):
         with pytest.raises(ValueError, match="Path does not exist"):
@@ -615,6 +622,12 @@ class TestBashGlobBatch:
         )
         assert "Error: Path does not exist" in result
 
+    def test_missing_rgapi_is_an_error_section(self, tmp_path, monkeypatch):
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+        result = bash_glob_batch([{"pattern": "*.py", "path": str(tmp_path)}])
+        assert "[Error]" in result
+        assert "rgapi" in result
+
     def test_empty_pattern_lists_all(self, tmp_path):
         (tmp_path / "listed.txt").write_text("")
         result = bash_glob_batch([{"path": str(tmp_path)}])
@@ -835,3 +848,26 @@ class TestBashLs:
     def test_missing_path_raises(self):
         with pytest.raises(ValueError, match="Path does not exist"):
             bash_ls("/nonexistent/definitely/missing")
+
+
+# --- rgapi availability ---------------------------------------------------
+
+
+def test_package_import_survives_broken_rgapi(tmp_path):
+    """An unloadable rgapi extension must not break the whole package."""
+    (tmp_path / "rgapi.py").write_text(
+        "raise ImportError('rgapi native extension failed to load')\n"
+    )
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import dspy_agent_tools; print(dspy_agent_tools.web_search.__name__)",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "web_search"
