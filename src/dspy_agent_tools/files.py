@@ -68,6 +68,34 @@ def write_file(path: str, content: str, snapshot: str | None = None) -> str:
     return _hash(content)
 
 
+def delete_file(path: str, snapshot: str | None = None) -> str:
+    """
+    Delete a file.
+
+    If snapshot is supplied, reject the deletion if the file changed
+    since it was read.
+
+    Only regular files and symlinks are removed; directories raise
+    ValueError, and a missing path raises FileNotFoundError.
+
+    Returns a confirmation message.
+    """
+    delete_path = Path(path)
+
+    if not (delete_path.exists() or delete_path.is_symlink()):
+        raise FileNotFoundError(f"{path}: no such file to delete.")
+
+    if delete_path.is_dir() and not delete_path.is_symlink():
+        raise ValueError(f"{path} is a directory; delete_file only removes files.")
+
+    if snapshot is not None:
+        _checked(path, snapshot)
+
+    delete_path.unlink()
+
+    return f"Deleted {path}"
+
+
 def edit_file(
     path: str,
     snapshot: str,
