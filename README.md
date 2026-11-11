@@ -182,12 +182,21 @@ from dspy_agent_tools import (
     bash_find,
     read_file,
     write_file,
+    delete_file,
     edit_file,
 )
 
 coder = dspy.RLM(
     "task -> summary",
-    tools=[bash_exec, bash_ripgrep, bash_find, read_file, write_file, edit_file],
+    tools=[
+        bash_exec,
+        bash_ripgrep,
+        bash_find,
+        read_file,
+        write_file,
+        delete_file,
+        edit_file,
+    ],
     max_iters=20,
 )
 
@@ -208,6 +217,7 @@ from dspy_agent_tools import (
     bash_ls,
     bash_ripgrep,
     bash_ripgrep_batch,
+    delete_file,
     edit_file,
     read_file,
     write_file,
@@ -605,9 +615,9 @@ bash_ripgrep_batch(
 - `bash_exec` runs arbitrary shell commands with the caller's permissions.
   Sandbox or restrict the agent before giving it that power.
 - File tools are guarded by **snapshots**: `read_file` returns a short hash of
-  the file's content, and `edit_file`/`write_file` reject the change if the
-  file has changed since it was read, so concurrent edits can't be silently
-  overwritten.
+  the file's content, and `edit_file`/`write_file`/`delete_file` reject the
+  change if the file has changed since it was read, so concurrent edits can't
+  be silently overwritten.
 - Non-zero exits, timeouts, and failed transfers are reported inline as
   `"[exit code N]"` / `"[command timed out ...]"` notices rather than raised,
   so an agent can read and recover from failures.
@@ -639,6 +649,7 @@ bash_ripgrep_batch(
 | --- | --- |
 | **`read_file`** | Read a file; returns `(numbered_content, snapshot)`. Quote text WITHOUT the `" N | "` prefixes in later calls. |
 | **`write_file`** | Write an entire file; optionally snapshot-guarded. Returns the new snapshot. |
+| **`delete_file`** | Delete a file; optionally snapshot-guarded. Refuses directories; a missing path raises `FileNotFoundError`. |
 | **`edit_file`** | Edit under snapshot control. Exactly one addressing mode per call: `block="MyClass.method"` (tree-sitter, any language in tree-sitter-language-pack), `start_line`/`end_line` (inclusive 1-based), or `old_text` (exact, must match once; auto-repairs near-misses down to `min_similarity=0.8` and strips pasted line-number prefixes). |
 
 ### Search (`dspy_agent_tools.search`)
