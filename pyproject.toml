@@ -1,6 +1,6 @@
 [project]
 name = "dspy-agent-tools"
-version = "0.1.9"
+version = "0.1.10"
 description = "Add your description here"
 readme = "README.md"
 authors = [{ name = "Edward Boswell", email = "thememium@gmail.com" }]
@@ -50,6 +50,9 @@ known_first_party = ["dspy_agent_tools"]
 
 [tool.isort]
 profile = "black"
+
+[tool.coverage.report]
+fail_under = 100
 
 [project.urls]
 Homepage = "https://github.com/thememium/dspy-agent-tools"

@@ -719,7 +719,7 @@ wheels = [
 
 [[package]]
 name = "dspy-agent-tools"
-version = "0.1.9"
+version = "0.1.10"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
