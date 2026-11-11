@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -196,18 +197,202 @@ def _take_value(flag: str, tokens: list[str], i: int) -> tuple[str, int]:
     return tokens[i + 1], i + 2
 
 
-def _rgapi():
-    """Import rgapi on demand.
+_SEARCH_OK = frozenset({0, 1})  # rg and fd exit 1 when nothing matched
 
-    rgapi ships a compiled extension, built from source when no wheel exists
-    (e.g. Python 3.14), and an unloadable extension raises ImportError. A
-    module-scope import would then break every tool in the package, including
-    ones that never touch rgapi; importing here confines the failure to the
-    search tools, which report it as an "[Error]" body.
+
+def _timeout_seconds(timeout_ms: int | None) -> float:
+    """Convert rgapi's timeout in milliseconds (None = unlimited) to seconds."""
+    return 0 if timeout_ms is None else timeout_ms / 1000
+
+
+def _engine():
+    """Return the search engine: rgapi, else the rg/fd binaries.
+
+    rgapi ships a compiled extension, built from source when no wheel matches
+    the interpreter (e.g. Python 3.14), and a broken build raises ImportError.
+    Importing here (not at module scope) keeps that failure from taking down
+    the whole package, and falling back to the rg/fd binaries keeps the search
+    tools working; with neither available the tools report the rgapi failure.
     """
-    import rgapi
-
+    try:
+        import rgapi
+    except ImportError as exc:
+        return _CliEngine(exc)
     return rgapi
+
+
+class _CliEngine:
+    """rgapi-compatible engine driven by the rg and fd binaries.
+
+    Same call shape as rgapi: ``rg(pattern, root, timeout_ms, **kwargs)`` and
+    ``fd(pattern=..., root=..., timeout_ms=..., **kwargs)``, with kwargs rendered
+    back into the CLI flags they were parsed from.
+    """
+
+    def __init__(self, reason: ImportError) -> None:
+        self.reason = reason
+        self._rg = shutil.which("rg")
+        self._fd = shutil.which("fd") or shutil.which("fdfind")
+
+    def _binary(self, name: str) -> str:
+        found = self._rg if name == "rg" else self._fd
+        if found is None:
+            raise ImportError(
+                f"rgapi failed to load ({self.reason}) and no `{name}` binary "
+                f"is on PATH; install {name} or fix the rgapi extension"
+            )
+        return found
+
+    def rg(
+        self, pattern: str, root: str, timeout_ms: int | None = None, **kwargs
+    ) -> list[str] | int:
+        binary = self._binary("rg")
+        path = Path(root)
+        # Run from the root so results are relative to it, like rgapi's.
+        cwd, target = (path.parent, path.name) if path.is_file() else (path, ".")
+        argv = [
+            binary,
+            # rgapi honours .gitignore outside a git repository; rg does not
+            # without this (see also fd below).
+            "--no-require-git",
+            "--no-heading",
+            "--color=never",
+            "--line-number",
+            *_rg_argv(kwargs),
+            "--",
+            pattern,
+            target,
+        ]
+        output, _notices, _elapsed, _code = _execute(
+            argv, cwd=cwd, timeout=_timeout_seconds(timeout_ms), ok_codes=_SEARCH_OK
+        )
+        # rgapi reports paths relative to the root ("a.py"), rg prints "./a.py".
+        lines = [line.removeprefix("./") for line in output.splitlines()]
+        if kwargs.get("count"):
+            return sum(int(line.rsplit(":", 1)[1]) for line in lines)
+        if kwargs.get("paths"):  # rgapi's files-with-matches are absolute
+            base = path.parent if path.is_file() else path
+            return [str(base / line) for line in lines]
+        return lines
+
+    def fd(
+        self,
+        pattern: str | None = None,
+        root: Path | str | None = None,
+        timeout_ms: int | None = None,
+        **kwargs,
+    ) -> list[Path]:
+        binary = self._binary("fd")
+        argv = [
+            binary,
+            "--no-require-git",  # rgapi honours .gitignore outside a repo; fd does not
+            "--color=never",
+            "--absolute-path",
+            *_fd_argv(kwargs),
+        ]
+        if pattern is not None:
+            argv += ["--", pattern]
+        output, _notices, _elapsed, _code = _execute(
+            argv,
+            cwd=None if root is None else Path(root),
+            timeout=_timeout_seconds(timeout_ms),
+            ok_codes=_SEARCH_OK,
+        )
+        return [Path(line) for line in output.splitlines()]
+
+
+def _rg_argv(kwargs: dict) -> list[str]:
+    """Render rgapi.rg keyword arguments as rg CLI flags."""
+    known = {
+        "case_sensitive",
+        "smart_case",
+        "paths",
+        "count",
+        "hidden",
+        "ignore",
+        "follow_links",
+        "after_context",
+        "before_context",
+        "context",
+        "ext",
+        "include",
+        "exclude",
+        "max_depth",
+    }
+    unknown = sorted(set(kwargs) - known)
+    if unknown:  # a new rgapi kwarg needs its flag here; fail loudly, not silently
+        raise ValueError(f"unsupported rg option: {unknown[0]}")
+    argv: list[str] = []
+    if kwargs.get("case_sensitive") is False:
+        argv.append("--ignore-case")
+    elif kwargs.get("case_sensitive"):
+        argv.append("--case-sensitive")
+    if kwargs.get("smart_case"):
+        argv.append("--smart-case")
+    if kwargs.get("paths"):
+        argv.append("--files-with-matches")
+    if kwargs.get("count"):
+        argv.append("--count")
+    if kwargs.get("hidden"):
+        argv.append("--hidden")
+    if kwargs.get("ignore") is False:
+        argv.append("--no-ignore")
+    if kwargs.get("follow_links"):
+        argv.append("--follow")
+    for key, flag in (
+        ("after_context", "-A"),
+        ("before_context", "-B"),
+        ("context", "-C"),
+    ):
+        if key in kwargs:
+            argv += [flag, str(kwargs[key])]
+    if "ext" in kwargs:  # rgapi's ext is an extension; rg filters by glob
+        argv += ["--glob", f"*.{kwargs['ext']}"]
+    for glob in kwargs.get("include", []):
+        argv += ["--glob", glob]
+    for glob in kwargs.get("exclude", []):
+        argv += ["--glob", f"!{glob}"]
+    if "max_depth" in kwargs:
+        argv += ["--max-depth", str(kwargs["max_depth"])]
+    return argv
+
+
+def _fd_argv(kwargs: dict) -> list[str]:
+    """Render rgapi.fd keyword arguments as fd CLI flags."""
+    known = {
+        "hidden",
+        "ignore",
+        "follow_links",
+        "files",
+        "dirs",
+        "ext",
+        "exclude",
+        "include",
+        "max_depth",
+    }
+    unknown = sorted(set(kwargs) - known)
+    if unknown:
+        raise ValueError(f"unsupported fd option: {unknown[0]}")
+    argv: list[str] = []
+    if kwargs.get("hidden"):
+        argv.append("-H")
+    if kwargs.get("ignore") is False:
+        argv.append("-I")
+    if kwargs.get("follow_links"):
+        argv.append("-L")
+    if kwargs.get("dirs") and not kwargs.get("files"):
+        argv += ["-t", "d"]
+    elif not kwargs.get("dirs"):
+        argv += ["-t", "f"]  # rgapi.fd lists files by default
+    if "ext" in kwargs:
+        argv += ["-e", kwargs["ext"]]
+    for glob in kwargs.get("include", []):
+        argv += ["-g", glob]
+    for glob in kwargs.get("exclude", []):
+        argv += ["-E", glob]
+    if "max_depth" in kwargs:
+        argv += ["-d", str(kwargs["max_depth"])]
+    return argv
 
 
 def _rg_kwargs(options: str, pattern: str) -> tuple[str, dict]:
@@ -413,7 +598,7 @@ def bash_ripgrep(pattern: str, path: str = ".", options: str = "-n") -> str:
     def run(pat: str, kwargs: dict):
         # rgapi rejects count and timeout_ms together.
         timeout_ms = None if kwargs.get("count") else DEFAULT_TIMEOUT * 1000
-        return _rgapi().rg(pat, str(root), timeout_ms=timeout_ms, **kwargs)
+        return _engine().rg(pat, str(root), timeout_ms=timeout_ms, **kwargs)
 
     try:
         pattern, kwargs = _rg_kwargs(options, pattern)
@@ -456,7 +641,7 @@ def bash_ripgrep_batch(searches: list[dict[str, str]]) -> str:
                 spec,
                 "-n",
                 _rg_kwargs,
-                lambda pat, kwargs, root=root, remaining_ms=remaining_ms: _rgapi().rg(
+                lambda pat, kwargs, root=root, remaining_ms=remaining_ms: _engine().rg(
                     pat,
                     root,
                     timeout_ms=None if kwargs.get("count") else remaining_ms,
@@ -498,7 +683,7 @@ def bash_find(pattern: str | None = None, path: str = ".", options: str = "") ->
     root = _resolve_existing(path)
 
     def run(pat: str | None, kwargs: dict):
-        return _rgapi().fd(
+        return _engine().fd(
             pattern=pat, root=root, timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs
         )
 
@@ -539,7 +724,7 @@ def bash_find_batch(searches: list[dict[str, str]]) -> str:
                 spec,
                 "",
                 _fd_kwargs,
-                lambda pat, kwargs, root=root, remaining_ms=remaining_ms: _rgapi().fd(
+                lambda pat, kwargs, root=root, remaining_ms=remaining_ms: _engine().fd(
                     pattern=pat or None, root=root, timeout_ms=remaining_ms, **kwargs
                 ),
                 require_pattern=False,
@@ -583,7 +768,7 @@ def bash_glob(pattern: str, path: str = ".", options: str = "") -> str:
     root = _resolve_existing(path)
 
     def run(pat: str | None, kwargs: dict):
-        result = _rgapi().fd(
+        result = _engine().fd(
             pattern=None, root=root, timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs
         )
         return sorted(result)
@@ -627,7 +812,7 @@ def bash_glob_batch(searches: list[dict[str, str]]) -> str:
                 "",
                 lambda opts, pat: _fd_kwargs(opts, pat, glob=True),
                 lambda _pat, kwargs, root=root, remaining_ms=remaining_ms: sorted(
-                    _rgapi().fd(
+                    _engine().fd(
                         pattern=None, root=root, timeout_ms=remaining_ms, **kwargs
                     )
                 ),
