@@ -1,3 +1,4 @@
+import fnmatch
 import os
 import re
 import shutil
@@ -199,111 +200,11 @@ def _take_value(flag: str, tokens: list[str], i: int) -> tuple[str, int]:
 
 _SEARCH_OK = frozenset({0, 1})  # rg and fd exit 1 when nothing matched
 
-
-def _timeout_seconds(timeout_ms: int | None) -> float:
-    """Convert rgapi's timeout in milliseconds (None = unlimited) to seconds."""
-    return 0 if timeout_ms is None else timeout_ms / 1000
-
-
-def _engine():
-    """Return the search engine: rgapi, else the rg/fd binaries.
-
-    rgapi ships a compiled extension, built from source when no wheel matches
-    the interpreter (e.g. Python 3.14), and a broken build raises ImportError.
-    Importing here (not at module scope) keeps that failure from taking down
-    the whole package, and falling back to the rg/fd binaries keeps the search
-    tools working; with neither available the tools report the rgapi failure.
-    """
-    try:
-        import rgapi
-    except ImportError as exc:
-        return _CliEngine(exc)
-    return rgapi
-
-
-class _CliEngine:
-    """rgapi-compatible engine driven by the rg and fd binaries.
-
-    Same call shape as rgapi: ``rg(pattern, root, timeout_ms, **kwargs)`` and
-    ``fd(pattern=..., root=..., timeout_ms=..., **kwargs)``, with kwargs rendered
-    back into the CLI flags they were parsed from.
-    """
-
-    def __init__(self, reason: ImportError) -> None:
-        self.reason = reason
-        self._rg = shutil.which("rg")
-        self._fd = shutil.which("fd") or shutil.which("fdfind")
-
-    def _binary(self, name: str) -> str:
-        found = self._rg if name == "rg" else self._fd
-        if found is None:
-            raise ImportError(
-                f"rgapi failed to load ({self.reason}) and no `{name}` binary "
-                f"is on PATH; install {name} or fix the rgapi extension"
-            )
-        return found
-
-    def rg(
-        self, pattern: str, root: str, timeout_ms: int | None = None, **kwargs
-    ) -> list[str] | int:
-        binary = self._binary("rg")
-        path = Path(root)
-        # Run from the root so results are relative to it, like rgapi's.
-        cwd, target = (path.parent, path.name) if path.is_file() else (path, ".")
-        argv = [
-            binary,
-            # rgapi honours .gitignore outside a git repository; rg does not
-            # without this (see also fd below).
-            "--no-require-git",
-            "--no-heading",
-            "--color=never",
-            "--line-number",
-            *_rg_argv(kwargs),
-            "--",
-            pattern,
-            target,
-        ]
-        output, _notices, _elapsed, _code = _execute(
-            argv, cwd=cwd, timeout=_timeout_seconds(timeout_ms), ok_codes=_SEARCH_OK
-        )
-        # rgapi reports paths relative to the root ("a.py"), rg prints "./a.py".
-        lines = [line.removeprefix("./") for line in output.splitlines()]
-        if kwargs.get("count"):
-            return sum(int(line.rsplit(":", 1)[1]) for line in lines)
-        if kwargs.get("paths"):  # rgapi's files-with-matches are absolute
-            base = path.parent if path.is_file() else path
-            return [str(base / line) for line in lines]
-        return lines
-
-    def fd(
-        self,
-        pattern: str | None = None,
-        root: Path | str | None = None,
-        timeout_ms: int | None = None,
-        **kwargs,
-    ) -> list[Path]:
-        binary = self._binary("fd")
-        argv = [
-            binary,
-            "--no-require-git",  # rgapi honours .gitignore outside a repo; fd does not
-            "--color=never",
-            "--absolute-path",
-            *_fd_argv(kwargs),
-        ]
-        if pattern is not None:
-            argv += ["--", pattern]
-        output, _notices, _elapsed, _code = _execute(
-            argv,
-            cwd=None if root is None else Path(root),
-            timeout=_timeout_seconds(timeout_ms),
-            ok_codes=_SEARCH_OK,
-        )
-        return [Path(line) for line in output.splitlines()]
-
-
-def _rg_argv(kwargs: dict) -> list[str]:
-    """Render rgapi.rg keyword arguments as rg CLI flags."""
-    known = {
+# The kwargs each translator can produce; the CLI engines must be able to
+# render every one of them, so unknown keys are an error rather than a silent
+# mismatch between backends.
+_RG_KEYS = frozenset(
+    {
         "case_sensitive",
         "smart_case",
         "paths",
@@ -319,7 +220,155 @@ def _rg_argv(kwargs: dict) -> list[str]:
         "exclude",
         "max_depth",
     }
-    unknown = sorted(set(kwargs) - known)
+)
+_FD_KEYS = frozenset(
+    {
+        "hidden",
+        "ignore",
+        "follow_links",
+        "files",
+        "dirs",
+        "ext",
+        "exclude",
+        "include",
+        "max_depth",
+    }
+)
+
+
+def _timeout_seconds(timeout_ms: int | None) -> float:
+    """Convert rgapi's timeout in milliseconds (None = unlimited) to seconds."""
+    return 0 if timeout_ms is None else timeout_ms / 1000
+
+
+def _engine():
+    """Return the search engine: rgapi, else the CLI tools.
+
+    rgapi ships a compiled extension, built from source when no wheel matches
+    the interpreter (e.g. Python 3.14), and a broken build raises ImportError.
+    Importing here (not at module scope) keeps that failure from taking down
+    the whole package, and falling back to the rg/fd binaries, then to POSIX
+    grep/find, keeps the search tools working. With none of them available the
+    tools report the rgapi failure.
+    """
+    try:
+        import rgapi
+    except ImportError as exc:
+        return _CliEngine(exc)
+    return rgapi
+
+
+class _CliEngine:
+    """rgapi-compatible engine driven by CLI tools, in two tiers.
+
+    Same call shape as rgapi: ``rg(pattern, root, timeout_ms, **kwargs)`` and
+    ``fd(pattern=..., root=..., timeout_ms=..., **kwargs)``, with kwargs rendered
+    back into the CLI flags they were parsed from.
+
+    ``rg`` prefers the rg binary and falls back to POSIX grep; ``fd`` prefers
+    the fd binary and falls back to find. The grep/find tier cannot honour
+    .gitignore rules or glob/type filtering the way rg and fd do, so it is a
+    last resort rather than an equivalent.
+    """
+
+    def __init__(self, reason: ImportError) -> None:
+        self.reason = reason
+        self._rg = shutil.which("rg")
+        self._fd = shutil.which("fd") or shutil.which("fdfind")
+        self._grep = shutil.which("grep")
+        self._find = shutil.which("find")
+
+    def rg(
+        self, pattern: str, root: str, timeout_ms: int | None = None, **kwargs
+    ) -> list[str] | int:
+        path = Path(root)
+        # Run from the root so results are relative to it, like rgapi's.
+        cwd, target = (path.parent, path.name) if path.is_file() else (path, ".")
+        if self._rg is not None:
+            argv = [
+                self._rg,
+                # rgapi honours .gitignore outside a git repository; rg does not
+                # without this (see also fd below).
+                "--no-require-git",
+                "--no-messages",
+                "--no-heading",
+                "--color=never",
+                "--line-number",
+                *_rg_argv(kwargs),
+                "--",
+                pattern,
+                target,
+            ]
+        elif self._grep is not None:
+            argv = [
+                self._grep,
+                "-nE",
+                "-R" if kwargs.get("follow_links") else "-r",
+                "-s",
+                *_grep_argv(kwargs, pattern),
+                "--",
+                pattern,
+                target,
+            ]
+        else:
+            raise ImportError(
+                f"rgapi failed to load ({self.reason}) and neither `rg` nor "
+                "`grep` is on PATH; install ripgrep or fix the rgapi extension"
+            )
+        output, _notices, _elapsed, _code = _execute(
+            argv, cwd=cwd, timeout=_timeout_seconds(timeout_ms), ok_codes=_SEARCH_OK
+        )
+        # rgapi reports paths relative to the root ("a.py"), rg prints "./a.py".
+        lines = [line.removeprefix("./") for line in output.splitlines()]
+        if self._rg is None:  # grep tier: match rg's output shape
+            lines = [line for line in lines if line != "--"]  # stray group separator
+            if not kwargs.get("hidden") and not path.is_file():
+                lines = [line for line in lines if not _has_hidden_component(line)]
+        if kwargs.get("count"):
+            return _sum_counts(lines)
+        if kwargs.get("paths"):  # rgapi's files-with-matches are absolute
+            base = path.parent if path.is_file() else path
+            return [str(base / line) for line in lines]
+        return lines
+
+    def fd(
+        self,
+        pattern: str | None = None,
+        root: Path | str | None = None,
+        timeout_ms: int | None = None,
+        **kwargs,
+    ) -> list[Path]:
+        if self._fd is not None:
+            argv = [
+                self._fd,
+                "--no-require-git",  # rgapi honours .gitignore outside a repo; fd does not
+                "--color=never",
+                "--absolute-path",
+                *_fd_argv(kwargs),
+            ]
+            if pattern is not None:
+                argv += ["--", pattern]
+        elif self._find is not None:
+            argv = _find_argv(self._find, kwargs) + ["-print"]
+        else:
+            raise ImportError(
+                f"rgapi failed to load ({self.reason}) and neither `fd` nor "
+                "`find` is on PATH; install fd or fix the rgapi extension"
+            )
+        output, _notices, _elapsed, _code = _execute(
+            argv,
+            cwd=None if root is None else Path(root),
+            timeout=_timeout_seconds(timeout_ms),
+            ok_codes=_SEARCH_OK,
+        )
+        if self._fd is not None:
+            return [Path(line) for line in output.splitlines()]
+        return _found_paths(output.splitlines(), root, pattern, kwargs)
+
+
+def _rg_argv(kwargs: dict) -> list[str]:
+    """Render rgapi.rg keyword arguments as rg CLI flags."""
+    unknown = sorted(set(kwargs) - _RG_KEYS)
     if unknown:  # a new rgapi kwarg needs its flag here; fail loudly, not silently
         raise ValueError(f"unsupported rg option: {unknown[0]}")
     argv: list[str] = []
@@ -359,18 +408,7 @@ def _rg_argv(kwargs: dict) -> list[str]:
 
 def _fd_argv(kwargs: dict) -> list[str]:
     """Render rgapi.fd keyword arguments as fd CLI flags."""
-    known = {
-        "hidden",
-        "ignore",
-        "follow_links",
-        "files",
-        "dirs",
-        "ext",
-        "exclude",
-        "include",
-        "max_depth",
-    }
-    unknown = sorted(set(kwargs) - known)
+    unknown = sorted(set(kwargs) - _FD_KEYS)
     if unknown:
         raise ValueError(f"unsupported fd option: {unknown[0]}")
     argv: list[str] = []
@@ -392,6 +430,126 @@ def _fd_argv(kwargs: dict) -> list[str]:
         argv += ["-E", glob]
     if "max_depth" in kwargs:
         argv += ["-d", str(kwargs["max_depth"])]
+    return argv
+
+
+def _grep_argv(kwargs: dict, pattern: str) -> list[str]:
+    """Render rgapi.rg keyword arguments as grep flags.
+
+    grep reads no ignore files, so this tier only skips the VCS directories
+    rgapi skips by default, plus hidden paths unless they were requested.
+    """
+    unknown = sorted(set(kwargs) - _RG_KEYS)
+    if unknown:
+        raise ValueError(f"unsupported rg option: {unknown[0]}")
+    if "max_depth" in kwargs:
+        raise ValueError("max-depth needs rg or fd; grep cannot limit traversal")
+    argv: list[str] = []
+    if kwargs.get("case_sensitive") is False:
+        argv.append("-i")
+    elif kwargs.get("smart_case") and not any(c.isupper() for c in pattern):
+        argv.append("-i")  # grep has no smart case; mimic it from the pattern
+    if kwargs.get("paths"):
+        argv.append("-l")
+    if kwargs.get("count"):
+        argv.append("-c")
+    # Hidden paths are filtered from the output: BSD grep's --exclude globs are
+    # matched against the full "./path", where ".*" also matches the "." dir.
+    if kwargs.get("ignore") is not False:
+        argv += [f"--exclude-dir={name}" for name in (".git", ".hg", ".svn")]
+    for key, flag in (
+        ("after_context", "-A"),
+        ("before_context", "-B"),
+        ("context", "-C"),
+    ):
+        if key in kwargs:
+            argv += [flag, str(kwargs[key])]
+    if "ext" in kwargs:
+        argv.append(f"--include=*.{kwargs['ext']}")
+    for glob in kwargs.get("include", []):
+        argv.append(f"--include={glob}")
+    for glob in kwargs.get("exclude", []):
+        argv.append(f"--exclude={glob}")
+    return argv
+
+
+def _has_hidden_component(line: str) -> bool:
+    """True when the path at the start of a grep output line is hidden."""
+    head = line.split(":", 1)[0]
+    return any(
+        part.startswith(".") for part in head.split("/") if part not in ("", ".")
+    )
+
+
+def _sum_counts(lines: list[str]) -> int:
+    """Total a "path:count" per-file listing, as rg -c / grep -c print it."""
+    total = 0
+    for line in lines:
+        tail = line.rpartition(":")[2]
+        if tail.isdigit():
+            total += int(tail)
+    return total
+
+
+def _found_paths(
+    lines: list[str], root: Path | str | None, pattern: str | None, kwargs: dict
+) -> list[Path]:
+    """Filter find output the way rgapi.fd would have matched it."""
+    regex = None
+    if pattern is not None:
+        try:
+            regex = re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"invalid pattern: {exc}") from exc
+    include = kwargs.get("include") or []
+    exclude = kwargs.get("exclude") or []
+    ext = kwargs.get("ext")
+    base = Path.cwd() if root is None else Path(root)
+    found: list[Path] = []
+    for line in lines:
+        rel = line.removeprefix("./")
+        if rel in ("", "."):
+            continue
+        path = Path(rel)
+        if not kwargs.get("hidden") and any(p.startswith(".") for p in path.parts):
+            continue
+        if ext is not None and path.suffix != f".{ext}":
+            continue
+        if include and not any(_glob_matches(path, g) for g in include):
+            continue
+        if any(_glob_matches(path, g) for g in exclude):
+            continue
+        if regex is not None and not regex.search(path.name):
+            continue
+        found.append(base / path)
+    return found
+
+
+def _glob_matches(path: Path, pattern: str) -> bool:
+    """Match as rgapi does: a glob with "/" is anchored, else any depth."""
+    if "/" in pattern:
+        return fnmatch.fnmatchcase(path.as_posix(), pattern)
+    return fnmatch.fnmatchcase(path.name, pattern)
+
+
+def _find_argv(binary: str, kwargs: dict) -> list[str]:
+    """Render rgapi.fd keyword arguments as a find expression."""
+    unknown = sorted(set(kwargs) - _FD_KEYS)
+    if unknown:
+        raise ValueError(f"unsupported fd option: {unknown[0]}")
+    argv = [binary]
+    if kwargs.get("follow_links"):
+        argv.append("-L")
+    argv.append(".")
+    if "max_depth" in kwargs:
+        argv += ["-maxdepth", str(kwargs["max_depth"])]
+    if kwargs.get("dirs") and not kwargs.get("files"):
+        argv += ["-type", "d"]
+    elif not kwargs.get("dirs"):
+        argv += ["-type", "f"]  # rgapi.fd lists files by default
+    if kwargs.get("ignore") is not False:
+        for name in (".git", ".hg", ".svn"):
+            argv += ["-not", "-path", f"./{name}", "-not", "-path", f"./{name}/*"]
     return argv
 
 
