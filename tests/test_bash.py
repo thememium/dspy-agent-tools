@@ -5,17 +5,27 @@ import shlex
 import subprocess
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
 from dspy_agent_tools.bash import (
+    _fd_argv,
     _fd_kwargs,
+    _find_argv,
+    _found_paths,
+    _glob_matches,
+    _grep_argv,
+    _has_hidden_component,
     _is_junk,
     _resolve_cwd,
     _resolve_existing,
+    _rg_argv,
     _rg_kwargs,
     _run_search,
     _search_text,
+    _sum_counts,
+    _timeout_seconds,
     bash_curl,
     bash_exec,
     bash_fetch,
@@ -150,7 +160,7 @@ class TestBashRipgrep:
         result = bash_ripgrep("needle", path=str(tmp_path))
         assert "[Error]" in result
         assert "rgapi failed to load" in result
-        assert "no `rg` binary" in result
+        assert "neither `rg` nor `grep`" in result
 
     def test_missing_path_raises(self):
         with pytest.raises(ValueError, match="Path does not exist"):
@@ -952,3 +962,364 @@ class TestCliFallback:
         assert "--absolute-path" in argv
         assert argv[argv.index("-e") : argv.index("-e") + 2] == ["-e", "py"]
         assert argv[argv.index("-t") : argv.index("-t") + 2] == ["-t", "f"]
+
+    def test_grep_runs_when_rg_is_absent(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        argv_file = tmp_path / "argv"
+        _fake_binary(bin_dir, "grep", argv_file, "./a.py:1:needle one\n")
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-i -t py")
+
+        assert "a.py:1:needle one" in result
+        argv = argv_file.read_text().splitlines()
+        for flag in (
+            "-nE",
+            "-r",
+            "-s",
+            "-i",
+            "--include=*.py",
+            "--exclude-dir=.git",
+        ):
+            assert flag in argv
+        assert argv[-2:] == ["needle", "."]
+
+    def test_grep_hidden_paths_are_skipped_unless_requested(
+        self, tmp_path, monkeypatch
+    ):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _fake_binary(
+            bin_dir, "grep", tmp_path / "argv", "./.hidden/d.py:1:x\n./a.py:1:y\n"
+        )
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+
+        default = bash_ripgrep("needle", path=str(tmp_path))
+        hidden = bash_ripgrep("needle", path=str(tmp_path), options="-n --hidden")
+
+        assert ".hidden" not in default
+        assert "a.py:1:y" in default
+        assert ".hidden/d.py:1:x" in hidden
+
+    def test_grep_count_is_summed(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _fake_binary(bin_dir, "grep", tmp_path / "argv", "./a.py:2\n./b.py:3\n")
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-c")
+
+        assert result.splitlines()[0] == "5"
+
+    def test_find_runs_when_fd_is_absent(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        argv_file = tmp_path / "argv"
+        _fake_binary(
+            bin_dir,
+            "find",
+            argv_file,
+            "./a.py\n./sub\n./sub/b.py\n./.hidden/c.py\n",
+        )
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+
+        result = bash_find(r".*\.py$", path=str(tmp_path), options="-d 2")
+
+        found = [line for line in result.splitlines() if line.startswith("/")]
+        assert found == [str(tmp_path / "a.py"), str(tmp_path / "sub/b.py")]
+        argv = argv_file.read_text().splitlines()
+        assert argv[argv.index("-maxdepth") : argv.index("-maxdepth") + 2] == [
+            "-maxdepth",
+            "2",
+        ]
+        assert argv[argv.index("-type") : argv.index("-type") + 2] == ["-type", "f"]
+        assert argv[argv.index("-not") : argv.index("-not") + 2] == ["-not", "-path"]
+
+        hidden = bash_find(r".*\.py$", path=str(tmp_path), options="--hidden")
+        assert str(tmp_path / ".hidden/c.py") in hidden
+
+    def test_grep_files_with_matches_are_absolute(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _fake_binary(bin_dir, "grep", tmp_path / "argv", "./a.py\n./sub/b.py\n")
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-n -l")
+
+        assert result.splitlines()[:2] == [
+            str(tmp_path / "a.py"),
+            str(tmp_path / "sub/b.py"),
+        ]
+
+    def test_grep_follow_uses_recursive_flag(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        argv_file = tmp_path / "argv"
+        _fake_binary(bin_dir, "grep", argv_file, "")
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+
+        bash_ripgrep("needle", path=str(tmp_path), options="-n -L")
+
+        assert "-R" in argv_file.read_text().splitlines()
+
+    def test_no_find_engine_is_an_error_section(self, tmp_path, monkeypatch):
+        empty_bin = tmp_path / "empty-bin"
+        empty_bin.mkdir()
+        monkeypatch.setenv("PATH", str(empty_bin))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+
+        result = bash_find("x", path=str(tmp_path))
+
+        assert "[Error]" in result
+        assert "neither `fd` nor `find`" in result
+
+
+# --- cli engine flag translation ------------------------------------------
+
+
+class TestRgArgv:
+    def test_every_flag(self):
+        assert _rg_argv(
+            {
+                "case_sensitive": False,
+                "smart_case": True,
+                "paths": True,
+                "count": True,
+                "hidden": True,
+                "ignore": False,
+                "follow_links": True,
+                "after_context": 1,
+                "before_context": 2,
+                "context": 3,
+                "ext": "py",
+                "include": ["*.md"],
+                "exclude": ["*.txt"],
+                "max_depth": 4,
+            }
+        ) == [
+            "--ignore-case",
+            "--smart-case",
+            "--files-with-matches",
+            "--count",
+            "--hidden",
+            "--no-ignore",
+            "--follow",
+            "-A",
+            "1",
+            "-B",
+            "2",
+            "-C",
+            "3",
+            "--glob",
+            "*.py",
+            "--glob",
+            "*.md",
+            "--glob",
+            "!*.txt",
+            "--max-depth",
+            "4",
+        ]
+
+    def test_case_sensitive(self):
+        assert _rg_argv({"case_sensitive": True}) == ["--case-sensitive"]
+
+    def test_unknown_key_raises(self):
+        with pytest.raises(ValueError, match="unsupported rg option: bogus"):
+            _rg_argv({"bogus": True})
+
+
+class TestFdArgv:
+    def test_every_flag(self):
+        assert _fd_argv(
+            {
+                "hidden": True,
+                "ignore": False,
+                "follow_links": True,
+                "dirs": True,
+                "ext": "py",
+                "include": ["*.md"],
+                "exclude": ["*.txt"],
+                "max_depth": 3,
+            }
+        ) == [
+            "-H",
+            "-I",
+            "-L",
+            "-t",
+            "d",
+            "-e",
+            "py",
+            "-g",
+            "*.md",
+            "-E",
+            "*.txt",
+            "-d",
+            "3",
+        ]
+
+    def test_files_and_dirs_together_omit_the_type_flag(self):
+        assert _fd_argv({"dirs": True, "files": True}) == []
+
+    def test_unknown_key_raises(self):
+        with pytest.raises(ValueError, match="unsupported fd option: bogus"):
+            _fd_argv({"bogus": True})
+
+
+class TestGrepArgv:
+    def test_every_flag(self):
+        assert _grep_argv(
+            {
+                "case_sensitive": False,
+                "smart_case": True,
+                "paths": True,
+                "count": True,
+                "ignore": False,
+                "after_context": 1,
+                "before_context": 2,
+                "context": 3,
+                "ext": "py",
+                "include": ["*.md"],
+                "exclude": ["*.txt"],
+            },
+            "needle",
+        ) == [
+            "-i",
+            "-l",
+            "-c",
+            "-A",
+            "1",
+            "-B",
+            "2",
+            "-C",
+            "3",
+            "--include=*.py",
+            "--include=*.md",
+            "--exclude=*.txt",
+        ]
+
+    def test_smart_case_mimics_case_insensitivity_for_lowercase_patterns(self):
+        assert _grep_argv({"smart_case": True}, "needle") == [
+            "-i",
+            "--exclude-dir=.git",
+            "--exclude-dir=.hg",
+            "--exclude-dir=.svn",
+        ]
+
+    def test_smart_case_stays_case_sensitive_for_uppercase_patterns(self):
+        assert "-i" not in _grep_argv({"smart_case": True}, "Needle")
+
+    def test_max_depth_is_rejected(self):
+        with pytest.raises(ValueError, match="max-depth needs rg or fd"):
+            _grep_argv({"max_depth": 2}, "needle")
+
+    def test_unknown_key_raises(self):
+        with pytest.raises(ValueError, match="unsupported rg option: bogus"):
+            _grep_argv({"bogus": True}, "needle")
+
+
+class TestFindArgv:
+    def test_every_flag(self):
+        assert _find_argv(
+            "find", {"follow_links": True, "max_depth": 2, "dirs": True}
+        ) == [
+            "find",
+            "-L",
+            ".",
+            "-maxdepth",
+            "2",
+            "-type",
+            "d",
+            "-not",
+            "-path",
+            "./.git",
+            "-not",
+            "-path",
+            "./.git/*",
+            "-not",
+            "-path",
+            "./.hg",
+            "-not",
+            "-path",
+            "./.hg/*",
+            "-not",
+            "-path",
+            "./.svn",
+            "-not",
+            "-path",
+            "./.svn/*",
+        ]
+
+    def test_no_ignore_drops_vcs_excludes(self):
+        assert _find_argv("find", {"ignore": False}) == ["find", ".", "-type", "f"]
+
+    def test_files_and_dirs_together_omit_the_type_flag(self):
+        assert _find_argv("find", {"dirs": True, "files": True, "ignore": False}) == [
+            "find",
+            ".",
+        ]
+
+    def test_unknown_key_raises(self):
+        with pytest.raises(ValueError, match="unsupported fd option: bogus"):
+            _find_argv("find", {"bogus": True})
+
+
+class TestSearchHelpers:
+    def test_timeout_seconds(self):
+        assert _timeout_seconds(None) == 0
+        assert _timeout_seconds(1500) == 1.5
+
+    def test_sum_counts_ignores_noise(self):
+        assert _sum_counts(["a.py:2", "b.py:3", "grep: permission denied"]) == 5
+
+    def test_has_hidden_component(self):
+        assert _has_hidden_component(".hidden/a.py:1:x")
+        assert _has_hidden_component("sub/.x/b.py:1:x")
+        assert not _has_hidden_component("a.py:1:x")
+        assert not _has_hidden_component("sub/a.py-2:context")
+
+    def test_glob_matches(self):
+        assert _glob_matches(Path("sub/a.py"), "*.py")  # no "/": any depth
+        assert _glob_matches(Path("sub/a.py"), "sub/*.py")  # anchored
+        assert not _glob_matches(Path("x/sub/a.py"), "sub/*.py")
+
+
+class TestFoundPaths:
+    def test_filters_by_extension_regex_and_hidden(self, tmp_path):
+        lines = [".", "./a.py", "./b.md", "./sub/c.py", "./.hidden/d.py"]
+
+        found = _found_paths(lines, tmp_path, r".*\.py$", {"ext": "py"})
+
+        assert found == [tmp_path / "a.py", tmp_path / "sub/c.py"]
+
+    def test_include_and_exclude_globs(self, tmp_path):
+        lines = ["./a.py", "./b.md", "./sub/c.py"]
+
+        assert _found_paths(lines, tmp_path, None, {"include": ["c.py"]}) == [
+            tmp_path / "sub/c.py"
+        ]
+        assert _found_paths(lines, tmp_path, None, {"include": ["sub/*"]}) == [
+            tmp_path / "sub/c.py"
+        ]
+        assert _found_paths(lines, tmp_path, None, {"exclude": ["*.md"]}) == [
+            tmp_path / "a.py",
+            tmp_path / "sub/c.py",
+        ]
+
+    def test_hidden_paths_included_when_requested(self, tmp_path):
+        assert _found_paths(["./.hidden/d.py"], tmp_path, None, {"hidden": True}) == [
+            tmp_path / ".hidden/d.py"
+        ]
+
+    def test_root_defaults_to_cwd(self):
+        assert _found_paths(["./a.py"], None, None, {}) == [Path.cwd() / "a.py"]
+
+    def test_invalid_regex_raises(self):
+        with pytest.raises(ValueError, match="invalid pattern"):
+            _found_paths([], None, "[unclosed", {})
