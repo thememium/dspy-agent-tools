@@ -35,6 +35,7 @@ EXPECTED_EXPORTS = {
     "bash_ls",
     "bash_ripgrep",
     "bash_ripgrep_batch",
+    "delete_file",
     "edit_file",
     "read_file",
     "web_news",

@@ -11,7 +11,7 @@ from .bash import (
     bash_ripgrep_batch,
 )
 from .cli import CLI, Argument, CLITools, Command, Option
-from .files import edit_file, read_file, write_file
+from .files import delete_file, edit_file, read_file, write_file
 from .mcp import MCP, MCPTools
 from .search import web_news, web_search
 from .skills import Skill, Skills, SkillTools
@@ -39,6 +39,7 @@ __all__ = [
     "bash_ls",
     "bash_ripgrep",
     "bash_ripgrep_batch",
+    "delete_file",
     "edit_file",
     "read_file",
     "web_news",

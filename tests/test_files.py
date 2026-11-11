@@ -12,6 +12,7 @@ from dspy_agent_tools.files import (
     _node_body,
     _node_name,
     _unnumber,
+    delete_file,
     edit_file,
     read_file,
     write_file,
@@ -88,6 +89,47 @@ class TestWriteFile:
         snap = write_file(str(f), "fresh\n", snapshot=_hash("whatever\n"))
         assert f.read_text() == "fresh\n"
         assert snap == _hash("fresh\n")
+
+
+class TestDeleteFile:
+    def test_deletes_without_snapshot(self, tmp_path):
+        f = tmp_path / "f.txt"
+        f.write_text("bye\n")
+        assert delete_file(str(f)) == f"Deleted {f}"
+        assert not f.exists()
+
+    def test_deletes_with_matching_snapshot(self, tmp_path):
+        f = tmp_path / "f.txt"
+        f.write_text("bye\n")
+        delete_file(str(f), snapshot=_hash("bye\n"))
+        assert not f.exists()
+
+    def test_stale_snapshot_rejected(self, tmp_path):
+        f = tmp_path / "f.txt"
+        f.write_text("changed\n")
+        with pytest.raises(RuntimeError, match="changed since it was read"):
+            delete_file(str(f), snapshot=_hash("original\n"))
+        assert f.exists()
+
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="no such file to delete"):
+            delete_file(str(tmp_path / "absent.txt"))
+
+    def test_directory_rejected(self, tmp_path):
+        d = tmp_path / "dir"
+        d.mkdir()
+        with pytest.raises(ValueError, match="is a directory"):
+            delete_file(str(d))
+        assert d.exists()
+
+    def test_symlink_to_directory_removes_link_only(self, tmp_path):
+        d = tmp_path / "dir"
+        d.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(d, target_is_directory=True)
+        delete_file(str(link))
+        assert not link.is_symlink()
+        assert d.exists()
 
 
 # --- edit_file mode dispatch --------------------------------------------
