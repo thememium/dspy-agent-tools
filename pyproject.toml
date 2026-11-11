@@ -50,6 +50,9 @@ known_first_party = ["dspy_agent_tools"]
 [tool.isort]
 profile = "black"
 
+[tool.coverage.report]
+fail_under = 100
+
 [project.urls]
 Homepage = "https://github.com/thememium/dspy-agent-tools"
 Documentation = "https://github.com/thememium/dspy-agent-tools"
