@@ -84,7 +84,10 @@ pip install dspy-agent-tools
 binaries, which must be on your PATH. The search tools
 (`bash_ripgrep`, `bash_find`, `bash_glob`) run through the `rgapi` library —
 ripgrep's and fd's engines as Python modules — so no `rg`/`fd` binary is
-needed.
+needed. rgapi ships a compiled extension: when it cannot be imported (no wheel
+for your interpreter and no working local build), the search tools fall back to
+the `rg` and `fd` binaries if they are on PATH, and report an `[Error]` body
+only when neither is available.
 
 The MCP bridge is an optional extra (it pulls in DSPy, `httpx2`, and MCP
 SDK 2.x). Importing `MCP` works without it; calling `MCP()` raises an
