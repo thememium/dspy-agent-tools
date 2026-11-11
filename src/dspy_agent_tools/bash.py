@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 from typing import cast
 
-import rgapi
 from plumbum import local
 
 DEFAULT_TIMEOUT = 300  # seconds
@@ -197,6 +196,20 @@ def _take_value(flag: str, tokens: list[str], i: int) -> tuple[str, int]:
     return tokens[i + 1], i + 2
 
 
+def _rgapi():
+    """Import rgapi on demand.
+
+    rgapi ships a compiled extension, built from source when no wheel exists
+    (e.g. Python 3.14), and an unloadable extension raises ImportError. A
+    module-scope import would then break every tool in the package, including
+    ones that never touch rgapi; importing here confines the failure to the
+    search tools, which report it as an "[Error]" body.
+    """
+    import rgapi
+
+    return rgapi
+
+
 def _rg_kwargs(options: str, pattern: str) -> tuple[str, dict]:
     """Translate rg flags into rgapi.rg keyword arguments.
 
@@ -363,7 +376,7 @@ def _run_search(
         return _search_error(exc)
     try:
         result = run(pattern, kwargs)
-    except ValueError as exc:  # bad regex, unreadable root, ...
+    except (ValueError, ImportError) as exc:  # bad regex, unreadable root, no rgapi
         return _search_error(exc)
     return _search_text(result, no_match)
 
@@ -400,12 +413,12 @@ def bash_ripgrep(pattern: str, path: str = ".", options: str = "-n") -> str:
     def run(pat: str, kwargs: dict):
         # rgapi rejects count and timeout_ms together.
         timeout_ms = None if kwargs.get("count") else DEFAULT_TIMEOUT * 1000
-        return rgapi.rg(pat, str(root), timeout_ms=timeout_ms, **kwargs)
+        return _rgapi().rg(pat, str(root), timeout_ms=timeout_ms, **kwargs)
 
     try:
         pattern, kwargs = _rg_kwargs(options, pattern)
         result = run(pattern, kwargs)
-    except ValueError as exc:
+    except (ValueError, ImportError) as exc:
         return _render(_search_error(exc), [], time.monotonic() - started)
     return _render(_search_text(result, "No matches."), [], time.monotonic() - started)
 
@@ -443,7 +456,7 @@ def bash_ripgrep_batch(searches: list[dict[str, str]]) -> str:
                 spec,
                 "-n",
                 _rg_kwargs,
-                lambda pat, kwargs, root=root, remaining_ms=remaining_ms: rgapi.rg(
+                lambda pat, kwargs, root=root, remaining_ms=remaining_ms: _rgapi().rg(
                     pat,
                     root,
                     timeout_ms=None if kwargs.get("count") else remaining_ms,
@@ -485,14 +498,14 @@ def bash_find(pattern: str | None = None, path: str = ".", options: str = "") ->
     root = _resolve_existing(path)
 
     def run(pat: str | None, kwargs: dict):
-        return rgapi.fd(
+        return _rgapi().fd(
             pattern=pat, root=root, timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs
         )
 
     try:
         pattern, kwargs = _fd_kwargs(options, pattern or "")
         result = run(pattern, kwargs)
-    except ValueError as exc:
+    except (ValueError, ImportError) as exc:
         return _render(_search_error(exc), [], time.monotonic() - started)
     return _render(_search_text(result, no_match=None), [], time.monotonic() - started)
 
@@ -526,7 +539,7 @@ def bash_find_batch(searches: list[dict[str, str]]) -> str:
                 spec,
                 "",
                 _fd_kwargs,
-                lambda pat, kwargs, root=root, remaining_ms=remaining_ms: rgapi.fd(
+                lambda pat, kwargs, root=root, remaining_ms=remaining_ms: _rgapi().fd(
                     pattern=pat or None, root=root, timeout_ms=remaining_ms, **kwargs
                 ),
                 require_pattern=False,
@@ -570,7 +583,7 @@ def bash_glob(pattern: str, path: str = ".", options: str = "") -> str:
     root = _resolve_existing(path)
 
     def run(pat: str | None, kwargs: dict):
-        result = rgapi.fd(
+        result = _rgapi().fd(
             pattern=None, root=root, timeout_ms=DEFAULT_TIMEOUT * 1000, **kwargs
         )
         return sorted(result)
@@ -578,7 +591,7 @@ def bash_glob(pattern: str, path: str = ".", options: str = "") -> str:
     try:
         _pattern, kwargs = _fd_kwargs(options, pattern, glob=True)
         result = run(pattern, kwargs)
-    except ValueError as exc:
+    except (ValueError, ImportError) as exc:
         return _render(_search_error(exc), [], time.monotonic() - started)
     return _render(_search_text(result, no_match=None), [], time.monotonic() - started)
 
@@ -614,7 +627,9 @@ def bash_glob_batch(searches: list[dict[str, str]]) -> str:
                 "",
                 lambda opts, pat: _fd_kwargs(opts, pat, glob=True),
                 lambda _pat, kwargs, root=root, remaining_ms=remaining_ms: sorted(
-                    rgapi.fd(pattern=None, root=root, timeout_ms=remaining_ms, **kwargs)
+                    _rgapi().fd(
+                        pattern=None, root=root, timeout_ms=remaining_ms, **kwargs
+                    )
                 ),
                 require_pattern=False,
                 no_match=None,
