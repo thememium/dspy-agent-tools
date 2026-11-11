@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.1.10 (2026-11-11)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.9...v0.1.10)
+
+### 🚀 Enhancements
+
+- **bash.py**: add grep/find fallback for missing ripgrep/fd ([9b7fef9](https://github.com/thememium/dspy-agent-tools/commit/9b7fef99a786d33a0ec2dc7427ef95a650290f64))
+- **bash**: add CLI fallback engine when rgapi is missing ([fd5ec0a](https://github.com/thememium/dspy-agent-tools/commit/fd5ec0ad0780c794e85ab20dc64eab1a14bbe613))
+
+### 💅 Refactors
+
+- **bash**: add CLI engine fallback for rgapi ([8c39901](https://github.com/thememium/dspy-agent-tools/commit/8c39901f574582fb8d5dbf192f9a0a511b953cb1))
+- **dspy_agent_tools/bash**: lazy‑import rgapi and catch ImportError ([da9ac15](https://github.com/thememium/dspy-agent-tools/commit/da9ac159ea64e48e827b8da5b288adbc1ee67e7b))
+
+### 📖 Documentation
+
+- **README**: clarify fallback to grep/find when rg/fd missing ([e9dd295](https://github.com/thememium/dspy-agent-tools/commit/e9dd295655004693c69d86ab5c82c30dba15a2ad))
+- **README**: clarify rgapi fallback to binaries ([d7877e8](https://github.com/thememium/dspy-agent-tools/commit/d7877e87f89c287bdc26dda9ce8a36acbc439659))
+
+### 🏡 Chore
+
+- **pyproject.toml**: enforce 100% coverage for CI ([813ca11](https://github.com/thememium/dspy-agent-tools/commit/813ca118096815255d7fa5cd1631fc386c4e28bb))
+
+### ✅ Tests
+
+- **bash**: expand bash tool test coverage and adjust error messages ([bc48d1b](https://github.com/thememium/dspy-agent-tools/commit/bc48d1b55cb1c5c5e719ef173cadc7ce3713cb09))
+- add tests for missing rgapi handling and import resilience ([c36ebb8](https://github.com/thememium/dspy-agent-tools/commit/c36ebb8bfe709c2d6c1b38af6771c1e835a67bcc))
+
+### Other Changes
+
+- Merge pull request #11 from thememium/eboswell/fix/rgapi-loading (#11) ([1af1a0a](https://github.com/thememium/dspy-agent-tools/commit/1af1a0a9ffee471ce6dddf0138db75e8c9118317))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.9 (2026-10-31)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.8...v0.1.9)
