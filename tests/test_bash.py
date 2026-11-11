@@ -1,6 +1,7 @@
 """Tests for dspy_agent_tools.bash."""
 
 import os
+import shlex
 import subprocess
 import sys
 import types
@@ -140,11 +141,16 @@ class TestBashRipgrep:
         result = bash_ripgrep("[unclosed", path=str(tmp_path))
         assert "[Error]" in result
 
-    def test_missing_rgapi_is_an_error_not_a_raise(self, tmp_path, monkeypatch):
+    def test_no_engine_at_all_is_an_error_not_a_raise(self, tmp_path, monkeypatch):
+        empty_bin = tmp_path / "empty-bin"
+        empty_bin.mkdir()
+        (tmp_path / "a.py").write_text("needle\n")
+        monkeypatch.setenv("PATH", str(empty_bin))
         monkeypatch.setitem(sys.modules, "rgapi", None)
-        result = bash_ripgrep("x", path=str(tmp_path))
+        result = bash_ripgrep("needle", path=str(tmp_path))
         assert "[Error]" in result
-        assert "rgapi" in result
+        assert "rgapi failed to load" in result
+        assert "no `rg` binary" in result
 
     def test_missing_path_raises(self):
         with pytest.raises(ValueError, match="Path does not exist"):
@@ -622,11 +628,14 @@ class TestBashGlobBatch:
         )
         assert "Error: Path does not exist" in result
 
-    def test_missing_rgapi_is_an_error_section(self, tmp_path, monkeypatch):
+    def test_no_engine_at_all_is_an_error_section(self, tmp_path, monkeypatch):
+        empty_bin = tmp_path / "empty-bin"
+        empty_bin.mkdir()
+        monkeypatch.setenv("PATH", str(empty_bin))
         monkeypatch.setitem(sys.modules, "rgapi", None)
         result = bash_glob_batch([{"pattern": "*.py", "path": str(tmp_path)}])
         assert "[Error]" in result
-        assert "rgapi" in result
+        assert "rgapi failed to load" in result
 
     def test_empty_pattern_lists_all(self, tmp_path):
         (tmp_path / "listed.txt").write_text("")
@@ -871,3 +880,75 @@ def test_package_import_survives_broken_rgapi(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "web_search"
+
+
+# --- cli fallback engine --------------------------------------------------
+
+
+def _fake_binary(directory, name, argv_file, output, exit_code=0):
+    """Write an executable that records its argv and prints `output`."""
+    script = directory / name
+    script.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" > {shlex.quote(str(argv_file))}\n"
+        f"printf '%s' {shlex.quote(output)}\n"
+        f"exit {exit_code}\n"
+    )
+    script.chmod(0o755)
+
+
+class TestCliFallback:
+    def test_rg_binary_runs_when_rgapi_cannot_load(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        argv_file = tmp_path / "argv"
+        _fake_binary(bin_dir, "rg", argv_file, "a.py:1:needle\n")
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-i -g !*.md -t py")
+
+        assert "a.py:1:needle" in result
+        argv = argv_file.read_text().splitlines()
+        for flag in ("--ignore-case", "--glob", "*.py", "!*.md", "--no-heading"):
+            assert flag in argv
+        assert argv[-2:] == ["needle", "."]
+
+    def test_rg_no_match_exit_code_is_not_an_error(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _fake_binary(bin_dir, "rg", tmp_path / "argv", "", exit_code=1)
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+
+        result = bash_ripgrep("needle", path=str(tmp_path))
+
+        assert result.startswith("No matches.")
+        assert "[exit code" not in result
+
+    def test_rg_count_sums_per_file_counts(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _fake_binary(bin_dir, "rg", tmp_path / "argv", "a.py:2\nb.py:3\n")
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-c")
+
+        assert result.splitlines()[0] == "5"
+
+    def test_fd_binary_runs_when_rgapi_cannot_load(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        argv_file = tmp_path / "argv"
+        _fake_binary(bin_dir, "fd", argv_file, f"{tmp_path}/a.py\n{tmp_path}/b.py\n")
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+
+        result = bash_find("a", path=str(tmp_path), options="-e py")
+
+        assert "a.py" in result
+        argv = argv_file.read_text().splitlines()
+        assert "--absolute-path" in argv
+        assert argv[argv.index("-e") : argv.index("-e") + 2] == ["-e", "py"]
+        assert argv[argv.index("-t") : argv.index("-t") + 2] == ["-t", "f"]
