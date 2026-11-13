@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.11 (2026-11-13)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.10...v0.1.11)
+
+### 🚀 Enhancements
+
+- add delete files tool (#12) (#12) ([eb29454](https://github.com/thememium/dspy-agent-tools/commit/eb294543c207828718bfe5d527139cdd67b4b5a1))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.10 (2026-11-11)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.9...v0.1.10)
