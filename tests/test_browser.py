@@ -1,11 +1,13 @@
 """Tests for dspy_agent_tools.browser with a fake pydoll browser."""
 
 import base64
+import builtins
 import importlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
+import dspy
 import pytest
 from pydoll.constants import ScrollPosition
 from pydoll.exceptions import ConnectionException, FailedToStartBrowser
@@ -1266,6 +1268,60 @@ class TestModuleFunctions:
         assert result["status"] == "ok"
         assert result["recording"]["status"] == "ok"
         assert Path(result["recording"]["path"]).exists()
+
+
+class TestBrowserBundle:
+    BROWSER_NAMES: ClassVar[list[str]] = [
+        "browser_open",
+        "browser",
+        "browser_snapshot",
+        "browser_screenshot",
+        "browser_evaluate",
+        "browser_record_start",
+        "browser_record_stop",
+        "browser_close",
+    ]
+
+    def test_browser_returns_dspy_tools(self):
+        tools = browser_module.Browser()
+        assert isinstance(tools, browser_module.BrowserTools)
+        assert [tool.name for tool in tools] == self.BROWSER_NAMES
+        assert all(isinstance(tool, dspy.Tool) for tool in tools)
+
+    def test_browser_can_include_search(self):
+        tools = browser_module.Browser(include_search=True)
+        assert [tool.name for tool in tools] == [*self.BROWSER_NAMES, "web_search"]
+
+    def test_browser_close_delegates_to_shared_browser(self, monkeypatch):
+        monkeypatch.setattr(
+            browser_module,
+            "browser_close",
+            lambda: {"status": "ok", "closed": True},
+        )
+        assert browser_module.Browser().close() == {"status": "ok", "closed": True}
+
+    def test_browser_context_manager_closes(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            browser_module,
+            "browser_close",
+            lambda: calls.append(True) or {"status": "ok"},
+        )
+        with browser_module.Browser() as tools:
+            assert isinstance(tools, browser_module.BrowserTools)
+        assert calls == [True]
+
+    def test_browser_requires_dspy(self, monkeypatch):
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "dspy":
+                raise ImportError("missing dspy")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        with pytest.raises(ImportError, match="requires DSPy"):
+            browser_module.Browser()
 
 
 class TestHelpers:
