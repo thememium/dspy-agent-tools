@@ -1,10 +1,18 @@
 """Headless browser tools backed by pydoll.
 
-The module exposes plain functions that can be passed straight to a DSPy
-agent. Chrome starts on the first call and the same tab is reused afterwards,
-so callers never create, enter, or clean up a browser session::
+``Browser()`` returns the whole browser toolset as one list of ``dspy.Tool``
+objects, so the common case needs a single import::
 
     import dspy
+    from dspy_agent_tools import Browser
+
+    agent = dspy.ReAct("task -> result", tools=Browser())
+
+Pass ``include_search=True`` to add ``web_search`` to the same list. The
+individual functions remain available for hand-picked tool lists. Chrome
+starts on the first call and the same tab is reused afterwards, so callers
+never create, enter, or clean up a browser session::
+
     from dspy_agent_tools import browser, browser_snapshot
 
     agent = dspy.ReAct(
@@ -45,8 +53,11 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from dspy import Tool
 
 from pydoll.commands import PageCommands
 from pydoll.constants import ScrollPosition
@@ -1536,8 +1547,71 @@ def browser_close() -> dict:
     return payload
 
 
+def _load_tool() -> type[Tool]:
+    """Import ``dspy.Tool`` on first use."""
+    try:
+        from dspy import Tool
+    except ImportError as exc:
+        raise ImportError(
+            "dspy_agent_tools.Browser requires DSPy. Install it with: uv add dspy"
+        ) from exc
+    return Tool
+
+
+class BrowserTools(list):
+    """List of ``dspy.Tool`` objects covering the browser API.
+
+    Behaves like a normal list, so it can be passed directly as ``tools=``,
+    concatenated with other tools, unpacked, or wrapped in ``Toolbox``.
+    :meth:`close` stops the shared browser early; the tools themselves also
+    clean up at interpreter exit.
+    """
+
+    def close(self) -> dict[str, Any]:
+        """Stop the shared browser and return the ``browser_close`` payload."""
+        return browser_close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+def Browser(*, include_search: bool = False) -> BrowserTools:
+    """Return the browser tools as a ready-to-use list of ``dspy.Tool`` objects.
+
+    The list contains ``browser_open``, ``browser``, ``browser_snapshot``,
+    ``browser_screenshot``, ``browser_evaluate``, ``browser_record_start``,
+    ``browser_record_stop``, and ``browser_close``. Pass
+    ``include_search=True`` to append ``web_search`` for research agents that
+    need both search and a real browser.
+
+    The tools share the module-level browser session used by the individual
+    functions, so mixing the list with a hand-picked function is safe.
+    """
+    Tool = _load_tool()
+    functions: list[Callable[..., Any]] = [
+        browser_open,
+        browser,
+        browser_snapshot,
+        browser_screenshot,
+        browser_evaluate,
+        browser_record_start,
+        browser_record_stop,
+        browser_close,
+    ]
+    if include_search:
+        from .search import web_search
+
+        functions.append(web_search)
+    return BrowserTools(Tool(function) for function in functions)
+
+
 __all__ = [
+    "Browser",
     "BrowserSession",
+    "BrowserTools",
     "browser",
     "browser_close",
     "browser_evaluate",
