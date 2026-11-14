@@ -3,6 +3,7 @@
 import base64
 import builtins
 import importlib
+import json
 import threading
 import time
 from pathlib import Path
@@ -151,6 +152,7 @@ class FakeTab:
             {"name": "sid", "value": "abc", "domain": "example.com", "path": "/"}
         ]
         self.set_cookie_calls = []
+        self.set_cookie_error = None
         self.network_body = '{"ok": true}'
         self.url = "https://example.com/page"
         self.page_title = "Example"
@@ -272,6 +274,8 @@ class FakeTab:
         return list(self.cookies)
 
     def set_cookies(self, cookies):
+        if self.set_cookie_error:
+            raise self.set_cookie_error
         self.set_cookie_calls.append([dict(cookie) for cookie in cookies])
 
     def delete_all_cookies(self):
@@ -1497,6 +1501,41 @@ class TestBrowserBundle:
         assert [tool.name for tool in tools] == self.DEFAULT_NAMES
         assert all(isinstance(tool, dspy.Tool) for tool in tools)
 
+    def test_session_options_build_an_isolated_session(self, tmp_path):
+        tools = browser_module.Browser(
+            user_data_dir=str(tmp_path / "profile"),
+            dialog_policy="accept",
+        )
+        try:
+            assert tools.session is not browser_module._default_session
+            assert tools.session.user_data_dir == (tmp_path / "profile").resolve()
+            assert tools.session.dialog_policy == "accept"
+            assert [tool.name for tool in tools] == self.DEFAULT_NAMES
+        finally:
+            tools.close()
+
+    def test_session_options_cover_the_rest(self):
+        tools = browser_module.Browser(
+            headless=False,
+            timeout=5,
+            allowed_schemes=("https",),
+            url_policy=lambda url: True,
+        )
+        try:
+            assert tools.session.headless is False
+            assert tools.session.timeout == 5
+            assert tools.session.allowed_schemes == frozenset({"https"})
+            assert tools.session.url_policy is not None
+        finally:
+            tools.close()
+
+    def test_session_and_options_conflict(self):
+        with pytest.raises(ValueError, match="not both"):
+            browser_module.Browser(session=BrowserSession(), user_data_dir="./profile")
+
+    def test_no_options_uses_the_shared_session(self, default_session):
+        assert browser_module.Browser().session is default_session
+
     def test_browser_requires_pydoll(self, monkeypatch):
         monkeypatch.setattr(browser_module, "_pydoll_loaded", False)
         real_import = builtins.__import__
@@ -2507,6 +2546,124 @@ class TestCookies:
 
     def test_module_tool_uses_default_session(self, default_session):
         assert browser_module.browser_cookies()["count"] == 1
+
+
+class TestCookieState:
+    def write_state(self, target, cookies, url="https://example.com/page"):
+        target.write_text(
+            json.dumps({"url": url, "cookies": cookies}), encoding="utf-8"
+        )
+
+    def test_loaded_at_start(self, fake_chrome, tmp_path):
+        target = tmp_path / "state.json"
+        self.write_state(
+            target, [{"name": "a", "value": "1", "domain": "example.com", "path": "/"}]
+        )
+        session = BrowserSession(cookie_state=str(target))
+        tab = session._get_tab()
+        assert tab.set_cookie_calls == [
+            [{"name": "a", "value": "1", "domain": "example.com", "path": "/"}]
+        ]
+        session.close()
+
+    def test_unscoped_cookie_uses_the_saved_url(self, fake_chrome, tmp_path):
+        target = tmp_path / "state.json"
+        self.write_state(target, [{"name": "b", "value": "2"}])
+        session = BrowserSession(cookie_state=str(target))
+        tab = session._get_tab()
+        assert tab.set_cookie_calls == [
+            [{"name": "b", "value": "2", "url": "https://example.com/page"}]
+        ]
+        session.close()
+
+    def test_missing_file_is_ignored(self, fake_chrome, tmp_path):
+        session = BrowserSession(cookie_state=str(tmp_path / "missing.json"))
+        tab = session._get_tab()
+        assert tab.set_cookie_calls == []
+        session.close()
+
+    def test_corrupt_file_is_ignored(self, fake_chrome, tmp_path):
+        target = tmp_path / "state.json"
+        target.write_text("{oops", encoding="utf-8")
+        session = BrowserSession(cookie_state=str(target))
+        tab = session._get_tab()
+        assert tab.set_cookie_calls == []
+        session.close()
+
+    def test_empty_state_is_ignored(self, fake_chrome, tmp_path):
+        target = tmp_path / "state.json"
+        self.write_state(target, [])
+        session = BrowserSession(cookie_state=str(target))
+        tab = session._get_tab()
+        assert tab.set_cookie_calls == []
+        session.close()
+
+    def test_load_failure_does_not_stop_startup(
+        self, fake_chrome, tmp_path, monkeypatch
+    ):
+        target = tmp_path / "state.json"
+        self.write_state(target, [{"name": "a", "value": "1", "domain": "e.com"}])
+
+        def start_with_failing_cookies(self):
+            self.tab.set_cookie_error = RuntimeError("bad domain")
+            return self.tab
+
+        monkeypatch.setattr(FakeChrome, "start", start_with_failing_cookies)
+        session = BrowserSession(cookie_state=str(target))
+        tab = session._get_tab()
+        assert tab.set_cookie_calls == []
+        assert session.cookie_state == target.resolve()
+        session.close()
+
+    def test_saved_on_close(self, fake_chrome, tmp_path):
+        target = tmp_path / "state.json"
+        session = BrowserSession(cookie_state=str(target))
+        session._get_tab()
+        assert session.close() is True
+        state = json.loads(target.read_text(encoding="utf-8"))
+        assert state["url"] == "https://example.com/page"
+        assert state["cookies"][0]["name"] == "sid"
+
+    def test_saved_after_set(self, fake_chrome, tmp_path):
+        target = tmp_path / "state.json"
+        session = BrowserSession(cookie_state=str(target))
+        session.cookies("set", "a=1")
+        state = json.loads(target.read_text(encoding="utf-8"))
+        assert state["cookies"][0]["name"] == "sid"
+        session.close()
+
+    def test_saved_after_clear(self, fake_chrome, tmp_path):
+        target = tmp_path / "state.json"
+        session = BrowserSession(cookie_state=str(target))
+        session.cookies("clear")
+        state = json.loads(target.read_text(encoding="utf-8"))
+        assert state["cookies"] == []
+        session.close()
+
+    def test_saved_on_reset(self, fake_chrome, tmp_path):
+        target = tmp_path / "state.json"
+        session = BrowserSession(cookie_state=str(target))
+        session._get_tab()
+        session._reset()
+        assert (
+            json.loads(target.read_text(encoding="utf-8"))["cookies"][0]["name"]
+            == "sid"
+        )
+
+    def test_save_failure_does_not_raise(self, fake_chrome, tmp_path):
+        blocker = tmp_path / "blocked"
+        blocker.write_text("not a directory", encoding="utf-8")
+        session = BrowserSession(cookie_state=str(blocker / "state.json"))
+        session._get_tab()
+        assert session.close() is True
+
+    def test_browser_forwards_cookie_state(self, tmp_path):
+        target = tmp_path / "state.json"
+        tools = browser_module.Browser(cookie_state=str(target))
+        try:
+            assert tools.session.cookie_state == target.resolve()
+        finally:
+            tools.close()
 
 
 class TestPersistentProfile:
