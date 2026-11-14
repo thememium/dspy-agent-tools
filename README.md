@@ -345,20 +345,37 @@ browser_network()  # [{"method": "GET", "url": ".../orders", "status": 200, ...}
 browser_network("body", "1234.5")  # the JSON that came back
 ```
 
-`browser_cookies` reads, writes, clears, saves, and loads cookies, which is how
-a login survives without a profile:
+`browser_cookies` reads, writes, clears, saves, and loads cookies. Saving and
+loading is manual; `cookie_state=` does it for you — the file is loaded when
+the browser starts and rewritten after any cookie change and on close, with no
+profile needed:
+
+```python
+agent = dspy.ReAct("task -> result", tools=Browser(cookie_state="state.json"))
+```
+
+That is the same format `browser_cookies("save", path)` writes, so a state
+captured by hand can be handed to the constructor, and the other way round:
 
 ```python
 browser_cookies("save", "state.json")  # after logging in once
-browser_cookies("load", "state.json")  # in a later run
+browser_cookies("load", "state.json")  # in a later run, or pass cookie_state=
 ```
 
 For a session that keeps its own logins, storage, and history, give the browser
-a profile directory:
+a profile directory — directly on the ready-made tool list, or on a session you
+manage yourself:
 
 ```python
-session = BrowserSession(user_data_dir="./browser-profile")
+agent = dspy.ReAct("task -> result", tools=Browser(user_data_dir="./browser-profile"))
+
+session = BrowserSession(user_data_dir="./browser-profile", dialog_policy="accept")
+tools = Browser(session=session)
 ```
+
+`Browser()` forwards `headless`, `timeout`, `dialog_policy`, `user_data_dir`,
+`cookie_state`, `allowed_schemes`, and `url_policy` to the session it creates;
+passing any of them together with `session=` raises `ValueError`.
 
 Chrome writes that profile on shutdown, so `close()` asks it to exit and waits
 briefly before ending the process — without that wait the cookie database is
