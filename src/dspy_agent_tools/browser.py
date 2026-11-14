@@ -22,21 +22,25 @@ never create, enter, or clean up a browser session::
     )
 
 ``browser`` performs one action, ``browser_snapshot`` returns the current page
-as structured nodes with ``@eN`` refs, ``browser_screenshot`` captures an image,
+as structured nodes or a compact text tree with ``@eN`` refs,
+``browser_screenshot`` captures an image,
 ``browser_record_start``/``browser_record_stop`` capture a video,
 ``browser_evaluate`` runs JavaScript, and ``browser_close`` releases the
 browser early. The browser is headless by default and is also stopped at
 interpreter exit. Video recording uses ``ffmpeg`` from PATH, or the bundled
 binary from the optional ``[ffmpeg]`` extra.
 
-For a server that needs one browser per user or session, create a
-``BrowserSession`` per scope and call its methods instead of the module-level
-functions::
+For a server that needs one browser per user or session, bind the tool list to
+a ``BrowserSession``::
 
     session = BrowserSession()
-    session.browser("navigate", value="https://example.com")
+    tools = Browser(session=session)
     ...
-    session.close()
+    tools.close()
+
+The session defaults to http, https, about, and data URLs. Pass
+``allowed_schemes`` or ``url_policy`` to ``BrowserSession`` when a server must
+block local files, private hosts, or other destinations.
 
 Requires the optional ``browser`` extra (pydoll)::
 
@@ -47,6 +51,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import functools
 import importlib
 import json
 import logging
@@ -56,9 +61,10 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Self
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 if TYPE_CHECKING:
@@ -133,10 +139,15 @@ Action = Literal[
     "reload",
     "wait",
 ]
+SnapshotFormat = Literal["nodes", "text", "both"]
 
 _DEFAULT_TIMEOUT_S = 15.0
 _MAX_TIMEOUT_S = 120.0
 _MAX_WAIT_S = 30.0
+_SETTLE_IDLE_S = 0.2
+_SETTLE_TIMEOUT_S = 2.0
+_DEFAULT_SNAPSHOT_FORMAT: SnapshotFormat = "nodes"
+_DEFAULT_ALLOWED_SCHEMES = frozenset({"http", "https", "about", "data"})
 _MAX_SNAPSHOT_NODES = 1000
 _DEFAULT_SNAPSHOT_NODES = 400
 _MAX_NAME_CHARS = 300
@@ -189,6 +200,10 @@ return (
   const LANDMARK_ROLES = new Set(["main","navigation","banner","contentinfo","complementary","search","form","region"]);
   const INTERACTIVE_TAGS = new Set(["A","BUTTON","INPUT","SELECT","TEXTAREA","SUMMARY","DETAILS"]);
   const INTERACTIVE_ROLES = new Set(["button","link","checkbox","radio","tab","menuitem","menuitemcheckbox","menuitemradio","option","switch","textbox","searchbox","combobox","slider","spinbutton"]);
+
+  for (const el of document.querySelectorAll("[data-dspy-agent-ref]")) {
+    el.removeAttribute("data-dspy-agent-ref");
+  }
 
   const candidates = [];
   let order = 0;
@@ -682,17 +697,45 @@ def _remote_value(response: Any) -> Any:
     return remote.get("description")
 
 
+def _settle(tab: Any, timeout: float, *, previous_url: str | None = None) -> bool:
+    """Wait briefly for navigation and in-flight requests after an action."""
+    budget = max(0.1, min(timeout, _SETTLE_TIMEOUT_S))
+    deadline = time.monotonic() + budget
+    remaining = budget
+    if previous_url is not None:
+        try:
+            tab.wait_for_url(lambda url: url != previous_url, timeout=budget)
+        except Exception:  # noqa: BLE001, S110 - the action already succeeded
+            pass
+        remaining = max(0.1, deadline - time.monotonic())
+    try:
+        tab.wait_for_network_idle(
+            idle_time=min(_SETTLE_IDLE_S, remaining), timeout=remaining
+        )
+    except Exception:  # noqa: BLE001 - settle is best-effort
+        return False
+    return True
+
+
 def _perform(
-    tab: Any, action: str, target: str | None, value: str | None, timeout: float
+    tab: Any,
+    action: str,
+    target: str | None,
+    value: str | None,
+    timeout: float,
+    *,
+    url: str | None = None,
 ) -> dict:
     if action == "navigate":
-        url = _normalize_url(value)
+        assert url is not None
         tab.go_to(url, timeout=max(1, int(timeout)))
+        _settle(tab, timeout)
         return {"status": "ok", "action": "navigate", **_page_info(tab)}
 
     if action == "click":
         element = _element(tab, target, timeout)
         method = _click(element)
+        _settle(tab, timeout)
         return {
             "status": "ok",
             "action": "click",
@@ -727,6 +770,7 @@ def _perform(
 
     if action == "press":
         _press(tab, value)
+        _settle(tab, timeout)
         return {"status": "ok", "action": "press", "key": value, **_page_info(tab)}
 
     if action == "hover":
@@ -739,6 +783,7 @@ def _perform(
             raise _ToolError("select requires value=option value")
         element = _element(tab, target, timeout)
         selected = _select(element, value)
+        _settle(tab, timeout)
         return {
             "status": "ok",
             "action": "select",
@@ -752,12 +797,14 @@ def _perform(
         return {"status": "ok", "action": "scroll", "value": value, **_page_info(tab)}
 
     if action in ("back", "forward"):
+        previous_url = _page_info(tab).get("url")
         tab.execute_script(f"history.{action}()")
-        time.sleep(0.25)
+        _settle(tab, timeout, previous_url=previous_url)
         return {"status": "ok", "action": action, **_page_info(tab)}
 
     if action == "reload":
         tab.refresh()
+        _settle(tab, timeout)
         return {"status": "ok", "action": "reload", **_page_info(tab)}
 
     if action == "wait":
@@ -790,7 +837,12 @@ def _browser_action(
     extra = {"target": target} if target else {}
     try:
         timeout_s = _coerce_timeout(timeout, session.timeout)
-        return session._run(lambda tab: _perform(tab, action, target, value, timeout_s))
+        url = (
+            session._check_url(_normalize_url(value)) if action == "navigate" else None
+        )
+        return session._run(
+            lambda tab: _perform(tab, action, target, value, timeout_s, url=url)
+        )
     except Exception as exc:  # noqa: BLE001 - returned as tool status
         return _error(action, exc, **extra)
 
@@ -840,11 +892,18 @@ def _render_nodes(nodes: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _coerce_snapshot_format(value: SnapshotFormat | str) -> SnapshotFormat:
+    if value not in ("nodes", "text", "both"):
+        raise _ToolError("format must be nodes, text, or both")
+    return value
+
+
 def _snapshot(
-    session: BrowserSession, max_nodes: int | str, include_text: bool
+    session: BrowserSession, max_nodes: int | str, format: SnapshotFormat | str
 ) -> dict:
     try:
         nodes_limit = _clamp_nodes(max_nodes)
+        view = _coerce_snapshot_format(format)
         data = session._run(lambda tab: _snapshot_tab(tab, nodes_limit))
     except Exception as exc:  # noqa: BLE001 - returned as tool status
         return _error("snapshot", exc)
@@ -854,11 +913,12 @@ def _snapshot(
         "action": "snapshot",
         "url": data.get("url", ""),
         "title": data.get("title", ""),
-        "nodes": nodes,
         "node_count": len(nodes),
         "truncated": bool(data.get("truncated")),
     }
-    if include_text:
+    if view in ("nodes", "both"):
+        payload["nodes"] = nodes
+    if view in ("text", "both"):
         payload["text"] = _render_nodes(nodes)
     return payload
 
@@ -983,6 +1043,11 @@ class BrowserSession:
     history, or tabs between callers. ``close`` is optional: the browser is
     stopped at interpreter exit and the next call after ``close`` starts a
     fresh one.
+
+    Navigation defaults to ``http``, ``https``, ``about``, and ``data`` URLs.
+    Pass ``allowed_schemes`` to extend or restrict that set, or ``url_policy``
+    to reject individual normalized URLs. For example, a server can block
+    private hosts with a callback while keeping the default scheme policy.
     """
 
     def __init__(
@@ -991,16 +1056,39 @@ class BrowserSession:
         headless: bool = True,
         timeout: float = _DEFAULT_TIMEOUT_S,
         window_size: tuple[int, int] = _DEFAULT_WINDOW_SIZE,
+        allowed_schemes: Iterable[str] | None = None,
+        url_policy: Callable[[str], bool] | None = None,
     ) -> None:
         self.headless = headless
         self.timeout = timeout
         self.window_size = window_size
+        if allowed_schemes is None:
+            self.allowed_schemes = _DEFAULT_ALLOWED_SCHEMES
+        else:
+            schemes = (
+                (allowed_schemes,)
+                if isinstance(allowed_schemes, str)
+                else allowed_schemes
+            )
+            self.allowed_schemes = frozenset(str(scheme).lower() for scheme in schemes)
+        self.url_policy = url_policy
         self._lock = threading.RLock()
         self._browser: Any | None = None
         self._tab: Any | None = None
         self._recorder: _VideoRecorder | None = None
         self.last_recording: dict[str, Any] | None = None
         self._exit_hook_registered = False
+
+    def _check_url(self, url: str) -> str:
+        scheme = urlsplit(url).scheme.lower()
+        if scheme not in self.allowed_schemes:
+            allowed = ", ".join(sorted(self.allowed_schemes)) or "none"
+            raise _ToolError(
+                f"URL scheme {scheme or '(none)'} is not allowed; allowed schemes: {allowed}"
+            )
+        if self.url_policy is not None and not self.url_policy(url):
+            raise _ToolError("URL rejected by the browser URL policy")
+        return url
 
     def _start(self) -> Any:
         _require_pydoll()
@@ -1135,22 +1223,22 @@ class BrowserSession:
         self,
         url: TextArg,
         max_nodes: int | str = _DEFAULT_SNAPSHOT_NODES,
-        include_text: bool = True,
+        format: SnapshotFormat = _DEFAULT_SNAPSHOT_FORMAT,
         timeout: float = _DEFAULT_TIMEOUT_S,
     ) -> dict:
         """Navigate to ``url`` and snapshot the new page; see ``browser_open``."""
         nav = self.browser("navigate", value=url, timeout=timeout)
         if nav["status"] != "ok":
             return {**nav, "action": "open"}
-        return {**self.snapshot(max_nodes, include_text), "action": "open"}
+        return {**self.snapshot(max_nodes, format), "action": "open"}
 
     def snapshot(
         self,
         max_nodes: int | str = _DEFAULT_SNAPSHOT_NODES,
-        include_text: bool = True,
+        format: SnapshotFormat = _DEFAULT_SNAPSHOT_FORMAT,
     ) -> dict:
         """Return the current page as structured nodes; see ``browser_snapshot``."""
-        return _snapshot(self, max_nodes, include_text)
+        return _snapshot(self, max_nodes, format)
 
     def screenshot(
         self,
@@ -1165,6 +1253,19 @@ class BrowserSession:
     def evaluate(self, script: TextArg, await_promise: bool = True) -> dict:
         """Run JavaScript in the page; see ``browser_evaluate``."""
         return _evaluate(self, script, await_promise)
+
+    def tools(
+        self,
+        *,
+        include_search: bool = False,
+        include_recording: bool = False,
+    ) -> BrowserTools:
+        """Return ``dspy.Tool`` objects bound to this session."""
+        return _build_tools(
+            self,
+            include_search=include_search,
+            include_recording=include_recording,
+        )
 
 
 class _VideoRecorder:
@@ -1436,7 +1537,7 @@ def browser(
     value: TextArg | None = None,
     timeout: float = _DEFAULT_TIMEOUT_S,
 ) -> dict:
-    """Control the shared headless browser with one action per call.
+    """Control the headless browser with one action per call.
 
     The first call starts headless Chrome; later calls reuse the same tab.
     Every action returns a dict with ``status``: ``ok`` or ``error`` (with an
@@ -1445,6 +1546,9 @@ def browser(
     Actions:
         navigate: ``value`` is the URL. A missing scheme is filled in
             (``example.com`` -> ``https://example.com``; localhost uses http).
+            Only http, https, about, and data URLs are allowed by default;
+            construct a ``BrowserSession`` with ``allowed_schemes`` or
+            ``url_policy`` to change that.
         click: ``target`` is an ``@ref`` from ``browser_snapshot``, a CSS
             selector, an XPath expression, ``css=...``, ``xpath=...``,
             ``text=Exact text``, or ``text*=Partial text``. Falls back to a
@@ -1461,11 +1565,12 @@ def browser(
         back / forward / reload: navigate browser history or reload.
         wait: ``value`` is seconds to sleep (default 1, capped at 30).
 
-    ``timeout`` bounds element lookup and page load (seconds, default 15).
+    ``timeout`` bounds element lookup, page load, and the short settle wait
+    after actions that can navigate or load data (seconds, default 15).
     ``target`` and ``value`` also accept numbers, which are converted to text
-    (``scroll`` with ``value=300`` scrolls 300 pixels).
-    After navigation or a click, call ``browser_snapshot`` to see the new page
-    and get fresh ``@refs``; refs are reassigned by every snapshot.
+    (``scroll`` with ``value=300`` scrolls 300 pixels). After navigation or a
+    click, call ``browser_snapshot`` to see the new page and get fresh
+    ``@refs``; every snapshot clears the previous refs.
     """
     return _default_session.browser(action, target, value, timeout)
 
@@ -1473,22 +1578,22 @@ def browser(
 def browser_open(
     url: TextArg,
     max_nodes: int | str = _DEFAULT_SNAPSHOT_NODES,
-    include_text: bool = True,
+    format: SnapshotFormat = _DEFAULT_SNAPSHOT_FORMAT,
     timeout: float = _DEFAULT_TIMEOUT_S,
 ) -> dict:
     """Open ``url`` and return the new page snapshot in one call.
 
     Combines ``browser("navigate", value=url)`` with ``browser_snapshot``:
     one tool call per URL instead of two, with fresh ``@refs`` for the page.
-    Returns the ``browser_snapshot`` payload (``url``, ``title``, ``nodes``,
-    ``node_count``, ``truncated``, and ``text``) under ``action="open"``.
+    ``format`` selects ``nodes`` (default), a compact ``text`` tree, or
+    ``both``. Returns the ``browser_snapshot`` payload under ``action="open"``.
     """
-    return _default_session.open(url, max_nodes, include_text, timeout)
+    return _default_session.open(url, max_nodes, format, timeout)
 
 
 def browser_snapshot(
     max_nodes: int | str = _DEFAULT_SNAPSHOT_NODES,
-    include_text: bool = True,
+    format: SnapshotFormat = _DEFAULT_SNAPSHOT_FORMAT,
 ) -> dict:
     """Return the current page as structured nodes for choosing the next action.
 
@@ -1498,14 +1603,15 @@ def browser_snapshot(
     Pass a node's ``ref`` as the ``target`` of ``browser`` to click, type,
     hover, or select it.
 
-    Returns ``status``, ``url``, ``title``, ``nodes``, ``node_count``,
-    ``truncated``, and, when ``include_text`` is true, ``text``: an indented
-    tree of the same nodes that is cheaper to read than the JSON list.
+    ``format`` selects the output: ``nodes`` (default) returns the structured
+    list, ``text`` returns only the cheaper indented tree, and ``both`` returns
+    both representations. Returns ``status``, ``url``, ``title``,
+    ``node_count``, ``truncated``, and the selected representation(s).
     Interactive elements and landmarks are kept first when ``max_nodes``
-    truncates a long page. Every call reassigns refs and drops the previous
-    ones, so take a fresh snapshot after navigation or DOM changes.
+    truncates a long page. Every call clears and reassigns refs, so take a
+    fresh snapshot after navigation or DOM changes.
     """
-    return _default_session.snapshot(max_nodes, include_text)
+    return _default_session.snapshot(max_nodes, format)
 
 
 def browser_screenshot(
@@ -1547,7 +1653,7 @@ def browser_record_start(
     max_width: int | str | None = None,
     max_height: int | str | None = None,
 ) -> dict:
-    """Start recording the shared browser tab to an MP4 or WebM video.
+    """Start recording the current browser tab to an MP4 or WebM video.
 
     The recording uses Chrome's CDP screencast: frames are captured only when
     the page changes, acked immediately, and encoded with ``ffmpeg`` when
@@ -1577,16 +1683,9 @@ def browser_record_stop() -> dict:
     return _record_stop(_default_session)
 
 
-def browser_close() -> dict:
-    """Stop the shared browser early and release Chrome and its profile.
-
-    Optional: the browser also stops at interpreter exit, and the next tool
-    call after this starts a fresh one. Returns ``closed``: whether a browser
-    was running. If a recording was active, it is stopped and encoded, and
-    its result is included under ``recording``.
-    """
+def _close_payload(session: BrowserSession) -> dict:
     try:
-        closed = _default_session.close()
+        closed = session.close()
     except Exception as exc:  # noqa: BLE001 - returned as tool status
         return _error("close", exc)
     payload: dict[str, Any] = {
@@ -1594,10 +1693,21 @@ def browser_close() -> dict:
         "action": "close",
         "closed": closed,
     }
-    recording = _default_session.take_last_recording()
+    recording = session.take_last_recording()
     if recording is not None:
         payload["recording"] = recording
     return payload
+
+
+def browser_close() -> dict:
+    """Stop this browser session early and release Chrome and its profile.
+
+    Optional: the browser also stops at interpreter exit, and the next tool
+    call after this starts a fresh one. Returns ``closed``: whether a browser
+    was running. If a recording was active, it is stopped and encoded, and
+    its result is included under ``recording``.
+    """
+    return _close_payload(_default_session)
 
 
 def _load_tool() -> type[Tool]:
@@ -1611,18 +1721,42 @@ def _load_tool() -> type[Tool]:
     return Tool
 
 
+def _bind(
+    function: Callable[..., Any], method: Callable[..., Any]
+) -> Callable[..., Any]:
+    @functools.wraps(function)
+    def bound(*args: Any, **kwargs: Any) -> Any:
+        return method(*args, **kwargs)
+
+    return bound
+
+
+def _bind_close(session: BrowserSession) -> Callable[..., Any]:
+    @functools.wraps(browser_close)
+    def bound() -> dict:
+        return _close_payload(session)
+
+    return bound
+
+
 class BrowserTools(list):
-    """List of ``dspy.Tool`` objects covering the browser API.
+    """List of ``dspy.Tool`` objects covering one browser session.
 
     Behaves like a normal list, so it can be passed directly as ``tools=``,
     concatenated with other tools, unpacked, or wrapped in ``Toolbox``.
-    :meth:`close` stops the shared browser early; the tools themselves also
-    clean up at interpreter exit.
+    :meth:`close` stops this list's browser session; the tools themselves
+    also clean up at interpreter exit.
     """
 
+    def __init__(
+        self, tools: Iterable[Any] = (), *, session: BrowserSession | None = None
+    ) -> None:
+        super().__init__(tools)
+        self.session = session if session is not None else _default_session
+
     def close(self) -> dict[str, Any]:
-        """Stop the shared browser and return the ``browser_close`` payload."""
-        return browser_close()
+        """Stop this list's browser session and return the close payload."""
+        return _close_payload(self.session)
 
     def __enter__(self) -> Self:
         return self
@@ -1631,8 +1765,39 @@ class BrowserTools(list):
         self.close()
 
 
+def _build_tools(
+    session: BrowserSession,
+    *,
+    include_search: bool = False,
+    include_recording: bool = False,
+) -> BrowserTools:
+    _require_pydoll()
+    Tool = _load_tool()
+    functions: list[Callable[..., Any]] = [
+        _bind(browser_open, session.open),
+        _bind(browser, session.browser),
+        _bind(browser_snapshot, session.snapshot),
+        _bind(browser_screenshot, session.screenshot),
+        _bind(browser_evaluate, session.evaluate),
+    ]
+    if include_recording:
+        functions.extend(
+            [
+                _bind(browser_record_start, session.record_start),
+                _bind(browser_record_stop, session.record_stop),
+            ]
+        )
+    functions.append(_bind_close(session))
+    if include_search:
+        from .search import web_search
+
+        functions.append(web_search)
+    return BrowserTools((Tool(function) for function in functions), session=session)
+
+
 def Browser(
     *,
+    session: BrowserSession | None = None,
     include_search: bool = False,
     include_recording: bool = False,
 ) -> BrowserTools:
@@ -1645,26 +1810,17 @@ def Browser(
     ``include_search=True`` to append ``web_search`` for research agents that
     need both search and a real browser.
 
-    The tools share the module-level browser session used by the individual
-    functions, so mixing the list with a hand-picked function is safe.
+    By default the tools use the shared module-level session, matching the
+    individual functions. Pass ``session=BrowserSession(...)`` to bind every
+    tool, including ``browser_close`` and :meth:`BrowserTools.close`, to an
+    isolated per-user or per-request session.
     """
-    _require_pydoll()
-    Tool = _load_tool()
-    functions: list[Callable[..., Any]] = [
-        browser_open,
-        browser,
-        browser_snapshot,
-        browser_screenshot,
-        browser_evaluate,
-    ]
-    if include_recording:
-        functions.extend([browser_record_start, browser_record_stop])
-    functions.append(browser_close)
-    if include_search:
-        from .search import web_search
-
-        functions.append(web_search)
-    return BrowserTools(Tool(function) for function in functions)
+    target_session = session if session is not None else _default_session
+    return _build_tools(
+        target_session,
+        include_search=include_search,
+        include_recording=include_recording,
+    )
 
 
 __all__ = [
