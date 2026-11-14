@@ -92,12 +92,14 @@ resort: it skips hidden paths and VCS directories like the default backends but
 cannot read `.gitignore` rules, so ignored files are still searched.
 
 The browser tools (`browser`, `browser_open`, `browser_snapshot`,
-`browser_screenshot`, `browser_evaluate`) drive a locally installed Chrome in
-headless mode through pydoll. Chrome must be installed; there is no separate
-browser download step. `browser_open` combines navigation and the first
-snapshot, so a page costs one call instead of two. The browser starts on the
-first tool call and is reused until you call `browser_close` or the process
-exits.
+`browser_screenshot`, `browser_record_start`, `browser_record_stop`,
+`browser_evaluate`) drive a locally installed Chrome in headless mode through
+pydoll. Chrome must be installed; there is no separate browser download step.
+`browser_open` combines navigation and the first snapshot, so a page costs one
+call instead of two. The browser starts on the first tool call and is reused
+until you call `browser_close` or the process exits. Video recording also needs
+`ffmpeg` on `PATH`; without it, `browser_record_start` returns an error instead
+of silently producing no file.
 
 The MCP bridge is an optional extra (it pulls in DSPy, `httpx2`, and MCP
 SDK 2.x). Importing `MCP` works without it; calling `MCP()` raises an
@@ -240,6 +242,23 @@ browser("type", target=email["ref"], value="hello@example.com")
 browser("click", target="text=Sign in")
 browser("press", value="Enter")
 ```
+
+Record the same session to a video by bracketing the actions:
+
+```python
+from dspy_agent_tools import browser_record_start, browser_record_stop
+
+browser_record_start(path="checkout.mp4", fps=10)
+browser("navigate", value="https://example.com/checkout")
+browser("click", target="text=Pay")
+video = browser_record_stop()  # {"status": "ok", "path": ..., "frames": ...}
+```
+
+Frames come from Chrome's CDP screencast and are encoded with `ffmpeg` when
+recording stops. `fps` is a capture cap, not a guarantee: Chrome only emits
+frames when the page changes, and the video preserves those timestamps. The
+recording is video-only; page audio is not captured. `browser_close` also stops
+and encodes an active recording.
 
 Every call returns a dict whose `status` is `ok` or `error`. The browser is
 headless by default. For a server that needs one browser per user or session,
@@ -707,9 +726,11 @@ bash_ripgrep_batch(
 | **`browser_open`** | Navigate to a URL and return its snapshot in one call (`action="open"`), with the same `nodes`/`text` payload as `browser_snapshot`. Use it to read a page without a separate navigate + snapshot round trip. |
 | **`browser_snapshot`** | Return `{url, title, nodes, node_count, truncated, text}`. Nodes carry `ref` (`@e1`), `role`, `name`, `tag`, `depth`, and relevant `value`/`href`/`checked`/`disabled`. Refs are reassigned on every snapshot. |
 | **`browser_screenshot`** | Save a PNG/JPEG/WebP (temp file by default) and return `path`, `format`, `bytes`; `full_page` captures beyond the viewport, `as_base64` returns the image inline. |
+| **`browser_record_start`** | Start a CDP screencast recording (`path`, `fps`, `quality`, `max_width`, `max_height`). MP4 (H.264) by default, WebM/VP9 on `.webm`; requires `ffmpeg` on PATH. |
+| **`browser_record_stop`** | Stop the active recording, encode the captured frames, and return `path`, `format`, `bytes`, `frames`, and `duration_s`. |
 | **`browser_evaluate`** | Run JavaScript with a `return` statement and get the value by value (`return document.title`). `await_promise` waits for promises. |
-| **`browser_close`** | Stop the shared browser early; the next call starts a fresh one. Optional, because exit also cleans up. |
-| **`BrowserSession`** | Advanced: one lazily started headless browser per user/request with the same methods, for server-side isolation. |
+| **`browser_close`** | Stop the shared browser early; the next call starts a fresh one. Optional, because exit also cleans up. An active recording is encoded and returned under `recording`. |
+| **`BrowserSession`** | Advanced: one lazily started headless browser per user/session with the same methods, for server-side isolation. |
 
 Chrome runs headless by default. Actions return `{"status": "ok" | "error", ...}`;
 on failure `error` carries the reason, and a stale `@ref` asks for a fresh
