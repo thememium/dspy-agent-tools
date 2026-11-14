@@ -15,7 +15,9 @@ import dspy_agent_tools
 
 EXPECTED_EXPORTS = {
     "Argument",
+    "Browser",
     "BrowserSession",
+    "BrowserTools",
     "CLI",
     "CLITools",
     "Command",
