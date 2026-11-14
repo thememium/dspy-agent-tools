@@ -8,8 +8,9 @@ objects, so the common case needs a single import::
 
     agent = dspy.ReAct("task -> result", tools=Browser())
 
-Pass ``include_search=True`` to add ``web_search`` to the same list. The
-individual functions remain available for hand-picked tool lists. Chrome
+Pass ``include_recording=True`` to add the video recording tools, and
+``include_search=True`` to add ``web_search`` to the same list. The individual
+functions remain available for hand-picked tool lists. Chrome
 starts on the first call and the same tab is reused afterwards, so callers
 never create, enter, or clean up a browser session::
 
@@ -1578,12 +1579,17 @@ class BrowserTools(list):
         self.close()
 
 
-def Browser(*, include_search: bool = False) -> BrowserTools:
+def Browser(
+    *,
+    include_search: bool = False,
+    include_recording: bool = False,
+) -> BrowserTools:
     """Return the browser tools as a ready-to-use list of ``dspy.Tool`` objects.
 
-    The list contains ``browser_open``, ``browser``, ``browser_snapshot``,
-    ``browser_screenshot``, ``browser_evaluate``, ``browser_record_start``,
-    ``browser_record_stop``, and ``browser_close``. Pass
+    The default list contains ``browser_open``, ``browser``,
+    ``browser_snapshot``, ``browser_screenshot``, ``browser_evaluate``, and
+    ``browser_close``. Pass ``include_recording=True`` to add
+    ``browser_record_start`` and ``browser_record_stop``, and
     ``include_search=True`` to append ``web_search`` for research agents that
     need both search and a real browser.
 
@@ -1597,10 +1603,10 @@ def Browser(*, include_search: bool = False) -> BrowserTools:
         browser_snapshot,
         browser_screenshot,
         browser_evaluate,
-        browser_record_start,
-        browser_record_stop,
-        browser_close,
     ]
+    if include_recording:
+        functions.extend([browser_record_start, browser_record_stop])
+    functions.append(browser_close)
     if include_search:
         from .search import web_search
 
