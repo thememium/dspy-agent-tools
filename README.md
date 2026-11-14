@@ -46,7 +46,7 @@ optional MCP bridge:
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
-- **Browser** (optional) — `Browser()` returns the headless-Chrome toolset as one `dspy.Tool` list; `include_recording=True` adds video recording and `include_search=True` adds `web_search`; requires the `[browser]` extra
+- **Browser** (optional) — `Browser()` returns the headless-Chrome toolset as one `dspy.Tool` list; `Browser(session=BrowserSession())` isolates a user or request, `include_recording=True` adds video recording, and `include_search=True` adds `web_search`; requires the `[browser]` extra
 - **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable.
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
 - **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
@@ -257,7 +257,7 @@ result = agent(task="Open https://example.com and summarize the page")
 `browser_record_stop`. The individual functions remain available when you want
 a hand-picked list.
 
-`browser_snapshot` returns structured nodes, not a text blob. Each interactive
+`browser_snapshot` returns structured nodes by default. Each interactive
 element has a ref such as `@e3`, and the same ref works as the `target` of the
 next action:
 
@@ -270,6 +270,9 @@ browser("type", target=email["ref"], value="hello@example.com")
 browser("click", target="text=Sign in")
 browser("press", value="Enter")
 ```
+
+Pass `format="text"` for only the compact indented tree, or `format="both"`
+when you need both representations. Every snapshot clears the previous refs.
 
 Record the same session to a video by bracketing the actions:
 
@@ -290,16 +293,29 @@ and encodes an active recording.
 
 Every call returns a dict whose `status` is `ok` or `error`. The browser is
 headless by default. For a server that needs one browser per user or session,
-create a `BrowserSession` per scope instead of using the shared module-level
-functions:
+bind the ready-made tool list to a session:
 
 ```python
-from dspy_agent_tools import BrowserSession
+import dspy
+from dspy_agent_tools import Browser, BrowserSession
 
 session = BrowserSession()
-session.browser("navigate", value="https://example.com")
-nodes = session.snapshot()["nodes"]
-session.close()
+tools = Browser(session=session)  # or session.tools()
+agent = dspy.ReAct("task -> result", tools=tools)
+result = agent(task="Open https://example.com and summarize the page")
+tools.close()  # stops this session only
+```
+
+`BrowserSession` allows `http`, `https`, `about`, and `data` URLs by default.
+Pass `allowed_schemes=(...)` to extend or restrict that set, or pass
+`url_policy` to reject individual normalized URLs. `file:`, `chrome:`, and
+`view-source:` are blocked unless explicitly enabled.
+
+```python
+session = BrowserSession(
+    url_policy=lambda url: not url.startswith("https://internal.example")
+)
+tools = Browser(session=session)
 ```
 
 A full coding-agent toolbox, all in one import:
@@ -750,16 +766,16 @@ bash_ripgrep_batch(
 
 | Tool | Use it for |
 | --- | --- |
-| **`Browser`** | Return the core browser tools as one `BrowserTools` list of `dspy.Tool` objects. `include_recording=True` adds video recording, `include_search=True` adds `web_search`, and `.close()` stops the shared browser early. |
-| **`browser`** | Run one action: `navigate`, `click`, `type`, `press`, `hover`, `select`, `scroll`, `back`, `forward`, `reload`, or `wait`. `target` accepts an `@ref`, CSS, XPath, `text=Exact`, or `text*=Partial`; `value` carries the URL, text, key, option value, scroll direction, or seconds. |
-| **`browser_open`** | Navigate to a URL and return its snapshot in one call (`action="open"`), with the same `nodes`/`text` payload as `browser_snapshot`. Use it to read a page without a separate navigate + snapshot round trip. |
-| **`browser_snapshot`** | Return `{url, title, nodes, node_count, truncated, text}`. Nodes carry `ref` (`@e1`), `role`, `name`, `tag`, `depth`, and relevant `value`/`href`/`checked`/`disabled`. Refs are reassigned on every snapshot. |
+| **`Browser`** | Return the core browser tools as one `BrowserTools` list of `dspy.Tool` objects. `include_recording=True` adds video recording, `include_search=True` adds `web_search`, and `.close()` stops that list's browser session. Pass `session=BrowserSession(...)` for per-user or per-request isolation; `session.tools()` is equivalent. |
+| **`browser`** | Run one action: `navigate`, `click`, `type`, `press`, `hover`, `select`, `scroll`, `back`, `forward`, `reload`, or `wait`. `target` accepts an `@ref`, CSS, XPath, `text=Exact`, or `text*=Partial`; `value` carries the URL, text, key, option value, scroll direction, or seconds. Navigation defaults to http/https/about/data; mutating actions wait briefly for navigation and in-flight requests. |
+| **`browser_open`** | Navigate to a URL and return its snapshot in one call (`action="open"`). `format="nodes"` is the default; `format="text"` returns the compact tree, and `format="both"` returns both. |
+| **`browser_snapshot`** | Return `{url, title, node_count, truncated}` plus `nodes`, `text`, or both selected by `format` (default `nodes`). Nodes carry `ref` (`@e1`), `role`, `name`, `tag`, `depth`, and relevant `value`/`href`/`checked`/`disabled`. Every snapshot clears and reassigns refs. |
 | **`browser_screenshot`** | Save a PNG/JPEG/WebP (temp file by default) and return `path`, `format`, `bytes`; `full_page` captures beyond the viewport, `as_base64` returns the image inline. |
 | **`browser_record_start`** | Start a CDP screencast recording (`path`, `fps`, `quality`, `max_width`, `max_height`). MP4 (H.264) by default, WebM/VP9 on `.webm`; uses `ffmpeg` from PATH or the optional `[ffmpeg]` extra. |
 | **`browser_record_stop`** | Stop the active recording, encode the captured frames, and return `path`, `format`, `bytes`, `frames`, and `duration_s`. |
 | **`browser_evaluate`** | Run JavaScript with a `return` statement and get the value by value (`return document.title`). `await_promise` waits for promises. |
-| **`browser_close`** | Stop the shared browser early; the next call starts a fresh one. Optional, because exit also cleans up. An active recording is encoded and returned under `recording`. |
-| **`BrowserSession`** | Advanced: one lazily started headless browser per user/session with the same methods, for server-side isolation. |
+| **`browser_close`** | Stop this tool list's browser session early; the next call starts a fresh one. Optional, because exit also cleans up. An active recording is encoded and returned under `recording`. |
+| **`BrowserSession`** | Advanced: one lazily started headless browser per user/session with the same methods, plus `.tools()` for a session-bound `dspy.Tool` list and `allowed_schemes`/`url_policy` for navigation restrictions. |
 
 Chrome runs headless by default. Actions return `{"status": "ok" | "error", ...}`;
 on failure `error` carries the reason, and a stale `@ref` asks for a fresh
