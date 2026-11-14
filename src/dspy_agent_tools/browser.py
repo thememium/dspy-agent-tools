@@ -37,6 +37,10 @@ functions::
     session.browser("navigate", value="https://example.com")
     ...
     session.close()
+
+Requires the optional ``browser`` extra (pydoll)::
+
+    uv add "dspy-agent-tools[browser]"
 """
 
 from __future__ import annotations
@@ -60,12 +64,59 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from dspy import Tool
 
-from pydoll.commands import PageCommands
-from pydoll.constants import ScrollPosition
-from pydoll.exceptions import BrowserException, ConnectionException, TargetCrashed
-from pydoll.protocol.page.types import ScreencastFormat
-from pydoll.protocol.runtime.types import CallArgument
-from pydoll.sync import Chrome, ChromiumOptions, Key, PageEvent, SyncError
+    # Runtime imports are lazy in _require_pydoll so the package imports
+    # without the optional [browser] extra.
+    from pydoll.commands import PageCommands
+    from pydoll.constants import ScrollPosition
+    from pydoll.exceptions import BrowserException, ConnectionException, TargetCrashed
+    from pydoll.protocol.page.types import ScreencastFormat
+    from pydoll.protocol.runtime.types import CallArgument
+    from pydoll.sync import Chrome, ChromiumOptions, Key, PageEvent, SyncError
+
+_IMPORT_HINT = (
+    "dspy_agent_tools browser tools require pydoll. "
+    "Install the browser extra: uv add 'dspy-agent-tools[browser]'"
+)
+_pydoll_loaded = False
+
+
+def _require_pydoll() -> None:
+    """Import pydoll on first use so the package works without the extra."""
+    global _pydoll_loaded
+    if _pydoll_loaded:
+        return
+    try:
+        from pydoll.commands import PageCommands as _PageCommands
+        from pydoll.constants import ScrollPosition as _ScrollPosition
+        from pydoll.exceptions import BrowserException as _BrowserException
+        from pydoll.exceptions import ConnectionException as _ConnectionException
+        from pydoll.exceptions import TargetCrashed as _TargetCrashed
+        from pydoll.protocol.page.types import ScreencastFormat as _ScreencastFormat
+        from pydoll.protocol.runtime.types import CallArgument as _CallArgument
+        from pydoll.sync import Chrome as _Chrome
+        from pydoll.sync import ChromiumOptions as _ChromiumOptions
+        from pydoll.sync import Key as _Key
+        from pydoll.sync import PageEvent as _PageEvent
+        from pydoll.sync import SyncError as _SyncError
+    except ImportError as exc:
+        raise ImportError(_IMPORT_HINT) from exc
+    for name, value in {
+        "PageCommands": _PageCommands,
+        "ScrollPosition": _ScrollPosition,
+        "BrowserException": _BrowserException,
+        "ConnectionException": _ConnectionException,
+        "TargetCrashed": _TargetCrashed,
+        "ScreencastFormat": _ScreencastFormat,
+        "CallArgument": _CallArgument,
+        "Chrome": _Chrome,
+        "ChromiumOptions": _ChromiumOptions,
+        "Key": _Key,
+        "PageEvent": _PageEvent,
+        "SyncError": _SyncError,
+    }.items():
+        globals().setdefault(name, value)
+    _pydoll_loaded = True
+
 
 TextArg = str | int | float
 
@@ -952,6 +1003,7 @@ class BrowserSession:
         self._exit_hook_registered = False
 
     def _start(self) -> Any:
+        _require_pydoll()
         options = ChromiumOptions()
         options.headless = self.headless
         options.start_timeout = max(10, int(self.timeout))
@@ -1596,6 +1648,7 @@ def Browser(
     The tools share the module-level browser session used by the individual
     functions, so mixing the list with a hand-picked function is safe.
     """
+    _require_pydoll()
     Tool = _load_tool()
     functions: list[Callable[..., Any]] = [
         browser_open,
