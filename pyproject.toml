@@ -17,12 +17,12 @@ dependencies = [
   "ddgs>=9.16.0",
   "markdownify>=1.2.3",
   "plumbum>=2.0.2",
-  "pydoll-python>=3.0.1",
   "rgapi>=0.2.3",
   "tree-sitter-language-pack>=1.22.1",
 ]
 
 [project.optional-dependencies]
+browser = ["dspy>=3.1", "pydoll-python>=3.0.1"]
 ffmpeg = ["imageio-ffmpeg>=0.8.1"]
 mcp = ["dspy>=3.1", "httpx2>=2.10", "mcp>=2"]
 
@@ -39,6 +39,7 @@ dev = [
   "isort>=9.0.2",
   "mcp>=2",
   "poethepoet>=0.49.0",
+  "pydoll-python>=3.0.1",
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
   "ruff>=0.17.1",
@@ -48,6 +49,11 @@ dev = [
 
 [tool.deptry]
 known_first_party = ["dspy_agent_tools"]
+
+[tool.ruff.lint.per-file-ignores]
+# browser.py imports pydoll lazily so the package works without the extra;
+# TYPE_CHECKING imports still describe symbols used at runtime.
+"src/dspy_agent_tools/browser.py" = ["TC004"]
 
 [tool.deptry.per_rule_ignores]
 # Imported dynamically only when the optional [ffmpeg] extra is installed.

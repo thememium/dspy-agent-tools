@@ -735,12 +735,15 @@ dependencies = [
     { name = "ddgs" },
     { name = "markdownify" },
     { name = "plumbum" },
-    { name = "pydoll-python" },
     { name = "rgapi" },
     { name = "tree-sitter-language-pack" },
 ]
 
 [package.optional-dependencies]
+browser = [
+    { name = "dspy" },
+    { name = "pydoll-python" },
+]
 ffmpeg = [
     { name = "imageio-ffmpeg" },
 ]
@@ -759,6 +762,7 @@ dev = [
     { name = "isort" },
     { name = "mcp" },
     { name = "poethepoet" },
+    { name = "pydoll-python" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
@@ -770,17 +774,18 @@ dev = [
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "ddgs", specifier = ">=9.16.0" },
+    { name = "dspy", marker = "extra == 'browser'", specifier = ">=3.1" },
     { name = "dspy", marker = "extra == 'mcp'", specifier = ">=3.1" },
     { name = "httpx2", marker = "extra == 'mcp'", specifier = ">=2.10" },
     { name = "imageio-ffmpeg", marker = "extra == 'ffmpeg'", specifier = ">=0.8.1" },
     { name = "markdownify", specifier = ">=1.2.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2" },
     { name = "plumbum", specifier = ">=2.0.2" },
-    { name = "pydoll-python", specifier = ">=3.0.1" },
+    { name = "pydoll-python", marker = "extra == 'browser'", specifier = ">=3.0.1" },
     { name = "rgapi", specifier = ">=0.2.3" },
     { name = "tree-sitter-language-pack", specifier = ">=1.22.1" },
 ]
-provides-extras = ["ffmpeg", "mcp"]
+provides-extras = ["browser", "ffmpeg", "mcp"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -791,6 +796,7 @@ dev = [
     { name = "isort", specifier = ">=9.0.2" },
     { name = "mcp", specifier = ">=2" },
     { name = "poethepoet", specifier = ">=0.49.0" },
+    { name = "pydoll-python", specifier = ">=3.0.1" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "ruff", specifier = ">=0.17.1" },
