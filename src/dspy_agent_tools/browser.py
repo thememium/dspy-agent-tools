@@ -32,10 +32,12 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import re
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -44,6 +46,8 @@ from pydoll.constants import ScrollPosition
 from pydoll.exceptions import BrowserException, ConnectionException, TargetCrashed
 from pydoll.protocol.runtime.types import CallArgument
 from pydoll.sync import Chrome, ChromiumOptions, Key, SyncError
+
+TextArg = str | int | float
 
 Action = Literal[
     "navigate",
@@ -98,6 +102,8 @@ _TEXT_XPATH = (
     "or self::summary or @role='button' or @role='link' or @role='tab' "
     "or @role='menuitem'"
 )
+
+logger = logging.getLogger(__name__)
 
 _SNAPSHOT_JS = r"""
 return (
@@ -334,7 +340,7 @@ def _coerce_seconds(value: str | None, default: float) -> float:
     return min(seconds, _MAX_WAIT_S)
 
 
-def _coerce_quality(value: int) -> int:
+def _coerce_quality(value: int | str) -> int:
     try:
         quality = int(value)
     except (TypeError, ValueError) as exc:
@@ -342,6 +348,13 @@ def _coerce_quality(value: int) -> int:
     if not 0 <= quality <= 100:
         raise _ToolError("quality must be an integer from 0 to 100")
     return quality
+
+
+def _text_arg(value: TextArg | None) -> str | None:
+    """Tool arguments arrive as JSON; a number where text is expected becomes its text."""
+    if value is None or isinstance(value, str):
+        return value
+    return str(value)
 
 
 def _normalize_url(value: str | None) -> str:
@@ -628,11 +641,13 @@ def _perform(
 def _browser_action(
     session: BrowserSession,
     action: str,
-    target: str | None,
-    value: str | None,
+    target: TextArg | None,
+    value: TextArg | None,
     timeout: float | None,
 ) -> dict:
     action = str(action).strip().lower()
+    target = _text_arg(target)
+    value = _text_arg(value)
     if action not in _ACTIONS:
         return _error(
             action,
@@ -648,7 +663,7 @@ def _browser_action(
         return _error(action, exc, **extra)
 
 
-def _clamp_nodes(value: int) -> int:
+def _clamp_nodes(value: int | str) -> int:
     try:
         nodes = int(value)
     except (TypeError, ValueError) as exc:
@@ -693,7 +708,9 @@ def _render_nodes(nodes: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _snapshot(session: BrowserSession, max_nodes: int, include_text: bool) -> dict:
+def _snapshot(
+    session: BrowserSession, max_nodes: int | str, include_text: bool
+) -> dict:
     try:
         nodes_limit = _clamp_nodes(max_nodes)
         data = session._run(lambda tab: _snapshot_tab(tab, nodes_limit))
@@ -714,7 +731,7 @@ def _snapshot(session: BrowserSession, max_nodes: int, include_text: bool) -> di
     return payload
 
 
-def _evaluate_tab(tab: Any, script: str, await_promise: bool) -> dict:
+def _evaluate_tab(tab: Any, script: TextArg, await_promise: bool) -> dict:
     if not isinstance(script, str) or not script.strip():
         raise _ToolError("evaluate requires a non-empty JavaScript string")
     response = tab.execute_script(
@@ -734,7 +751,7 @@ def _evaluate_tab(tab: Any, script: str, await_promise: bool) -> dict:
     return data
 
 
-def _evaluate(session: BrowserSession, script: str, await_promise: bool) -> dict:
+def _evaluate(session: BrowserSession, script: TextArg, await_promise: bool) -> dict:
     try:
         data = session._run(lambda tab: _evaluate_tab(tab, script, await_promise))
     except Exception as exc:  # noqa: BLE001 - returned as tool status
@@ -766,7 +783,7 @@ def _screenshot_tab(
     tab: Any,
     path: str | None,
     full_page: bool,
-    quality: int,
+    quality: int | str,
     as_base64: bool,
 ) -> dict:
     quality = _coerce_quality(quality)
@@ -797,7 +814,7 @@ def _screenshot(
     session: BrowserSession,
     path: str | None,
     full_page: bool,
-    quality: int,
+    quality: int | str,
     as_base64: bool,
 ) -> dict:
     try:
@@ -807,6 +824,23 @@ def _screenshot(
     except Exception as exc:  # noqa: BLE001 - returned as tool status
         return _error("screenshot", exc)
     return {"status": "ok", "action": "screenshot", **data}
+
+
+def _register_exit_hook(callback: Callable[[], object]) -> None:
+    """Run *callback* before the interpreter tears down thread pools.
+
+    A plain :mod:`atexit` hook is too late for pydoll: ``concurrent.futures``
+    shuts its workers down from a :mod:`threading` exit hook, which runs
+    before :mod:`atexit`, and ``Chrome.stop()`` needs a worker to end the
+    process. Registering through the same pre-shutdown queue puts the browser
+    shutdown first, so the process and its temporary profile are released
+    instead of being rmtree'd while Chrome is still writing to them.
+    """
+    register = getattr(threading, "_register_atexit", None)
+    if register is None:
+        atexit.register(callback)
+    else:
+        register(callback)
 
 
 class BrowserSession:
@@ -832,7 +866,7 @@ class BrowserSession:
         self._lock = threading.RLock()
         self._browser: Any | None = None
         self._tab: Any | None = None
-        self._atexit_registered = False
+        self._exit_hook_registered = False
 
     def _start(self) -> Any:
         options = ChromiumOptions()
@@ -848,9 +882,9 @@ class BrowserSession:
         tab = browser.start()
         self._browser = browser
         self._tab = tab
-        if not self._atexit_registered:
-            atexit.register(self.close)
-            self._atexit_registered = True
+        if not self._exit_hook_registered:
+            _register_exit_hook(self.close)
+            self._exit_hook_registered = True
         return tab
 
     def _get_tab(self) -> Any:
@@ -863,8 +897,8 @@ class BrowserSession:
         if browser is not None:
             try:
                 browser.stop()
-            except Exception:  # noqa: BLE001, S110 - cleanup is best-effort
-                pass
+            except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+                logger.warning("Could not stop the browser: %s", _format_error(exc))
 
     def _run(self, operation: Any) -> Any:
         with self._lock:
@@ -884,15 +918,15 @@ class BrowserSession:
                 return False
             try:
                 browser.stop()
-            except Exception:  # noqa: BLE001, S110 - cleanup is best-effort
-                pass
+            except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+                logger.warning("Could not stop the browser: %s", _format_error(exc))
             return True
 
     def browser(
         self,
         action: Action,
-        target: str | None = None,
-        value: str | None = None,
+        target: TextArg | None = None,
+        value: TextArg | None = None,
         timeout: float = _DEFAULT_TIMEOUT_S,
     ) -> dict:
         """Run one browser action; see the module-level ``browser`` tool."""
@@ -900,7 +934,7 @@ class BrowserSession:
 
     def snapshot(
         self,
-        max_nodes: int = _DEFAULT_SNAPSHOT_NODES,
+        max_nodes: int | str = _DEFAULT_SNAPSHOT_NODES,
         include_text: bool = True,
     ) -> dict:
         """Return the current page as structured nodes; see ``browser_snapshot``."""
@@ -910,13 +944,13 @@ class BrowserSession:
         self,
         path: str | None = None,
         full_page: bool = False,
-        quality: int = _DEFAULT_SCREENSHOT_QUALITY,
+        quality: int | str = _DEFAULT_SCREENSHOT_QUALITY,
         as_base64: bool = False,
     ) -> dict:
         """Capture the current page; see ``browser_screenshot``."""
         return _screenshot(self, path, full_page, quality, as_base64)
 
-    def evaluate(self, script: str, await_promise: bool = True) -> dict:
+    def evaluate(self, script: TextArg, await_promise: bool = True) -> dict:
         """Run JavaScript in the page; see ``browser_evaluate``."""
         return _evaluate(self, script, await_promise)
 
@@ -926,8 +960,8 @@ _default_session = BrowserSession()
 
 def browser(
     action: Action,
-    target: str | None = None,
-    value: str | None = None,
+    target: TextArg | None = None,
+    value: TextArg | None = None,
     timeout: float = _DEFAULT_TIMEOUT_S,
 ) -> dict:
     """Control the shared headless browser with one action per call.
@@ -956,6 +990,8 @@ def browser(
         wait: ``value`` is seconds to sleep (default 1, capped at 30).
 
     ``timeout`` bounds element lookup and page load (seconds, default 15).
+    ``target`` and ``value`` also accept numbers, which are converted to text
+    (``scroll`` with ``value=300`` scrolls 300 pixels).
     After navigation or a click, call ``browser_snapshot`` to see the new page
     and get fresh ``@refs``; refs are reassigned by every snapshot.
     """
@@ -963,7 +999,7 @@ def browser(
 
 
 def browser_snapshot(
-    max_nodes: int = _DEFAULT_SNAPSHOT_NODES,
+    max_nodes: int | str = _DEFAULT_SNAPSHOT_NODES,
     include_text: bool = True,
 ) -> dict:
     """Return the current page as structured nodes for choosing the next action.
@@ -987,7 +1023,7 @@ def browser_snapshot(
 def browser_screenshot(
     path: str | None = None,
     full_page: bool = False,
-    quality: int = _DEFAULT_SCREENSHOT_QUALITY,
+    quality: int | str = _DEFAULT_SCREENSHOT_QUALITY,
     as_base64: bool = False,
 ) -> dict:
     """Capture the current page and return where the image was written.
@@ -1003,7 +1039,7 @@ def browser_screenshot(
     return _default_session.screenshot(path, full_page, quality, as_base64)
 
 
-def browser_evaluate(script: str, await_promise: bool = True) -> dict:
+def browser_evaluate(script: TextArg, await_promise: bool = True) -> dict:
     """Run JavaScript in the current page and return its value.
 
     Use a ``return`` statement: ``return document.title``. The result is
