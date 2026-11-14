@@ -91,11 +91,13 @@ the `rg` and `fd` binaries, then to POSIX `grep` and `find`, and report an
 resort: it skips hidden paths and VCS directories like the default backends but
 cannot read `.gitignore` rules, so ignored files are still searched.
 
-The browser tools (`browser`, `browser_snapshot`, `browser_screenshot`,
-`browser_evaluate`) drive a locally installed Chrome in headless mode through
-pydoll. Chrome must be installed; there is no separate browser download step.
-The browser starts on the first tool call and is reused until you call
-`browser_close` or the process exits.
+The browser tools (`browser`, `browser_open`, `browser_snapshot`,
+`browser_screenshot`, `browser_evaluate`) drive a locally installed Chrome in
+headless mode through pydoll. Chrome must be installed; there is no separate
+browser download step. `browser_open` combines navigation and the first
+snapshot, so a page costs one call instead of two. The browser starts on the
+first tool call and is reused until you call `browser_close` or the process
+exits.
 
 The MCP bridge is an optional extra (it pulls in DSPy, `httpx2`, and MCP
 SDK 2.x). Importing `MCP` works without it; calling `MCP()` raises an
@@ -216,11 +218,11 @@ The browser tools are ordinary functions, so they go straight into
 
 ```python
 import dspy
-from dspy_agent_tools import browser, browser_snapshot, browser_screenshot
+from dspy_agent_tools import browser, browser_open, browser_snapshot, browser_screenshot
 
 agent = dspy.ReAct(
     "task -> result",
-    tools=[browser, browser_snapshot, browser_screenshot],
+    tools=[browser_open, browser, browser_snapshot, browser_screenshot],
     max_iters=12,
 )
 
@@ -702,6 +704,7 @@ bash_ripgrep_batch(
 | Tool | Use it for |
 | --- | --- |
 | **`browser`** | Run one action: `navigate`, `click`, `type`, `press`, `hover`, `select`, `scroll`, `back`, `forward`, `reload`, or `wait`. `target` accepts an `@ref`, CSS, XPath, `text=Exact`, or `text*=Partial`; `value` carries the URL, text, key, option value, scroll direction, or seconds. |
+| **`browser_open`** | Navigate to a URL and return its snapshot in one call (`action="open"`), with the same `nodes`/`text` payload as `browser_snapshot`. Use it to read a page without a separate navigate + snapshot round trip. |
 | **`browser_snapshot`** | Return `{url, title, nodes, node_count, truncated, text}`. Nodes carry `ref` (`@e1`), `role`, `name`, `tag`, `depth`, and relevant `value`/`href`/`checked`/`disabled`. Refs are reassigned on every snapshot. |
 | **`browser_screenshot`** | Save a PNG/JPEG/WebP (temp file by default) and return `path`, `format`, `bytes`; `full_page` captures beyond the viewport, `as_base64` returns the image inline. |
 | **`browser_evaluate`** | Run JavaScript with a `return` statement and get the value by value (`return document.title`). `await_promise` waits for promises. |
