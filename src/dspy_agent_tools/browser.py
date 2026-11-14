@@ -932,6 +932,19 @@ class BrowserSession:
         """Run one browser action; see the module-level ``browser`` tool."""
         return _browser_action(self, action, target, value, timeout)
 
+    def open(
+        self,
+        url: TextArg,
+        max_nodes: int | str = _DEFAULT_SNAPSHOT_NODES,
+        include_text: bool = True,
+        timeout: float = _DEFAULT_TIMEOUT_S,
+    ) -> dict:
+        """Navigate to ``url`` and snapshot the new page; see ``browser_open``."""
+        nav = self.browser("navigate", value=url, timeout=timeout)
+        if nav["status"] != "ok":
+            return {**nav, "action": "open"}
+        return {**self.snapshot(max_nodes, include_text), "action": "open"}
+
     def snapshot(
         self,
         max_nodes: int | str = _DEFAULT_SNAPSHOT_NODES,
@@ -996,6 +1009,22 @@ def browser(
     and get fresh ``@refs``; refs are reassigned by every snapshot.
     """
     return _default_session.browser(action, target, value, timeout)
+
+
+def browser_open(
+    url: TextArg,
+    max_nodes: int | str = _DEFAULT_SNAPSHOT_NODES,
+    include_text: bool = True,
+    timeout: float = _DEFAULT_TIMEOUT_S,
+) -> dict:
+    """Open ``url`` and return the new page snapshot in one call.
+
+    Combines ``browser("navigate", value=url)`` with ``browser_snapshot``:
+    one tool call per URL instead of two, with fresh ``@refs`` for the page.
+    Returns the ``browser_snapshot`` payload (``url``, ``title``, ``nodes``,
+    ``node_count``, ``truncated``, and ``text``) under ``action="open"``.
+    """
+    return _default_session.open(url, max_nodes, include_text, timeout)
 
 
 def browser_snapshot(
@@ -1071,6 +1100,7 @@ __all__ = [
     "browser",
     "browser_close",
     "browser_evaluate",
+    "browser_open",
     "browser_screenshot",
     "browser_snapshot",
 ]
