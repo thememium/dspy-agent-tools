@@ -23,6 +23,8 @@ never create, enter, or clean up a browser session::
 
 ``browser`` performs one action, ``browser_snapshot`` returns the current page
 as structured nodes or a compact text tree with ``@eN`` refs,
+``browser_tabs`` lists, opens, switches, and closes tabs, ``browser_network``
+reports what the page fetched, ``browser_cookies`` reads and writes cookies,
 ``browser_screenshot`` captures an image,
 ``browser_record_start``/``browser_record_stop`` capture a video,
 ``browser_evaluate`` runs JavaScript, and ``browser_close`` releases the
@@ -61,6 +63,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Self
@@ -72,10 +75,17 @@ if TYPE_CHECKING:
 
     # Runtime imports are lazy in _require_pydoll so the package imports
     # without the optional [browser] extra.
-    from pydoll.commands import PageCommands
+    from pydoll.commands import BrowserCommands, PageCommands
     from pydoll.constants import ScrollPosition
-    from pydoll.exceptions import BrowserException, ConnectionException, TargetCrashed
+    from pydoll.exceptions import (
+        BrowserException,
+        ConnectionException,
+        TargetCrashed,
+        TimeoutException,
+    )
+    from pydoll.protocol.network.events import NetworkEvent
     from pydoll.protocol.page.types import ScreencastFormat
+    from pydoll.protocol.runtime.events import RuntimeEvent
     from pydoll.protocol.runtime.types import CallArgument
     from pydoll.sync import Chrome, ChromiumOptions, Key, PageEvent, SyncError
 
@@ -92,12 +102,16 @@ def _require_pydoll() -> None:
     if _pydoll_loaded:
         return
     try:
+        from pydoll.commands import BrowserCommands as _BrowserCommands
         from pydoll.commands import PageCommands as _PageCommands
         from pydoll.constants import ScrollPosition as _ScrollPosition
         from pydoll.exceptions import BrowserException as _BrowserException
         from pydoll.exceptions import ConnectionException as _ConnectionException
         from pydoll.exceptions import TargetCrashed as _TargetCrashed
+        from pydoll.exceptions import TimeoutException as _TimeoutException
+        from pydoll.protocol.network.events import NetworkEvent as _NetworkEvent
         from pydoll.protocol.page.types import ScreencastFormat as _ScreencastFormat
+        from pydoll.protocol.runtime.events import RuntimeEvent as _RuntimeEvent
         from pydoll.protocol.runtime.types import CallArgument as _CallArgument
         from pydoll.sync import Chrome as _Chrome
         from pydoll.sync import ChromiumOptions as _ChromiumOptions
@@ -107,6 +121,7 @@ def _require_pydoll() -> None:
     except ImportError as exc:
         raise ImportError(_IMPORT_HINT) from exc
     for name, value in {
+        "BrowserCommands": _BrowserCommands,
         "PageCommands": _PageCommands,
         "ScrollPosition": _ScrollPosition,
         "BrowserException": _BrowserException,
@@ -117,8 +132,11 @@ def _require_pydoll() -> None:
         "Chrome": _Chrome,
         "ChromiumOptions": _ChromiumOptions,
         "Key": _Key,
+        "NetworkEvent": _NetworkEvent,
         "PageEvent": _PageEvent,
+        "RuntimeEvent": _RuntimeEvent,
         "SyncError": _SyncError,
+        "TimeoutException": _TimeoutException,
     }.items():
         globals().setdefault(name, value)
     _pydoll_loaded = True
@@ -140,6 +158,7 @@ Action = Literal[
     "wait",
 ]
 SnapshotFormat = Literal["nodes", "text", "both"]
+DialogPolicy = Literal["dismiss", "accept"]
 
 _DEFAULT_TIMEOUT_S = 15.0
 _MAX_TIMEOUT_S = 120.0
@@ -158,6 +177,30 @@ _MAX_RECORDING_FPS = 60.0
 _VIDEO_SUFFIXES = (".mp4", ".webm")
 _REF_ATTR = "data-dspy-agent-ref"
 _DEFAULT_WINDOW_SIZE = (1440, 900)
+_DEFAULT_DIALOG_POLICY: DialogPolicy = "dismiss"
+_MAX_DIALOG_CHARS = 200
+_MAX_CONSOLE_ENTRIES = 200
+_MAX_CONSOLE_ITEMS = 8
+_MAX_CONSOLE_TEXT = 300
+_PROFILE_FLUSH_S = 0.5
+_MAX_NETWORK_ENTRIES = 300
+_MAX_NETWORK_ITEMS = 100
+_MAX_NETWORK_BODY = 4000
+_MAX_COOKIE_ITEMS = 200
+_COOKIE_FIELDS = (
+    "name",
+    "value",
+    "domain",
+    "path",
+    "expires",
+    "httpOnly",
+    "secure",
+    "sameSite",
+)
+_NO_EFFECT_WARNING = (
+    "the page did not change; the target may be inert, or its effect is not "
+    "visible in the DOM"
+)
 _ACTIONS = (
     "navigate",
     "click",
@@ -171,9 +214,11 @@ _ACTIONS = (
     "reload",
     "wait",
 )
+_TAB_ACTIONS = frozenset({"click", "press", "navigate"})
 _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _REF_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _INT_RE = re.compile(r"^[+-]?\d+$")
+_FLOAT_RE = re.compile(r"^[+-]?(?:\d+\.\d*|\.\d+)$")
 _KEY_ALIASES = {
     "CTRL": "CONTROL",
     "CMD": "META",
@@ -364,6 +409,92 @@ return (
 """
 
 
+_PROBE_JS = r"""
+return (
+  function () {
+  const existing = window.__dspyAgentProbe;
+  if (existing && existing.observer) {
+    return { url: location.href, mutations: existing.mutations };
+  }
+  const probe = { mutations: 0, observer: null };
+  try {
+    probe.observer = new MutationObserver(function (records) {
+      probe.mutations += records.length;
+    });
+    probe.observer.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true,
+    });
+  } catch (error) {
+    probe.observer = null;
+  }
+  window.__dspyAgentProbe = probe;
+  return { url: location.href, mutations: 0 };
+  }
+)();
+"""
+
+_WAIT_SELECTOR_JS = r"""
+return (
+  function (selector) {
+  let element = null;
+  try {
+    element = selector.startsWith("/") || selector.startsWith("(")
+      ? document.evaluate(selector, document, null, 9, null).singleNodeValue
+      : document.querySelector(selector);
+  } catch (error) {
+    return false;
+  }
+  if (!element) return false;
+  const rect = element.getBoundingClientRect();
+  const style = getComputedStyle(element);
+  return (
+    rect.width > 0 &&
+    rect.height > 0 &&
+    style.display !== "none" &&
+    style.visibility !== "hidden" &&
+    parseFloat(style.opacity) > 0
+  );
+  }
+)(__SELECTOR__);
+"""
+
+_WAIT_TEXT_JS = r"""
+return (
+  function (text) {
+  const body = document.body;
+  if (!body) return false;
+  const haystack = body.innerText || body.textContent || "";
+  return haystack.indexOf(text) !== -1;
+  }
+)(__TEXT__);
+"""
+
+_WAIT_URL_JS = r"""
+return location.href.indexOf(__PREFIX__) === 0;
+"""
+
+_FIELD_STATE_JS = r"""
+const el = this;
+return (
+  function () {
+  const raw = el.value;
+  const value = raw === undefined || raw === null ? null : String(raw);
+  return {
+    tag: el.tagName ? el.tagName.toLowerCase() : "",
+    value: value,
+    text: value === null ? (el.textContent || "").slice(0, __MAX_TEXT__) : null,
+    type: el.getAttribute ? (el.getAttribute("type") || "").toLowerCase() : "",
+    disabled: !!el.disabled,
+    readonly: !!el.readOnly,
+  };
+  }
+)();
+"""
+
+
 class _ToolError(RuntimeError):
     """A caller-correctable error, returned as ``status="error"``."""
 
@@ -384,6 +515,256 @@ def _error(action: str, exc: BaseException, **extra: Any) -> dict[str, Any]:
     }
     payload.update(extra)
     return payload
+
+
+def _console_text(args: Any) -> str:
+    """Flatten one ``Runtime.consoleAPICalled`` argument list into text."""
+    if not isinstance(args, list):
+        return ""
+    parts: list[str] = []
+    for arg in args:
+        if not isinstance(arg, dict):
+            parts.append(str(arg))
+            continue
+        if "value" in arg:
+            value = arg["value"]
+            if isinstance(value, str):
+                parts.append(value)
+            elif value is None:
+                parts.append("null")
+            else:
+                parts.append(json.dumps(value, ensure_ascii=False, default=str))
+        elif arg.get("description"):
+            parts.append(str(arg["description"]))
+        elif arg.get("type"):
+            parts.append(f"<{arg['type']}>")
+    return " ".join(parts)[:_MAX_CONSOLE_TEXT]
+
+
+def _compress(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse repeats and keep the most recent entries."""
+    merged: list[dict[str, Any]] = []
+    for entry in entries:
+        if merged and merged[-1]["text"] == entry["text"]:
+            merged[-1]["count"] += 1
+            continue
+        merged.append({**entry, "count": 1})
+    for entry in merged:
+        if entry["count"] == 1:
+            del entry["count"]
+    return merged[-_MAX_CONSOLE_ITEMS:]
+
+
+class _PageWatch:
+    """Console output, page errors, and JavaScript dialogs for one tab.
+
+    pydoll delivers these events on its own loop, so the callbacks only append
+    to bounded deques; each tool call drains what arrived since the previous
+    one.
+
+    A dialog blocks the page, and the command that opened it (a click, say)
+    does not return until the dialog is answered. ``responder`` therefore runs
+    on a short-lived thread: the callback only records the dialog, and the
+    thread answers it while the blocked call waits.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._answers_lock = threading.Lock()
+        self._answers_done = threading.Condition(self._answers_lock)
+        self._answers = 0
+        self._console: deque[tuple[int, dict[str, Any]]] = deque(
+            maxlen=_MAX_CONSOLE_ENTRIES
+        )
+        self._errors: deque[tuple[int, dict[str, Any]]] = deque(
+            maxlen=_MAX_CONSOLE_ENTRIES
+        )
+        self._dialogs: deque[tuple[int, dict[str, Any]]] = deque(
+            maxlen=_MAX_CONSOLE_ENTRIES
+        )
+        self._console_seen = 0
+        self._errors_seen = 0
+        self._dialogs_seen = 0
+        self._next_seq = 0
+        self._network: dict[str, dict[str, Any]] = {}
+        self._network_order: deque[str] = deque()
+        self.callback_ids: list[int] = []
+
+    def _seq(self) -> int:
+        self._next_seq += 1
+        return self._next_seq
+
+    def on_console(self, event: dict) -> None:
+        try:
+            params = event.get("params") or {}
+            text = _console_text(params.get("args"))
+            if not text:
+                return
+            entry = {"level": str(params.get("type") or "log"), "text": text}
+            with self._lock:
+                self._console.append((self._seq(), entry))
+        except Exception as exc:  # noqa: BLE001 - one event must not stop the collector
+            logger.debug("Could not record a console event: %s", _format_error(exc))
+
+    def on_exception(self, event: dict) -> None:
+        try:
+            params = event.get("params") or {}
+            details = params.get("exceptionDetails") or {}
+            exception = details.get("exception") or {}
+            text = exception.get("description") or details.get("text") or ""
+            text = " ".join(str(text).split())[:_MAX_CONSOLE_TEXT]
+            if not text:
+                return
+            with self._lock:
+                self._errors.append((self._seq(), {"text": text}))
+        except Exception as exc:  # noqa: BLE001 - one event must not stop the collector
+            logger.debug("Could not record a page error: %s", _format_error(exc))
+
+    def on_request(self, event: dict) -> None:
+        try:
+            params = event.get("params") or {}
+            request = params.get("request") or {}
+            request_id = str(params.get("requestId") or "")
+            if not request_id:
+                return
+            entry = {
+                "id": request_id,
+                "method": str(request.get("method") or ""),
+                "url": str(request.get("url") or "")[:300],
+                "type": str(params.get("type") or ""),
+            }
+            with self._lock:
+                known = self._network.get(request_id)
+                if known is not None:
+                    known.update(entry)
+                    return
+                self._network[request_id] = entry
+                self._network_order.append(request_id)
+                while len(self._network_order) > _MAX_NETWORK_ENTRIES:
+                    self._network.pop(self._network_order.popleft(), None)
+        except Exception as exc:  # noqa: BLE001 - one event must not stop the collector
+            logger.debug("Could not record a request: %s", _format_error(exc))
+
+    def on_response(self, event: dict) -> None:
+        try:
+            params = event.get("params") or {}
+            response = params.get("response") or {}
+            request_id = str(params.get("requestId") or "")
+            with self._lock:
+                entry = self._network.get(request_id)
+                if entry is None:
+                    return
+                entry["status"] = response.get("status")
+                entry["mime"] = str(response.get("mimeType") or "")[:80]
+                if response.get("fromDiskCache") or response.get("fromServiceWorker"):
+                    entry["cached"] = True
+        except Exception as exc:  # noqa: BLE001 - one event must not stop the collector
+            logger.debug("Could not record a response: %s", _format_error(exc))
+
+    def on_failed(self, event: dict) -> None:
+        try:
+            params = event.get("params") or {}
+            request_id = str(params.get("requestId") or "")
+            with self._lock:
+                entry = self._network.get(request_id)
+                if entry is None:
+                    return
+                entry["failed"] = str(params.get("errorText") or "failed")[:120]
+        except Exception as exc:  # noqa: BLE001 - one event must not stop the collector
+            logger.debug("Could not record a failure: %s", _format_error(exc))
+
+    def network(self, limit: int, needle: str | None) -> list[dict[str, Any]]:
+        """Return the newest recorded requests, oldest first."""
+        with self._lock:
+            entries = [
+                dict(self._network[request_id])
+                for request_id in self._network_order
+                if request_id in self._network
+            ]
+        if needle:
+            entries = [
+                entry
+                for entry in entries
+                if needle in entry.get("url", "") or needle == entry.get("id")
+            ]
+        return entries[-limit:]
+
+    def clear_network(self) -> None:
+        with self._lock:
+            self._network.clear()
+            self._network_order.clear()
+
+    def on_dialog(
+        self, event: dict, responder: Callable[[dict[str, Any]], str]
+    ) -> None:
+        params = event.get("params") or {}
+        entry: dict[str, Any] = {
+            "type": str(params.get("type") or "alert"),
+            "message": str(params.get("message") or "")[:_MAX_DIALOG_CHARS],
+            "handled": "pending",
+        }
+        prompt = params.get("defaultPrompt")
+        if prompt:
+            entry["default_prompt"] = str(prompt)[:_MAX_DIALOG_CHARS]
+        with self._lock:
+            self._dialogs.append((self._seq(), entry))
+        with self._answers_lock:
+            self._answers += 1
+        threading.Thread(
+            target=self._answer, args=(responder, entry), daemon=True
+        ).start()
+
+    def _answer(
+        self, responder: Callable[[dict[str, Any]], str], entry: dict[str, Any]
+    ) -> None:
+        """Answer one dialog off the event loop; the blocked call then returns."""
+        try:
+            handled = responder(entry)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            handled = f"failed: {_format_error(exc)}"
+        with self._answers_lock:
+            entry["handled"] = handled
+            self._answers -= 1
+            self._answers_done.notify_all()
+
+    def take(
+        self,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+        """Return console entries, page errors, and the latest dialog since last time."""
+        with self._answers_lock:
+            while self._answers:
+                self._answers_done.wait()
+        with self._lock:
+            console = _compress(
+                [entry for seq, entry in self._console if seq > self._console_seen]
+            )
+            errors = _compress(
+                [entry for seq, entry in self._errors if seq > self._errors_seen]
+            )
+            dialogs = [
+                dict(entry) for seq, entry in self._dialogs if seq > self._dialogs_seen
+            ]
+            if self._console:
+                self._console_seen = self._console[-1][0]
+            if self._errors:
+                self._errors_seen = self._errors[-1][0]
+            if self._dialogs:
+                self._dialogs_seen = self._dialogs[-1][0]
+            return console, errors, dialogs[-1] if dialogs else None
+
+
+def _close_browser_gracefully(browser: Any) -> None:
+    """Ask Chrome to exit on its own so a persistent profile flushes to disk.
+
+    pydoll ends the process as soon as ``Browser.close`` returns, which leaves
+    the cookie database in a journal and loses the login the profile was meant
+    to keep. Waiting here gives Chrome the moment it needs to commit.
+    """
+    try:
+        browser.execute_command(BrowserCommands.close(), timeout=3)
+    except Exception:  # noqa: BLE001 - the process is stopped either way
+        return
+    time.sleep(_PROFILE_FLUSH_S)
 
 
 def _is_disconnected(exc: BaseException) -> bool:
@@ -418,12 +799,10 @@ def _coerce_timeout(value: float | None, default: float) -> float:
 
 
 def _coerce_seconds(value: str | None, default: float) -> float:
+    """Coerce an already validated seconds value; ``_wait`` checks the shape."""
     if value is None or value == "":
         return default
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError) as exc:
-        raise _ToolError("wait requires a number of seconds in value") from exc
+    seconds = float(value)
     if seconds < 0:
         raise _ToolError("wait seconds cannot be negative")
     return min(seconds, _MAX_WAIT_S)
@@ -592,16 +971,188 @@ def _element(tab: Any, target: str | None, timeout: float) -> Any:
     return element
 
 
-def _click(element: Any) -> str:
+def _probe_bool(element: Any, name: str) -> bool:
+    """Read one boolean element probe; a probe that cannot run is not a failure."""
+    probe = getattr(element, name, None)
+    if probe is None:
+        return True
+    try:
+        return bool(probe() if callable(probe) else probe)
+    except Exception:  # noqa: BLE001 - a probe that cannot run must not block
+        return True
+
+
+def _require_actionable(element: Any, action: str) -> None:
+    """Refuse an action a user could not perform, before it silently no-ops."""
+    if not _probe_bool(element, "is_visible"):
+        raise _ToolError(
+            "target is not visible; it may be hidden, zero-size, or scrolled away"
+        )
+    if action == "hover":
+        return
+    if not _probe_bool(element, "is_enabled"):
+        raise _ToolError("target is disabled; wait for it to become enabled and retry")
+    if action not in ("click", "type"):
+        return
+    # ``type`` clicks the field to focus it, so both actions need the point.
+    try:
+        element.scroll_into_view()
+    except Exception:  # noqa: BLE001, S110 - pydoll scrolls again inside click
+        pass
+    if not _probe_bool(element, "is_on_top"):
+        raise _ToolError(
+            "target is covered by another element at its centre point; dismiss "
+            "the overlay (cookie banner, modal, sticky header) or target the "
+            "covering control"
+        )
+
+
+def _click(element: Any) -> tuple[str, str | None]:
+    """Click natively, falling back to a JavaScript click that is reported."""
     try:
         element.click()
-        return "native"
+        return "native", None
     except Exception as native_error:  # noqa: BLE001 - fall back to a JS click
         try:
             element.click_using_js()
         except Exception:  # noqa: BLE001 - report the original native failure
             raise native_error from None
-        return "js"
+        return "js", (
+            "native click failed; used a JavaScript click, which ignores "
+            "overlays and pointer-events"
+        )
+
+
+def _probe(tab: Any) -> dict[str, Any] | None:
+    """Read the page's mutation counter and URL, installing the counter once."""
+    try:
+        data = _remote_value(
+            tab.execute_script(
+                _PROBE_JS,
+                return_by_value=True,
+                allow_unsafe_eval_blocked_by_csp=True,
+            )
+        )
+    except Exception:  # noqa: BLE001 - the effect probe is optional
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) else 0
+
+
+def _effect(tab: Any, before: dict[str, Any] | None) -> dict[str, Any]:
+    """Describe what an action changed, when the page can say."""
+    after = _probe(tab)
+    if before is None or after is None:
+        return {}
+    if after.get("url") != before.get("url"):
+        return {"changed": True, "effect": "navigation"}
+    mutations = _count(after.get("mutations")) - _count(before.get("mutations"))
+    if mutations > 0:
+        return {"changed": True, "effect": "dom", "mutations": mutations}
+    return {"changed": False, "effect": "none", "warning": _NO_EFFECT_WARNING}
+
+
+def _field_state(element: Any) -> dict[str, Any] | None:
+    """Read a form field's live value so typing can be verified."""
+    script = _FIELD_STATE_JS.replace("__MAX_TEXT__", str(_MAX_CONSOLE_TEXT))
+    try:
+        data = _remote_value(element.execute_script(script, return_by_value=True))
+    except Exception:  # noqa: BLE001 - verification is best-effort
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _verify_typed(state: dict[str, Any] | None, expected: str) -> dict[str, Any]:
+    """Report whether the field holds the typed text after typing it."""
+    if state is None:
+        return {}
+    actual = state.get("value")
+    if actual is None:
+        actual_text = str(state.get("text") or "")
+        verified = expected in actual_text
+    else:
+        actual_text = str(actual)
+        verified = actual_text == expected
+    if verified:
+        return {"verified": True}
+    payload: dict[str, Any] = {
+        "verified": False,
+        "actual_length": len(actual_text),
+        "warning": (
+            "the field value differs after typing; the page may mask, truncate, "
+            "or reject the text"
+        ),
+    }
+    if str(state.get("type") or "") != "password":
+        payload["actual"] = actual_text[:80]
+    return payload
+
+
+def _wait(
+    tab: Any, target: str | None, value: str | None, timeout: float
+) -> dict[str, Any]:
+    """Sleep, or wait for a selector, text, or URL prefix."""
+    budget = min(timeout, _MAX_WAIT_S)
+    if isinstance(target, str) and target.strip():
+        return _wait_for(tab, "selector", _selector(target), target, budget)
+    text = (value or "").strip()
+    if not text or _INT_RE.fullmatch(text) or _FLOAT_RE.fullmatch(text):
+        seconds = _coerce_seconds(text or None, 1.0)
+        time.sleep(seconds)
+        return {
+            "status": "ok",
+            "action": "wait",
+            "seconds": seconds,
+            **_page_info(tab),
+        }
+    if text.startswith("selector="):
+        selector = text[len("selector=") :].strip()
+        if not selector:
+            raise _ToolError("selector= requires a CSS or XPath selector")
+        return _wait_for(tab, "selector", selector, selector, budget)
+    for prefix in ("text*=", "text="):
+        if text.startswith(prefix):
+            needle = text[len(prefix) :]
+            if not needle:
+                raise _ToolError(f"{prefix} requires text to wait for")
+            return _wait_for(tab, "text", needle, f"text {needle!r}", budget)
+    if text.startswith("url=") or _SCHEME_RE.match(text):
+        prefix = text[len("url=") :].strip() if text.startswith("url=") else text
+        prefix = prefix.rstrip("*")
+        if not prefix:
+            raise _ToolError("url= requires a URL prefix to wait for")
+        return _wait_for(tab, "url", prefix, f"url starting with {prefix!r}", budget)
+    raise _ToolError(
+        "wait value must be seconds, text=..., url=..., or selector=...; "
+        "or pass target=selector"
+    )
+
+
+def _wait_for(
+    tab: Any, kind: str, needle: str, description: str, timeout: float
+) -> dict[str, Any]:
+    if kind == "selector":
+        script = _WAIT_SELECTOR_JS.replace("__SELECTOR__", json.dumps(needle))
+    elif kind == "text":
+        script = _WAIT_TEXT_JS.replace("__TEXT__", json.dumps(needle))
+    else:
+        script = _WAIT_URL_JS.replace("__PREFIX__", json.dumps(needle))
+    try:
+        tab.wait_for_script(script, timeout=timeout)
+    except TimeoutException as exc:
+        raise _ToolError(
+            f"timed out after {timeout:g}s waiting for {description}"
+        ) from exc
+    return {
+        "status": "ok",
+        "action": "wait",
+        "waited_for": description,
+        "timeout_s": timeout,
+        **_page_info(tab),
+    }
 
 
 def _press(tab: Any, value: str | None) -> None:
@@ -729,25 +1280,45 @@ def _perform(
     if action == "navigate":
         assert url is not None
         tab.go_to(url, timeout=max(1, int(timeout)))
-        _settle(tab, timeout)
-        return {"status": "ok", "action": "navigate", **_page_info(tab)}
+        settled = _settle(tab, timeout)
+        return {
+            "status": "ok",
+            "action": "navigate",
+            "settled": settled,
+            **_page_info(tab),
+        }
 
     if action == "click":
         element = _element(tab, target, timeout)
-        method = _click(element)
-        _settle(tab, timeout)
-        return {
+        _require_actionable(element, "click")
+        before = _probe(tab)
+        method, method_warning = _click(element)
+        settled = _settle(tab, timeout)
+        effect = _effect(tab, before)
+        payload: dict[str, Any] = {
             "status": "ok",
             "action": "click",
             "target": target,
             "method": method,
+            "settled": settled,
             **_page_info(tab),
+            **effect,
         }
+        warnings = [text for text in (method_warning, effect.get("warning")) if text]
+        if warnings:
+            payload["warning"] = "; ".join(warnings)
+        return payload
 
     if action == "type":
         if value is None:
             raise _ToolError("type requires value=text")
         element = _element(tab, target, timeout)
+        _require_actionable(element, "type")
+        if not _probe_bool(element, "is_editable"):
+            raise _ToolError(
+                "target does not accept text; it is not an input, textarea, or "
+                "contenteditable, or it is disabled or read-only"
+            )
         element.clear()
         method = "keys"
         try:
@@ -759,22 +1330,35 @@ def _perform(
             except Exception:  # noqa: BLE001 - report the original typing failure
                 raise type_error from None
             method = "js"
-        return {
+        settled = _settle(tab, timeout)
+        payload = {
             "status": "ok",
             "action": "type",
             "target": target,
             "value_length": len(value),
             "method": method,
+            "settled": settled,
             **_page_info(tab),
         }
+        payload.update(_verify_typed(_field_state(element), value))
+        return payload
 
     if action == "press":
+        before = _probe(tab)
         _press(tab, value)
-        _settle(tab, timeout)
-        return {"status": "ok", "action": "press", "key": value, **_page_info(tab)}
+        settled = _settle(tab, timeout)
+        return {
+            "status": "ok",
+            "action": "press",
+            "key": value,
+            "settled": settled,
+            **_page_info(tab),
+            **_effect(tab, before),
+        }
 
     if action == "hover":
         element = _element(tab, target, timeout)
+        _require_actionable(element, "hover")
         element.hover()
         return {"status": "ok", "action": "hover", "target": target, **_page_info(tab)}
 
@@ -782,15 +1366,25 @@ def _perform(
         if value is None:
             raise _ToolError("select requires value=option value")
         element = _element(tab, target, timeout)
+        _require_actionable(element, "select")
         selected = _select(element, value)
-        _settle(tab, timeout)
-        return {
+        settled = _settle(tab, timeout)
+        payload = {
             "status": "ok",
             "action": "select",
             "target": target,
             "selected": selected,
+            "settled": settled,
             **_page_info(tab),
         }
+        if selected is not None:
+            payload["verified"] = str(selected) == value
+            if not payload["verified"]:
+                payload["warning"] = (
+                    f"the field holds {selected!r} after selecting {value!r}; "
+                    "the option may be absent or disabled"
+                )
+        return payload
 
     if action == "scroll":
         _scroll(tab, value)
@@ -799,18 +1393,21 @@ def _perform(
     if action in ("back", "forward"):
         previous_url = _page_info(tab).get("url")
         tab.execute_script(f"history.{action}()")
-        _settle(tab, timeout, previous_url=previous_url)
-        return {"status": "ok", "action": action, **_page_info(tab)}
+        settled = _settle(tab, timeout, previous_url=previous_url)
+        return {"status": "ok", "action": action, "settled": settled, **_page_info(tab)}
 
     if action == "reload":
         tab.refresh()
-        _settle(tab, timeout)
-        return {"status": "ok", "action": "reload", **_page_info(tab)}
+        settled = _settle(tab, timeout)
+        return {
+            "status": "ok",
+            "action": "reload",
+            "settled": settled,
+            **_page_info(tab),
+        }
 
     if action == "wait":
-        seconds = _coerce_seconds(value, 1.0)
-        time.sleep(seconds)
-        return {"status": "ok", "action": "wait", "seconds": seconds, **_page_info(tab)}
+        return _wait(tab, target, value, timeout)
 
     raise _ToolError(
         f"Unknown action {action!r}"
@@ -840,11 +1437,28 @@ def _browser_action(
         url = (
             session._check_url(_normalize_url(value)) if action == "navigate" else None
         )
-        return session._run(
+        before = _tab_count(session) if action in _TAB_ACTIONS else None
+        payload = session._run(
             lambda tab: _perform(tab, action, target, value, timeout_s, url=url)
         )
     except Exception as exc:  # noqa: BLE001 - returned as tool status
+        extra.update(session.take_diagnostics())
         return _error(action, exc, **extra)
+    if before is not None and payload.get("status") == "ok":
+        after = _tab_count(session)
+        if after is not None and after != before:
+            payload["tabs"] = after
+            payload["tabs_changed"] = after - before
+            if after > before:
+                payload["warning"] = "; ".join(
+                    text
+                    for text in (
+                        payload.get("warning"),
+                        "a new tab opened; call browser_tabs to switch to it",
+                    )
+                    if text
+                )
+    return payload
 
 
 def _clamp_nodes(value: int | str) -> int:
@@ -951,6 +1565,296 @@ def _evaluate(session: BrowserSession, script: TextArg, await_promise: bool) -> 
     return {"status": "ok", "action": "evaluate", **data}
 
 
+def _tab_count(session: BrowserSession) -> int | None:
+    """How many page tabs are open, or ``None`` when that cannot be read."""
+    browser = session._browser
+    if browser is None:
+        return None
+    try:
+        return len(browser.get_opened_tabs())
+    except Exception:  # noqa: BLE001 - the action already succeeded
+        return None
+
+
+def _coerce_limit(value: int | str | None, default: int = 20) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        limit = int(value)
+    except (TypeError, ValueError) as exc:
+        raise _ToolError("limit must be an integer") from exc
+    return max(1, min(limit, _MAX_NETWORK_ITEMS))
+
+
+def _tab_text(tab: Any) -> str:
+    """Lowercased URL and title of a tab, for matching by substring."""
+    parts: list[str] = []
+    for name in ("current_url", "title"):
+        try:
+            parts.append(str(getattr(tab, name)()))
+        except Exception:  # noqa: BLE001, S112 - a tab may have gone away
+            continue
+    return " ".join(parts).lower()
+
+
+def _resolve_tab(session: BrowserSession, tabs: list[Any], value: str | None) -> Any:
+    if not tabs:
+        raise _ToolError("no tabs are open; use browser_tabs with action=new")
+    text = (value or "").strip()
+    if not text:
+        return session._tab if session._tab is not None else tabs[-1]
+    if _INT_RE.fullmatch(text):
+        index = int(text)
+        if not 0 <= index < len(tabs):
+            raise _ToolError(
+                f"tab index {index} is out of range; {len(tabs)} tabs are open"
+            )
+        return tabs[index]
+    needle = text.lower()
+    matches = [tab for tab in tabs if needle in _tab_text(tab)]
+    if not matches:
+        raise _ToolError(f"no tab matches {value!r}; call browser_tabs to list them")
+    if len(matches) > 1:
+        raise _ToolError(
+            f"{len(matches)} tabs match {value!r}; pass an index from browser_tabs"
+        )
+    return matches[0]
+
+
+def _tabs_action(
+    session: BrowserSession, action: str, value: TextArg | None, timeout: float
+) -> dict:
+    action = str(action).strip().lower()
+    if action not in ("list", "new", "switch", "close"):
+        return _error("tabs", _ToolError("action must be list, new, switch, or close"))
+    text = _text_arg(value)
+    with session._lock:
+        try:
+            timeout_s = _coerce_timeout(timeout, session.timeout)
+            tabs = session._tab_list()
+            closed_all = False
+            if action == "new":
+                browser = session._browser
+                assert browser is not None  # _tab_list started it above
+                url = session._check_url(_normalize_url(text)) if text else None
+                tab = browser.new_tab()
+                session._tab = tab
+                session._install_watch(tab)
+                if url is not None:
+                    tab.go_to(url, timeout=max(1, int(timeout_s)))
+                    _settle(tab, timeout_s)
+                tabs = session._tab_list()
+            elif action == "switch":
+                session._tab = _resolve_tab(session, tabs, text)
+            elif action == "close":
+                target = _resolve_tab(session, tabs, text)
+                target_id = getattr(target, "target_id", None)
+                target.close()
+                if target_id is not None:
+                    session._watched.discard(target_id)
+                tabs = [
+                    tab
+                    for tab in session._tab_list()
+                    if getattr(tab, "target_id", None) != target_id
+                ]
+                if not tabs:
+                    session._reset()
+                    closed_all = True
+        except Exception as exc:  # noqa: BLE001 - returned as tool status
+            payload = _error("tabs", exc)
+            payload.update(session.take_diagnostics())
+            return payload
+    entries = [session._tab_entry(index, tab) for index, tab in enumerate(tabs)]
+    payload = {
+        "status": "ok",
+        "action": action,
+        "count": len(entries),
+        "tabs": entries,
+        "active": next((entry["index"] for entry in entries if entry["active"]), None),
+    }
+    if closed_all:
+        payload["closed_all"] = True
+    payload.update(session.take_diagnostics())
+    return payload
+
+
+def _cookie_list(value: str | None) -> list[dict[str, Any]]:
+    """Parse a JSON cookie list, a ``Cookie:`` header, or a saved state file."""
+    text = (value or "").strip()
+    if not text:
+        raise _ToolError(
+            "cookies set requires value=JSON or a Cookie header such as a=1; b=2"
+        )
+    if text.startswith(("[", "{")):
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise _ToolError(f"cookies value is not valid JSON: {exc.msg}") from exc
+        if isinstance(data, dict):
+            data = data.get("cookies", [data])
+        if not isinstance(data, list) or not data:
+            raise _ToolError("cookies JSON must be a list of cookie objects")
+        cookies: list[dict[str, Any]] = []
+        for item in data:
+            if not isinstance(item, dict) or "name" not in item or "value" not in item:
+                raise _ToolError("each cookie needs a name and a value")
+            cookies.append({key: item[key] for key in _COOKIE_FIELDS if key in item})
+        return cookies
+    cookies = []
+    for part in text.split(";"):
+        name, separator, cookie_value = part.strip().partition("=")
+        if not separator or not name.strip():
+            continue
+        cookies.append({"name": name.strip(), "value": cookie_value.strip()})
+    if not cookies:
+        raise _ToolError("the cookie header did not contain any name=value pair")
+    return cookies
+
+
+def _cookie_records(cookies: Any) -> list[dict[str, Any]]:
+    if not isinstance(cookies, list):
+        return []
+    return [
+        {key: cookie[key] for key in _COOKIE_FIELDS if key in cookie}
+        for cookie in cookies
+        if isinstance(cookie, dict)
+    ]
+
+
+def _cookies_action(
+    session: BrowserSession, action: str, value: TextArg | None
+) -> dict:
+    action = str(action).strip().lower()
+    if action not in ("get", "set", "clear", "save", "load"):
+        return _error(
+            "cookies",
+            _ToolError("action must be get, set, clear, save, or load"),
+        )
+    text = _text_arg(value)
+    with session._lock:
+        try:
+            if action == "get":
+                cookies = _cookie_records(session._run(lambda tab: tab.get_cookies()))
+                if text:
+                    cookies = [
+                        cookie
+                        for cookie in cookies
+                        if text in str(cookie.get("name", ""))
+                        or text in str(cookie.get("domain", ""))
+                    ]
+                cookies = cookies[-_MAX_COOKIE_ITEMS:]
+                return {
+                    "status": "ok",
+                    "action": "get",
+                    "count": len(cookies),
+                    "cookies": cookies,
+                    **session.take_diagnostics(),
+                }
+            if action == "clear":
+                session._run(lambda tab: tab.delete_all_cookies())
+                return {
+                    "status": "ok",
+                    "action": "clear",
+                    **session.take_diagnostics(),
+                }
+            if action == "save":
+                if not text:
+                    raise _ToolError("cookies save requires value=path")
+                target = Path(text).expanduser()
+                state = session._run(
+                    lambda tab: {
+                        "url": tab.current_url(),
+                        "cookies": _cookie_records(tab.get_cookies()),
+                    }
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(json.dumps(state, indent=2), encoding="utf-8")
+                return {
+                    "status": "ok",
+                    "action": "save",
+                    "path": str(target.absolute()),
+                    "count": len(state["cookies"]),
+                }
+            if action == "load":
+                if not text:
+                    raise _ToolError("cookies load requires value=path")
+                source = Path(text).expanduser()
+                try:
+                    state = json.loads(source.read_text(encoding="utf-8"))
+                except OSError as exc:
+                    raise _ToolError(f"could not read {source}: {exc}") from exc
+                except json.JSONDecodeError as exc:
+                    raise _ToolError(f"{source} is not valid JSON: {exc.msg}") from exc
+                return _apply_cookies(session, _cookie_list(json.dumps(state)))
+            return _apply_cookies(session, _cookie_list(text))
+        except Exception as exc:  # noqa: BLE001 - returned as tool status
+            payload = _error("cookies", exc)
+            payload.update(session.take_diagnostics())
+            return payload
+
+
+def _apply_cookies(session: BrowserSession, cookies: list[dict[str, Any]]) -> dict:
+    """Set cookies, defaulting their scope to the current page when unset."""
+
+    def apply(tab: Any) -> dict[str, Any]:
+        page_url = None
+        for cookie in cookies:
+            if "url" not in cookie and "domain" not in cookie:
+                if page_url is None:
+                    page_url = tab.current_url()
+                cookie["url"] = page_url
+        tab.set_cookies(cookies)
+        return {"status": "ok", "action": "set", "count": len(cookies)}
+
+    return session._run(apply)
+
+
+def _network_action(
+    session: BrowserSession, action: str, value: TextArg | None, limit: int | str
+) -> dict:
+    action = str(action).strip().lower()
+    if action not in ("requests", "clear", "body"):
+        return _error("network", _ToolError("action must be requests, clear, or body"))
+    text = _text_arg(value)
+    with session._lock:
+        try:
+            if action == "clear":
+                session._run(lambda tab: None)
+                session._watch.clear_network()
+                return {
+                    "status": "ok",
+                    "action": "clear",
+                    **session.take_diagnostics(),
+                }
+            if action == "body":
+                if not text:
+                    raise _ToolError(
+                        "network body requires value=request id from browser_network"
+                    )
+                body = session._run(lambda tab: tab.get_network_response_body(text))
+                body = "" if body is None else str(body)
+                return {
+                    "status": "ok",
+                    "action": "body",
+                    "id": text,
+                    "body": body[:_MAX_NETWORK_BODY],
+                    "truncated": len(body) > _MAX_NETWORK_BODY,
+                }
+            session._run(lambda tab: None)
+            entries = session._watch.network(_coerce_limit(limit), text)
+            return {
+                "status": "ok",
+                "action": "requests",
+                "count": len(entries),
+                "requests": entries,
+                **session.take_diagnostics(),
+            }
+        except Exception as exc:  # noqa: BLE001 - returned as tool status
+            payload = _error("network", exc)
+            payload.update(session.take_diagnostics())
+            return payload
+
+
 def _screenshot_path(path: str | None) -> Path:
     if path:
         target = Path(path).expanduser()
@@ -1048,6 +1952,19 @@ class BrowserSession:
     Pass ``allowed_schemes`` to extend or restrict that set, or ``url_policy``
     to reject individual normalized URLs. For example, a server can block
     private hosts with a callback while keeping the default scheme policy.
+
+    ``dialog_policy`` decides what happens to ``alert``, ``confirm``,
+    ``beforeunload``, and ``prompt`` dialogs: ``dismiss`` (default) cancels
+    them and ``accept`` confirms them. Either way the dialog is reported in the
+    action result under ``dialog``, so a step that was cancelled by a prompt
+    says so instead of hanging.
+
+    ``user_data_dir`` points Chrome at a profile directory that outlives the
+    process, so cookies, storage, and history survive a restart. Chrome writes
+    that profile during shutdown, so ``close`` asks the browser to exit and
+    waits briefly before ending the process; without that wait the cookie
+    database is left half-written and the login is lost. Without a directory,
+    every run starts from an empty temporary profile.
     """
 
     def __init__(
@@ -1058,10 +1975,18 @@ class BrowserSession:
         window_size: tuple[int, int] = _DEFAULT_WINDOW_SIZE,
         allowed_schemes: Iterable[str] | None = None,
         url_policy: Callable[[str], bool] | None = None,
+        dialog_policy: DialogPolicy = _DEFAULT_DIALOG_POLICY,
+        user_data_dir: str | Path | None = None,
     ) -> None:
+        if dialog_policy not in ("dismiss", "accept"):
+            raise ValueError("dialog_policy must be dismiss or accept")
         self.headless = headless
         self.timeout = timeout
         self.window_size = window_size
+        self.dialog_policy: DialogPolicy = dialog_policy
+        self.user_data_dir = (
+            Path(user_data_dir).expanduser().resolve() if user_data_dir else None
+        )
         if allowed_schemes is None:
             self.allowed_schemes = _DEFAULT_ALLOWED_SCHEMES
         else:
@@ -1075,6 +2000,8 @@ class BrowserSession:
         self._lock = threading.RLock()
         self._browser: Any | None = None
         self._tab: Any | None = None
+        self._watch = _PageWatch()
+        self._watched: set[str] = set()
         self._recorder: _VideoRecorder | None = None
         self.last_recording: dict[str, Any] | None = None
         self._exit_hook_registered = False
@@ -1101,19 +2028,101 @@ class BrowserSession:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--hide-scrollbars")
+        if self.user_data_dir is not None:
+            # pydoll only adds a temporary --user-data-dir when none is set,
+            # so this one makes the profile outlive the process.
+            self.user_data_dir.mkdir(parents=True, exist_ok=True)
+            options.add_argument(f"--user-data-dir={self.user_data_dir}")
         browser = Chrome(options=options)
         tab = browser.start()
         self._browser = browser
         self._tab = tab
+        self._install_watch(tab)
         if not self._exit_hook_registered:
             _register_exit_hook(self.close)
             self._exit_hook_registered = True
         return tab
 
+    def _install_watch(self, tab: Any) -> None:
+        """Subscribe *tab* to console, error, dialog, and network events."""
+        watch = self._watch
+        target = getattr(tab, "target_id", None)
+        if target is not None:
+            if target in self._watched:
+                return
+            self._watched.add(target)
+
+        def responder(dialog: dict[str, Any]) -> str:
+            return self._answer_dialog(tab, dialog)
+
+        try:
+            tab.enable_page_events()
+            tab.enable_runtime_events()
+            tab.enable_network_events()
+            watch.callback_ids.extend(
+                [
+                    tab.on(
+                        PageEvent.JAVASCRIPT_DIALOG_OPENING,
+                        lambda event: watch.on_dialog(event, responder),
+                    ),
+                    tab.on(RuntimeEvent.CONSOLE_API_CALLED, watch.on_console),
+                    tab.on(RuntimeEvent.EXCEPTION_THROWN, watch.on_exception),
+                    tab.on(NetworkEvent.REQUEST_WILL_BE_SENT, watch.on_request),
+                    tab.on(NetworkEvent.RESPONSE_RECEIVED, watch.on_response),
+                    tab.on(NetworkEvent.LOADING_FAILED, watch.on_failed),
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostics are best-effort
+            logger.warning("Could not enable page diagnostics: %s", _format_error(exc))
+
     def _get_tab(self) -> Any:
         if self._tab is None:
             return self._start()
         return self._tab
+
+    def _tab_list(self) -> list[Any]:
+        """Live page tabs, oldest first, each with diagnostics installed."""
+        browser = self._browser
+        if browser is None:
+            return [self._get_tab()]
+        tabs = list(browser.get_opened_tabs())
+        for tab in tabs:
+            self._install_watch(tab)
+        active = getattr(self._tab, "target_id", None)
+        if active is None or all(
+            getattr(tab, "target_id", None) != active for tab in tabs
+        ):
+            self._tab = tabs[-1] if tabs else None
+        return tabs
+
+    def _tab_entry(self, index: int, tab: Any) -> dict[str, Any]:
+        entry: dict[str, Any] = {"index": index, **_page_info(tab)}
+        active = getattr(self._tab, "target_id", None)
+        entry["active"] = active is not None and (
+            getattr(tab, "target_id", None) == active
+        )
+        return entry
+
+    def take_diagnostics(self) -> dict[str, Any]:
+        """Return console output, page errors, and a new dialog since the last call."""
+        console, errors, dialog = self._watch.take()
+        payload: dict[str, Any] = {}
+        if console:
+            payload["console"] = console
+        if errors:
+            payload["errors"] = errors
+        if dialog is not None:
+            payload["dialog"] = dialog
+        return payload
+
+    def _answer_dialog(self, tab: Any, dialog: dict[str, Any]) -> str:
+        """Answer a dialog per ``dialog_policy``; runs off pydoll's event loop."""
+        accept = self.dialog_policy == "accept"
+        prompt = None
+        if accept and dialog.get("type") == "prompt":
+            prompt = dialog.get("default_prompt")
+        tab.handle_dialog(accept=accept, prompt_text=prompt)
+        return "accepted" if accept else "dismissed"
 
     def _reset(self) -> None:
         recorder, self._recorder = self._recorder, None
@@ -1124,7 +2133,11 @@ class BrowserSession:
                 _ToolError("browser disconnected; the recording was discarded"),
             )
         browser, self._browser, self._tab = self._browser, None, None
+        self._watch = _PageWatch()
+        self._watched = set()
         if browser is not None:
+            if self.user_data_dir is not None:
+                _close_browser_gracefully(browser)
             try:
                 browser.stop()
             except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
@@ -1133,12 +2146,17 @@ class BrowserSession:
     def _run(self, operation: Any) -> Any:
         with self._lock:
             try:
-                return operation(self._get_tab())
+                tab = self._get_tab()
+                result = operation(tab)
             except Exception as exc:
                 if self._tab is None or not _is_disconnected(exc):
                     raise
                 self._reset()
-            return operation(self._get_tab())
+                tab = self._get_tab()
+                result = operation(tab)
+            if isinstance(result, dict):
+                result.update(self.take_diagnostics())
+            return result
 
     def close(self) -> bool:
         """Stop the browser if it is running; return whether one was open."""
@@ -1160,8 +2178,12 @@ class BrowserSession:
             else:
                 self.last_recording = None
             browser, self._browser, self._tab = self._browser, None, None
+            self._watch = _PageWatch()
+            self._watched = set()
             if browser is None:
                 return False
+            if self.user_data_dir is not None:
+                _close_browser_gracefully(browser)
             try:
                 browser.stop()
             except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
@@ -1230,7 +2252,13 @@ class BrowserSession:
         nav = self.browser("navigate", value=url, timeout=timeout)
         if nav["status"] != "ok":
             return {**nav, "action": "open"}
-        return {**self.snapshot(max_nodes, format), "action": "open"}
+        payload = {**self.snapshot(max_nodes, format), "action": "open"}
+        for key in ("console", "errors"):
+            if key in nav:
+                payload[key] = nav[key] + payload.get(key, [])
+        if "dialog" in nav and "dialog" not in payload:
+            payload["dialog"] = nav["dialog"]
+        return payload
 
     def snapshot(
         self,
@@ -1253,6 +2281,28 @@ class BrowserSession:
     def evaluate(self, script: TextArg, await_promise: bool = True) -> dict:
         """Run JavaScript in the page; see ``browser_evaluate``."""
         return _evaluate(self, script, await_promise)
+
+    def tabs(
+        self,
+        action: str = "list",
+        value: TextArg | None = None,
+        timeout: float = _DEFAULT_TIMEOUT_S,
+    ) -> dict:
+        """List, open, switch, or close tabs; see ``browser_tabs``."""
+        return _tabs_action(self, action, value, timeout)
+
+    def cookies(self, action: str = "get", value: TextArg | None = None) -> dict:
+        """Read, write, clear, save, or load cookies; see ``browser_cookies``."""
+        return _cookies_action(self, action, value)
+
+    def network(
+        self,
+        action: str = "requests",
+        value: TextArg | None = None,
+        limit: int | str = 20,
+    ) -> dict:
+        """Inspect recorded requests; see ``browser_network``."""
+        return _network_action(self, action, value, limit)
 
     def tools(
         self,
@@ -1551,19 +2601,36 @@ def browser(
             ``url_policy`` to change that.
         click: ``target`` is an ``@ref`` from ``browser_snapshot``, a CSS
             selector, an XPath expression, ``css=...``, ``xpath=...``,
-            ``text=Exact text``, or ``text*=Partial text``. Falls back to a
-            JavaScript click when the native click is blocked.
+            ``text=Exact text``, or ``text*=Partial text``. The click is
+            refused, before it happens, when the element is hidden, disabled,
+            or covered by an overlay at its centre point. The result reports
+            ``changed`` and ``effect`` (``dom``, ``navigation``, or ``none``),
+            and a JavaScript fallback is flagged in ``warning``.
         type: ``target`` plus ``value`` text. Clears the field first, then
-            types, so the field ends up containing exactly ``value``.
+            types. The field is read back and ``verified`` says whether it now
+            holds exactly ``value``; a mismatch adds ``actual``, unless the
+            field is a password.
         press: ``value`` is a key name (``Enter``, ``Tab``, ``Escape``,
-            ``ArrowDown``) or a combination (``Control+A``).
+            ``ArrowDown``) or a combination (``Control+A``). Reports
+            ``changed``/``effect`` like ``click``.
         hover: ``target`` is moved over with the mouse.
         select: ``target`` is a ``<select>`` and ``value`` is the option value;
-            fires ``input`` and ``change`` events.
+            fires ``input`` and ``change`` events, then reports ``verified``.
         scroll: ``value`` is ``down``, ``up``, ``top``, ``bottom``, or a pixel
             count (positive scrolls down, negative up).
         back / forward / reload: navigate browser history or reload.
-        wait: ``value`` is seconds to sleep (default 1, capped at 30).
+        wait: wait for a condition instead of sleeping where possible.
+            ``target`` waits for that selector to be visible; ``value``
+            accepts ``text=Done`` (or ``text*=Don``) for body text,
+            ``url=https://example.com/next`` for a URL prefix, and
+            ``selector=#done`` for a selector. A number sleeps that many
+            seconds (default 1, capped at 30). A timeout returns
+            ``status="error"`` naming what it waited for.
+    Every result may also carry diagnostics collected since the previous call:
+    ``console`` (page console output, repeats collapsed), ``errors`` (uncaught
+    page exceptions), and ``dialog`` (a dialog that opened, with ``handled``).
+    Dialogs are answered as they open, so a ``confirm()`` never blocks a step;
+    ``dialog_policy="accept"`` on the session confirms them instead.
 
     ``timeout`` bounds element lookup, page load, and the short settle wait
     after actions that can navigate or load data (seconds, default 15).
@@ -1610,8 +2677,87 @@ def browser_snapshot(
     Interactive elements and landmarks are kept first when ``max_nodes``
     truncates a long page. Every call clears and reassigns refs, so take a
     fresh snapshot after navigation or DOM changes.
+
+    Like every browser call, the result may also carry ``console``, ``errors``,
+    and ``dialog`` collected since the previous call.
     """
     return _default_session.snapshot(max_nodes, format)
+
+
+def browser_tabs(
+    action: str = "list",
+    value: TextArg | None = None,
+    timeout: float = _DEFAULT_TIMEOUT_S,
+) -> dict:
+    """List, open, switch, or close browser tabs.
+
+    ``action`` is one of ``list``, ``new``, ``switch``, or ``close``. The
+    active tab is the one every other browser tool acts on.
+
+    - ``list``: every page tab, oldest first, with ``index``, ``url``,
+      ``title``, and ``active``.
+    - ``new``: opens a tab; ``value`` is an optional URL to load in it, which
+      makes the new tab active.
+    - ``switch``: makes a tab active. ``value`` is an ``index`` from the list,
+      or a substring of its URL or title; an ambiguous match fails with the
+      candidates instead of guessing.
+    - ``close``: closes the tab named by ``value`` (default: the active one)
+      and activates the newest remaining tab. Closing the last tab stops the
+      browser; the next call starts a fresh one.
+
+    Returns ``status``, ``action``, ``count``, ``tabs``, and ``active``.
+    ``closed_all`` is set when the last tab was closed.
+    """
+    return _default_session.tabs(action, value, timeout)
+
+
+def browser_cookies(
+    action: str = "get",
+    value: TextArg | None = None,
+) -> dict:
+    """Read, write, clear, save, or load cookies for the current browser context.
+
+    ``get`` returns ``name``, ``value``, ``domain``, ``path``, ``expires``,
+    ``httpOnly``, ``secure``, and ``sameSite`` for each cookie; ``value``
+    filters by name or domain substring. ``set`` accepts a JSON list of cookie
+    objects or a raw ``Cookie:`` header such as ``a=1; b=2``; cookies without a
+    ``domain`` or ``url`` are scoped to the current page. ``clear`` removes
+    every cookie in the context.
+
+    ``save`` writes ``{"url": ..., "cookies": [...]}`` to ``value`` and
+    ``load`` restores that file, which is how a login survives a fresh browser
+    when a persistent profile is not in use. ``load`` re-checks nothing: only
+    load files you produced.
+
+    Returns ``status``, ``action``, and ``count``, plus ``cookies`` for
+    ``get`` and ``path`` for ``save``.
+    """
+    return _default_session.cookies(action, value)
+
+
+def browser_network(
+    action: str = "requests",
+    value: TextArg | None = None,
+    limit: int | str = 20,
+) -> dict:
+    """Inspect the requests the page made.
+
+    Network events are recorded for every tab from the moment the browser
+    starts, so this answers "did the request go out, and what came back"
+    without a second click.
+
+    - ``requests``: the newest ``limit`` requests, oldest first, each with
+      ``id``, ``method``, ``url``, ``type``, ``status``, ``mime``, and
+      ``failed`` when the load errored. ``value`` filters by URL substring or
+      exact request ``id``.
+    - ``body``: the response body for one ``id``, truncated to 4000 characters
+      with ``truncated`` set when it was cut.
+    - ``clear``: forgets the recorded requests, so the next action's requests
+      are easy to spot.
+
+    Returns ``status``, ``action``, ``count``, and ``requests`` (or ``body``).
+    """
+    return _default_session.network(action, value, limit)
 
 
 def browser_screenshot(
@@ -1777,6 +2923,9 @@ def _build_tools(
         _bind(browser_open, session.open),
         _bind(browser, session.browser),
         _bind(browser_snapshot, session.snapshot),
+        _bind(browser_tabs, session.tabs),
+        _bind(browser_network, session.network),
+        _bind(browser_cookies, session.cookies),
         _bind(browser_screenshot, session.screenshot),
         _bind(browser_evaluate, session.evaluate),
     ]
@@ -1804,7 +2953,8 @@ def Browser(
     """Return the browser tools as a ready-to-use list of ``dspy.Tool`` objects.
 
     The default list contains ``browser_open``, ``browser``,
-    ``browser_snapshot``, ``browser_screenshot``, ``browser_evaluate``, and
+    ``browser_snapshot``, ``browser_tabs``, ``browser_network``,
+    ``browser_cookies``, ``browser_screenshot``, ``browser_evaluate``, and
     ``browser_close``. Pass ``include_recording=True`` to add
     ``browser_record_start`` and ``browser_record_stop``, and
     ``include_search=True`` to append ``web_search`` for research agents that
@@ -1829,10 +2979,13 @@ __all__ = [
     "BrowserTools",
     "browser",
     "browser_close",
+    "browser_cookies",
     "browser_evaluate",
+    "browser_network",
     "browser_open",
     "browser_record_start",
     "browser_record_stop",
     "browser_screenshot",
     "browser_snapshot",
+    "browser_tabs",
 ]
