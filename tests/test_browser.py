@@ -878,6 +878,32 @@ class TestScreenshot:
         assert "no screenshot" in result["error"]
 
 
+class TestOpen:
+    def test_navigates_then_snapshots(self, session):
+        session._get_tab()
+        session._tab.script_response = snapshot_response([])
+        result = session.open("example.com")
+        assert result["status"] == "ok"
+        assert result["action"] == "open"
+        assert result["url"] == "https://example.com/page"
+        assert result["node_count"] == 0
+        assert session._tab.navigations == [("https://example.com", 15)]
+
+    def test_navigation_error_skips_snapshot(self, session):
+        result = session.open("   ")
+        assert result["status"] == "error"
+        assert result["action"] == "open"
+        assert "navigate requires" in result["error"]
+        assert session._tab.scripts == []
+
+    def test_snapshot_error_keeps_open_action(self, session):
+        session._get_tab()
+        result = session.open("example.com")
+        assert result["status"] == "error"
+        assert result["action"] == "open"
+        assert "unexpected shape" in result["error"]
+
+
 class TestModuleFunctions:
     def test_module_functions_delegate_to_default_session(self, default_session):
         assert (
@@ -885,6 +911,7 @@ class TestModuleFunctions:
             == "ok"
         )
         default_session._tab.script_response = snapshot_response([])
+        assert browser_module.browser_open("https://example.com")["action"] == "open"
         assert browser_module.browser_snapshot()["status"] == "ok"
         default_session._tab.script_response = {
             "result": {"result": {"type": "string", "value": "ok"}}
