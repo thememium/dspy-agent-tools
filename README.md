@@ -97,9 +97,18 @@ The browser tools (`browser`, `browser_open`, `browser_snapshot`,
 pydoll. Chrome must be installed; there is no separate browser download step.
 `browser_open` combines navigation and the first snapshot, so a page costs one
 call instead of two. The browser starts on the first tool call and is reused
-until you call `browser_close` or the process exits. Video recording also needs
-`ffmpeg` on `PATH`; without it, `browser_record_start` returns an error instead
-of silently producing no file.
+until you call `browser_close` or the process exits. Video recording uses
+`ffmpeg` from `PATH` when available. To let the package supply one, install the
+optional extra:
+
+```bash
+uv add 'dspy-agent-tools[ffmpeg]'
+# or: pip install 'dspy-agent-tools[ffmpeg]'
+```
+
+The extra uses `imageio-ffmpeg`'s bundled binary. Without either a system
+`ffmpeg` or the extra, `browser_record_start` returns an error instead of
+silently producing no file.
 
 The MCP bridge is an optional extra (it pulls in DSPy, `httpx2`, and MCP
 SDK 2.x). Importing `MCP` works without it; calling `MCP()` raises an
@@ -726,7 +735,7 @@ bash_ripgrep_batch(
 | **`browser_open`** | Navigate to a URL and return its snapshot in one call (`action="open"`), with the same `nodes`/`text` payload as `browser_snapshot`. Use it to read a page without a separate navigate + snapshot round trip. |
 | **`browser_snapshot`** | Return `{url, title, nodes, node_count, truncated, text}`. Nodes carry `ref` (`@e1`), `role`, `name`, `tag`, `depth`, and relevant `value`/`href`/`checked`/`disabled`. Refs are reassigned on every snapshot. |
 | **`browser_screenshot`** | Save a PNG/JPEG/WebP (temp file by default) and return `path`, `format`, `bytes`; `full_page` captures beyond the viewport, `as_base64` returns the image inline. |
-| **`browser_record_start`** | Start a CDP screencast recording (`path`, `fps`, `quality`, `max_width`, `max_height`). MP4 (H.264) by default, WebM/VP9 on `.webm`; requires `ffmpeg` on PATH. |
+| **`browser_record_start`** | Start a CDP screencast recording (`path`, `fps`, `quality`, `max_width`, `max_height`). MP4 (H.264) by default, WebM/VP9 on `.webm`; uses `ffmpeg` from PATH or the optional `[ffmpeg]` extra. |
 | **`browser_record_stop`** | Stop the active recording, encode the captured frames, and return `path`, `format`, `bytes`, `frames`, and `duration_s`. |
 | **`browser_evaluate`** | Run JavaScript with a `return` statement and get the value by value (`return document.title`). `await_promise` waits for promises. |
 | **`browser_close`** | Stop the shared browser early; the next call starts a fresh one. Optional, because exit also cleans up. An active recording is encoded and returned under `recording`. |
