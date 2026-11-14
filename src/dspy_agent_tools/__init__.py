@@ -11,7 +11,9 @@ from .bash import (
     bash_ripgrep_batch,
 )
 from .browser import (
+    Browser,
     BrowserSession,
+    BrowserTools,
     browser,
     browser_close,
     browser_evaluate,
@@ -31,7 +33,9 @@ __all__ = [
     "CLI",
     "MCP",
     "Argument",
+    "Browser",
     "BrowserSession",
+    "BrowserTools",
     "CLITools",
     "Command",
     "MCPTools",
