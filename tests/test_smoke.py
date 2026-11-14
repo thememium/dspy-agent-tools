@@ -15,6 +15,7 @@ import dspy_agent_tools
 
 EXPECTED_EXPORTS = {
     "Argument",
+    "BrowserSession",
     "CLI",
     "CLITools",
     "Command",
@@ -32,6 +33,11 @@ EXPECTED_EXPORTS = {
     "bash_ls",
     "bash_ripgrep",
     "bash_ripgrep_batch",
+    "browser",
+    "browser_close",
+    "browser_evaluate",
+    "browser_screenshot",
+    "browser_snapshot",
     "delete_file",
     "edit_file",
     "read_file",
