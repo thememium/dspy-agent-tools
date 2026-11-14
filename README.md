@@ -46,6 +46,7 @@ optional MCP bridge:
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
+- **Browser** — `Browser()` returns the whole headless-Chrome toolset as one `dspy.Tool` list; add `include_search=True` to include `web_search`
 - **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable.
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
 - **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
@@ -91,13 +92,15 @@ the `rg` and `fd` binaries, then to POSIX `grep` and `find`, and report an
 resort: it skips hidden paths and VCS directories like the default backends but
 cannot read `.gitignore` rules, so ignored files are still searched.
 
-The browser tools (`browser`, `browser_open`, `browser_snapshot`,
-`browser_screenshot`, `browser_record_start`, `browser_record_stop`,
-`browser_evaluate`) drive a locally installed Chrome in headless mode through
-pydoll. Chrome must be installed; there is no separate browser download step.
-`browser_open` combines navigation and the first snapshot, so a page costs one
-call instead of two. The browser starts on the first tool call and is reused
-until you call `browser_close` or the process exits. Video recording uses
+`Browser()` returns the browser tools (`browser`, `browser_open`,
+`browser_snapshot`, `browser_screenshot`, `browser_record_start`,
+`browser_record_stop`, `browser_evaluate`, `browser_close`) as one ready-made
+list of `dspy.Tool` objects. Pass `include_search=True` to add `web_search`.
+They drive a locally installed Chrome in headless mode through pydoll. Chrome
+must be installed; there is no separate browser download step. `browser_open`
+combines navigation and the first snapshot, so a page costs one call instead of
+two. The browser starts on the first tool call and is reused until you call
+`browser_close` or the process exits. Video recording uses
 `ffmpeg` from `PATH` when available. To let the package supply one, install the
 optional extra:
 
@@ -224,27 +227,33 @@ result = coder(task="Rename the class SessionManager to Session across the repo"
 
 ### With the headless browser
 
-The browser tools are ordinary functions, so they go straight into
-`dspy.ReAct` or `dspy.RLM`. Nothing is created or cleaned up by hand:
+`Browser()` returns the complete browser toolset as one list of `dspy.Tool`
+objects. Nothing is created or cleaned up by hand, and research agents can add
+`web_search` to the same list:
 
 ```python
 import dspy
-from dspy_agent_tools import browser, browser_open, browser_snapshot, browser_screenshot
+from dspy_agent_tools import Browser
 
 agent = dspy.ReAct(
     "task -> result",
-    tools=[browser_open, browser, browser_snapshot, browser_screenshot],
+    tools=Browser(include_search=True),
     max_iters=12,
 )
 
 result = agent(task="Open https://example.com and summarize the page")
 ```
 
+Use `Browser()` for the browser tools alone. The individual functions remain
+available when you want a hand-picked list.
+
 `browser_snapshot` returns structured nodes, not a text blob. Each interactive
 element has a ref such as `@e3`, and the same ref works as the `target` of the
 next action:
 
 ```python
+from dspy_agent_tools import browser, browser_snapshot
+
 snapshot = browser_snapshot()
 email = next(node for node in snapshot["nodes"] if node["role"] == "textbox")
 browser("type", target=email["ref"], value="hello@example.com")
@@ -731,6 +740,7 @@ bash_ripgrep_batch(
 
 | Tool | Use it for |
 | --- | --- |
+| **`Browser`** | Return every browser tool as one `BrowserTools` list of `dspy.Tool` objects. `Browser(include_search=True)` also adds `web_search`; `.close()` stops the shared browser early. |
 | **`browser`** | Run one action: `navigate`, `click`, `type`, `press`, `hover`, `select`, `scroll`, `back`, `forward`, `reload`, or `wait`. `target` accepts an `@ref`, CSS, XPath, `text=Exact`, or `text*=Partial`; `value` carries the URL, text, key, option value, scroll direction, or seconds. |
 | **`browser_open`** | Navigate to a URL and return its snapshot in one call (`action="open"`), with the same `nodes`/`text` payload as `browser_snapshot`. Use it to read a page without a separate navigate + snapshot round trip. |
 | **`browser_snapshot`** | Return `{url, title, nodes, node_count, truncated, text}`. Nodes carry `ref` (`@e1`), `role`, `name`, `tag`, `depth`, and relevant `value`/`href`/`checked`/`disabled`. Refs are reassigned on every snapshot. |
