@@ -16,6 +16,8 @@ from .browser import (
     browser_close,
     browser_evaluate,
     browser_open,
+    browser_record_start,
+    browser_record_stop,
     browser_screenshot,
     browser_snapshot,
 )
@@ -49,6 +51,8 @@ __all__ = [
     "browser_close",
     "browser_evaluate",
     "browser_open",
+    "browser_record_start",
+    "browser_record_stop",
     "browser_screenshot",
     "browser_snapshot",
     "delete_file",
