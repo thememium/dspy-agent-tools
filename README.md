@@ -46,7 +46,7 @@ optional MCP bridge:
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
-- **Browser** — `Browser()` returns the headless-Chrome toolset as one `dspy.Tool` list; `include_recording=True` adds video recording and `include_search=True` adds `web_search`
+- **Browser** (optional) — `Browser()` returns the headless-Chrome toolset as one `dspy.Tool` list; `include_recording=True` adds video recording and `include_search=True` adds `web_search`; requires the `[browser]` extra
 - **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable.
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
 - **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
@@ -58,8 +58,8 @@ assemble the instructions it sends to the LM. These docstrings are written for
 that purpose — each one tells the model WHAT the tool does, WHEN to use it
 instead of a sibling tool, and HOW to pass arguments.
 
-Requires **Python 3.13+**; run agents with **DSPy 3.1+** (the `[mcp]` extra
-installs it).
+Requires **Python 3.13+**; run agents with **DSPy 3.1+** (the `[browser]` and
+`[mcp]` extras install it).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -91,6 +91,15 @@ the `rg` and `fd` binaries, then to POSIX `grep` and `find`, and report an
 `[Error]` body only when none of those exist. The `grep`/`find` tier is a last
 resort: it skips hidden paths and VCS directories like the default backends but
 cannot read `.gitignore` rules, so ignored files are still searched.
+
+The browser tools are an optional extra (DSPy plus pydoll). Importing
+`Browser` works without it; calling `Browser()` raises an `ImportError` with
+the install hint:
+
+```bash
+uv add 'dspy-agent-tools[browser]'
+# or: pip install 'dspy-agent-tools[browser]'
+```
 
 `Browser()` returns the core browser tools (`browser`, `browser_open`,
 `browser_snapshot`, `browser_screenshot`, `browser_evaluate`, `browser_close`)
