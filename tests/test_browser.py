@@ -243,12 +243,43 @@ class TestSessionLifecycle:
         assert len(fake_chrome.instances) == 1
         assert len(fake_chrome.instances[0].tab.navigations) == 2
 
-    def test_atexit_registered_after_start(self, session, monkeypatch):
+    def test_exit_hook_registered_after_start(self, session, monkeypatch):
         registered = []
-        monkeypatch.setattr(browser_module.atexit, "register", registered.append)
+        monkeypatch.setattr(browser_module, "_register_exit_hook", registered.append)
         session.browser("navigate", value="https://example.com")
         assert len(registered) == 1
         assert registered[0].__self__ is session
+
+    def test_exit_hook_registered_once_across_restarts(self, session, monkeypatch):
+        registered = []
+        monkeypatch.setattr(browser_module, "_register_exit_hook", registered.append)
+        session.browser("navigate", value="https://example.com")
+        session.close()
+        session.browser("navigate", value="https://example.com")
+        assert len(registered) == 1
+
+    def test_exit_hook_uses_threading_queue(self, monkeypatch):
+        registered = []
+
+        def callback():
+            return None
+
+        monkeypatch.setattr(
+            browser_module.threading, "_register_atexit", registered.append
+        )
+        browser_module._register_exit_hook(callback)
+        assert registered == [callback]
+
+    def test_exit_hook_falls_back_to_atexit(self, monkeypatch):
+        monkeypatch.delattr(browser_module.threading, "_register_atexit")
+        registered = []
+
+        def callback():
+            return None
+
+        monkeypatch.setattr(browser_module.atexit, "register", registered.append)
+        browser_module._register_exit_hook(callback)
+        assert registered == [callback]
 
     def test_close_is_idempotent(self, session, fake_chrome):
         assert session.close() is False
@@ -590,6 +621,16 @@ class TestActions:
         assert result["status"] == "error"
         assert "number of seconds" in result["error"]
 
+    def test_numeric_value_is_text(self, session):
+        result = session.browser("scroll", value=300)
+        assert result["status"] == "ok"
+        assert session._tab.scroll.calls == [("by", ScrollPosition.DOWN, 300, False)]
+
+    def test_numeric_target_is_text(self, session):
+        result = session.browser("click", target=2)
+        assert result["status"] == "ok"
+        assert session._tab.queries[0][0] == "2"
+
     def test_unknown_action(self, session):
         result = session.browser("teleport")
         assert result["status"] == "error"
@@ -664,6 +705,11 @@ class TestSnapshot:
         assert "const MAX_NODES = 1000;" in session._tab.scripts[-1][0]
         session.snapshot(max_nodes=0)
         assert "const MAX_NODES = 1;" in session._tab.scripts[-1][0]
+
+    def test_max_nodes_accepts_numeric_string(self, session):
+        session._get_tab()
+        session.snapshot(max_nodes="250")
+        assert "const MAX_NODES = 250;" in session._tab.scripts[-1][0]
 
     def test_max_nodes_rejects_text(self, session):
         result = session.snapshot(max_nodes="many")
@@ -762,6 +808,12 @@ class TestEvaluate:
         assert result["status"] == "error"
         assert "non-empty" in result["error"]
 
+    def test_numeric_script_is_rejected(self, session):
+        session._get_tab()
+        result = session.evaluate(2)
+        assert result["status"] == "error"
+        assert "non-empty" in result["error"]
+
     @pytest.mark.parametrize("response", [[], {"result": []}])
     def test_unexpected_response(self, session, response):
         session._get_tab()
@@ -781,6 +833,11 @@ class TestScreenshot:
         assert result["bytes"] == len(b"fake-image")
         assert target.read_bytes() == b"fake-image"
         assert session._tab.screenshot_calls == [(str(target), 50, True, False)]
+
+    def test_quality_accepts_numeric_string(self, session, tmp_path):
+        result = session.screenshot(path=str(tmp_path / "shot.jpg"), quality="42")
+        assert result["status"] == "ok"
+        assert session._tab.screenshot_calls[-1][1] == 42
 
     def test_adds_png_suffix(self, session, tmp_path):
         target = tmp_path / "shot"
