@@ -46,7 +46,7 @@ optional MCP bridge:
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
-- **Browser** (optional) — `Browser()` returns the headless-Chrome toolset as one `dspy.Tool` list; `Browser(session=BrowserSession())` isolates a user or request, `include_recording=True` adds video recording, and `include_search=True` adds `web_search`; requires the `[browser]` extra
+- **Browser** (optional) — `Browser()` returns the headless-Chrome toolset as one `dspy.Tool` list; every action verifies its effect, refuses hidden/disabled/covered targets, waits on conditions, and reports console output, page errors, and dialogs with the result; `browser_tabs`, `browser_network`, and `browser_cookies` cover multi-tab flows, request inspection, and saved logins, and `BrowserSession(user_data_dir=...)` keeps a profile; `include_recording=True` adds video recording and `include_search=True` adds `web_search`; requires the `[browser]` extra
 - **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable.
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
 - **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
@@ -273,6 +273,96 @@ browser("press", value="Enter")
 
 Pass `format="text"` for only the compact indented tree, or `format="both"`
 when you need both representations. Every snapshot clears the previous refs.
+
+Actions report what actually happened instead of assuming it worked. A click
+is refused before it fires when the target is hidden, disabled, or covered by
+an overlay, and a click that runs reports whether the page changed:
+
+```python
+browser("click", target="@e3")
+# {"status": "ok", "method": "native", "changed": True, "effect": "dom", ...}
+
+browser("type", target="#email", value="hi@example.com")
+# {"status": "ok", "verified": True, ...}
+# a maxlength or mask adds verified=False, actual="...", and a warning
+```
+
+`effect` is `dom`, `navigation`, or `none`; `none` adds a `warning`, because a
+click that changes nothing usually means the target was inert or an overlay ate
+it. `type` and `select` read the field back and report `verified`.
+
+Wait for a condition instead of sleeping:
+
+```python
+browser("wait", target="#results")  # visible selector
+browser("wait", value="text=Order confirmed")  # body text
+browser("wait", value="url=https://example.com/next")  # URL prefix
+```
+
+A wait that times out returns `status="error"` naming the condition, rather
+than letting the next action run against a half-loaded page.
+
+Page diagnostics ride along with every result, so a failed step explains
+itself without a second call: `console` (page console output, repeats
+collapsed into `count`), `errors` (uncaught exceptions), and `dialog`.
+JavaScript dialogs are answered automatically — dismissed by default, so a
+`confirm()` never hangs the session — and reported under `dialog`:
+
+```python
+browser("click", target="text=Delete")
+# {"status": "ok", ..., "dialog": {"type": "confirm",
+#  "message": "Delete everything?", "handled": "dismissed"}}
+```
+
+Dialogs are answered as they open, from a separate thread, because the command
+that triggered one — a click, a navigation — does not return until the dialog
+closes. That is why the policy is fixed per session rather than decided per
+dialog: pass `BrowserSession(dialog_policy="accept")` to confirm instead of
+cancel. A page that asks "discard your changes?" therefore needs `accept` to
+let the navigation through.
+
+Tabs are first-class. `browser_tabs` lists them, and `new`, `switch`, and
+`close` change which one every other tool acts on:
+
+```python
+browser_tabs()  # [{"index": 0, "url": ..., "active": True}, ...]
+browser_tabs("switch", "checkout")  # by URL or title substring, or by index
+browser_tabs("new", "https://example.com/report")
+```
+
+A click that opens a popup reports `tabs_changed` and a warning naming
+`browser_tabs`, so "nothing changed" never means "a tab opened behind you".
+Closing the last tab stops the browser; the next call starts a fresh one.
+
+`browser_network` answers what the page actually fetched — recorded from the
+moment the browser starts, so no second click is needed — and can return a
+response body:
+
+```python
+browser_network("clear")
+browser("click", target="text=Load orders")
+browser_network()  # [{"method": "GET", "url": ".../orders", "status": 200, ...}]
+browser_network("body", "1234.5")  # the JSON that came back
+```
+
+`browser_cookies` reads, writes, clears, saves, and loads cookies, which is how
+a login survives without a profile:
+
+```python
+browser_cookies("save", "state.json")  # after logging in once
+browser_cookies("load", "state.json")  # in a later run
+```
+
+For a session that keeps its own logins, storage, and history, give the browser
+a profile directory:
+
+```python
+session = BrowserSession(user_data_dir="./browser-profile")
+```
+
+Chrome writes that profile on shutdown, so `close()` asks it to exit and waits
+briefly before ending the process — without that wait the cookie database is
+left half-written and the login the profile was meant to keep is lost.
 
 Record the same session to a video by bracketing the actions:
 
