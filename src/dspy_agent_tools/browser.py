@@ -17,7 +17,8 @@ as structured nodes with ``@eN`` refs, ``browser_screenshot`` captures an image,
 ``browser_record_start``/``browser_record_stop`` capture a video,
 ``browser_evaluate`` runs JavaScript, and ``browser_close`` releases the
 browser early. The browser is headless by default and is also stopped at
-interpreter exit. Video recording needs ``ffmpeg`` on PATH.
+interpreter exit. Video recording uses ``ffmpeg`` from PATH, or the bundled
+binary from the optional ``[ffmpeg]`` extra.
 
 For a server that needs one browser per user or session, create a
 ``BrowserSession`` per scope and call its methods instead of the module-level
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import importlib
 import json
 import logging
 import re
@@ -400,9 +402,21 @@ def _video_path(path: str | None) -> Path:
 
 def _ffmpeg_binary() -> str:
     binary = shutil.which("ffmpeg")
-    if binary is None:
-        raise _ToolError("video recording requires ffmpeg on PATH")
-    return binary
+    if binary is not None:
+        return binary
+    try:
+        imageio_ffmpeg = importlib.import_module("imageio_ffmpeg")
+    except ImportError as exc:
+        raise _ToolError(
+            "video recording requires ffmpeg on PATH or the optional extra: "
+            "uv add 'dspy-agent-tools[ffmpeg]'"
+        ) from exc
+    try:
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:
+        raise _ToolError(
+            f"could not locate an ffmpeg binary: {_format_error(exc)}"
+        ) from exc
 
 
 def _text_arg(value: TextArg | None) -> str | None:
@@ -1479,8 +1493,8 @@ def browser_record_start(
 
     Without ``path``, an MP4 is written under the system temp directory.
     ``.mp4`` uses H.264 and ``.webm`` uses VP9; other suffixes are rejected.
-    ``ffmpeg`` must be installed and on PATH. The recording is video-only:
-    page audio is not captured.
+    ``ffmpeg`` comes from PATH, or from the optional ``[ffmpeg]`` extra when
+    PATH has none. The recording is video-only: page audio is not captured.
 
     Returns ``status``, ``path``, ``fps``, ``quality``, ``max_width``, and
     ``max_height``. Stop with ``browser_record_stop``; ``browser_close`` also
