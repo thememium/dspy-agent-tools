@@ -36,6 +36,7 @@ EXPECTED_EXPORTS = {
     "browser",
     "browser_close",
     "browser_evaluate",
+    "browser_open",
     "browser_screenshot",
     "browser_snapshot",
     "delete_file",
