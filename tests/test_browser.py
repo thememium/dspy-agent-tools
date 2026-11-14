@@ -3,6 +3,7 @@
 import base64
 import importlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -1049,10 +1050,15 @@ class TestRecording:
         assert "not a directory" in result["error"]
 
     def test_start_requires_ffmpeg(self, session, monkeypatch):
+        def missing(_name):
+            raise ImportError("no imageio")
+
         monkeypatch.setattr(browser_module.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(browser_module.importlib, "import_module", missing)
         result = session.record_start()
         assert result["status"] == "error"
         assert "ffmpeg" in result["error"]
+        assert "[ffmpeg]" in result["error"]
 
     def test_start_twice_is_rejected(self, session, tmp_path, fake_ffmpeg):
         first = session.record_start(path=str(tmp_path / "one.mp4"))
@@ -1276,6 +1282,26 @@ class TestHelpers:
             browser_module.shutil, "which", lambda _name: "/usr/bin/ffmpeg"
         )
         assert browser_module._ffmpeg_binary() == "/usr/bin/ffmpeg"
+
+    def test_ffmpeg_binary_falls_back_to_imageio(self, monkeypatch):
+        module = SimpleNamespace(get_ffmpeg_exe=lambda: "/bundle/ffmpeg")
+        monkeypatch.setattr(browser_module.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(
+            browser_module.importlib, "import_module", lambda _name: module
+        )
+        assert browser_module._ffmpeg_binary() == "/bundle/ffmpeg"
+
+    def test_ffmpeg_binary_reports_bundled_binary_error(self, monkeypatch):
+        def unavailable():
+            raise RuntimeError("no bundled binary")
+
+        module = SimpleNamespace(get_ffmpeg_exe=unavailable)
+        monkeypatch.setattr(browser_module.shutil, "which", lambda _name: None)
+        monkeypatch.setattr(
+            browser_module.importlib, "import_module", lambda _name: module
+        )
+        with pytest.raises(browser_module._ToolError, match="no bundled binary"):
+            browser_module._ffmpeg_binary()
 
     @pytest.mark.parametrize(
         ("text", "expected"),
