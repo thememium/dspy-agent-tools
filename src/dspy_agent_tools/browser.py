@@ -1721,6 +1721,52 @@ def _cookie_records(cookies: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _cookie_state(tab: Any) -> dict[str, Any]:
+    """Snapshot the tab's cookies in the on-disk state format."""
+    return {"url": tab.current_url(), "cookies": _cookie_records(tab.get_cookies())}
+
+
+def _write_cookie_state(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _save_cookie_state(tab: Any, path: Path) -> None:
+    _write_cookie_state(path, _cookie_state(tab))
+
+
+def _load_cookie_state(tab: Any, path: Path) -> None:
+    """Restore a state file written by ``_save_cookie_state``."""
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Could not read the cookie state %s: %s", path, _format_error(exc)
+        )
+        return
+    raw = state.get("cookies") if isinstance(state, dict) else None
+    if not isinstance(raw, list) or not raw:
+        return
+    cookies = _cookie_list(json.dumps({"cookies": raw}))
+    default_url = state.get("url")
+    for cookie in cookies:
+        if "url" not in cookie and "domain" not in cookie and default_url:
+            cookie["url"] = default_url
+    tab.set_cookies(cookies)
+
+
+def _persist_cookie_state(session: BrowserSession) -> None:
+    """Write the session's cookie state file; never fail the calling tool."""
+    if session.cookie_state is None or session._tab is None:
+        return
+    try:
+        _save_cookie_state(session._tab, session.cookie_state)
+    except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+        logger.warning("Could not save the cookie state: %s", _format_error(exc))
+
+
 def _cookies_action(
     session: BrowserSession, action: str, value: TextArg | None
 ) -> dict:
@@ -1752,6 +1798,7 @@ def _cookies_action(
                 }
             if action == "clear":
                 session._run(lambda tab: tab.delete_all_cookies())
+                _persist_cookie_state(session)
                 return {
                     "status": "ok",
                     "action": "clear",
@@ -1761,14 +1808,8 @@ def _cookies_action(
                 if not text:
                     raise _ToolError("cookies save requires value=path")
                 target = Path(text).expanduser()
-                state = session._run(
-                    lambda tab: {
-                        "url": tab.current_url(),
-                        "cookies": _cookie_records(tab.get_cookies()),
-                    }
-                )
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(json.dumps(state, indent=2), encoding="utf-8")
+                state = session._run(_cookie_state)
+                _write_cookie_state(target, state)
                 return {
                     "status": "ok",
                     "action": "save",
@@ -1785,8 +1826,12 @@ def _cookies_action(
                     raise _ToolError(f"could not read {source}: {exc}") from exc
                 except json.JSONDecodeError as exc:
                     raise _ToolError(f"{source} is not valid JSON: {exc.msg}") from exc
-                return _apply_cookies(session, _cookie_list(json.dumps(state)))
-            return _apply_cookies(session, _cookie_list(text))
+                result = _apply_cookies(session, _cookie_list(json.dumps(state)))
+                _persist_cookie_state(session)
+                return result
+            result = _apply_cookies(session, _cookie_list(text))
+            _persist_cookie_state(session)
+            return result
         except Exception as exc:  # noqa: BLE001 - returned as tool status
             payload = _error("cookies", exc)
             payload.update(session.take_diagnostics())
@@ -1965,6 +2010,11 @@ class BrowserSession:
     waits briefly before ending the process; without that wait the cookie
     database is left half-written and the login is lost. Without a directory,
     every run starts from an empty temporary profile.
+
+    ``cookie_state`` is the portable alternative: a JSON file of cookies,
+    loaded when the browser starts and rewritten after any cookie change and on
+    close. It needs no profile, and it is the same format as
+    ``browser_cookies("save", path)``, so the two can be used together.
     """
 
     def __init__(
@@ -1977,6 +2027,7 @@ class BrowserSession:
         url_policy: Callable[[str], bool] | None = None,
         dialog_policy: DialogPolicy = _DEFAULT_DIALOG_POLICY,
         user_data_dir: str | Path | None = None,
+        cookie_state: str | Path | None = None,
     ) -> None:
         if dialog_policy not in ("dismiss", "accept"):
             raise ValueError("dialog_policy must be dismiss or accept")
@@ -1986,6 +2037,9 @@ class BrowserSession:
         self.dialog_policy: DialogPolicy = dialog_policy
         self.user_data_dir = (
             Path(user_data_dir).expanduser().resolve() if user_data_dir else None
+        )
+        self.cookie_state = (
+            Path(cookie_state).expanduser().resolve() if cookie_state else None
         )
         if allowed_schemes is None:
             self.allowed_schemes = _DEFAULT_ALLOWED_SCHEMES
@@ -2038,6 +2092,13 @@ class BrowserSession:
         self._browser = browser
         self._tab = tab
         self._install_watch(tab)
+        if self.cookie_state is not None:
+            try:
+                _load_cookie_state(tab, self.cookie_state)
+            except Exception as exc:  # noqa: BLE001 - startup must not depend on it
+                logger.warning(
+                    "Could not load the cookie state: %s", _format_error(exc)
+                )
         if not self._exit_hook_registered:
             _register_exit_hook(self.close)
             self._exit_hook_registered = True
@@ -2132,6 +2193,8 @@ class BrowserSession:
                 "record_stop",
                 _ToolError("browser disconnected; the recording was discarded"),
             )
+        if self._tab is not None:
+            _persist_cookie_state(self)
         browser, self._browser, self._tab = self._browser, None, None
         self._watch = _PageWatch()
         self._watched = set()
@@ -2177,6 +2240,8 @@ class BrowserSession:
                     }
             else:
                 self.last_recording = None
+            if self._tab is not None:
+                _persist_cookie_state(self)
             browser, self._browser, self._tab = self._browser, None, None
             self._watch = _PageWatch()
             self._watched = set()
@@ -2949,6 +3014,13 @@ def Browser(
     session: BrowserSession | None = None,
     include_search: bool = False,
     include_recording: bool = False,
+    headless: bool | None = None,
+    timeout: float | None = None,
+    dialog_policy: DialogPolicy | None = None,
+    user_data_dir: str | Path | None = None,
+    cookie_state: str | Path | None = None,
+    allowed_schemes: Iterable[str] | None = None,
+    url_policy: Callable[[str], bool] | None = None,
 ) -> BrowserTools:
     """Return the browser tools as a ready-to-use list of ``dspy.Tool`` objects.
 
@@ -2964,8 +3036,46 @@ def Browser(
     individual functions. Pass ``session=BrowserSession(...)`` to bind every
     tool, including ``browser_close`` and :meth:`BrowserTools.close`, to an
     isolated per-user or per-request session.
+
+    The remaining keywords are forwarded to a session this call creates, so a
+    one-line setup reaches the same options::
+
+        agent = dspy.ReAct("task -> result", tools=Browser(user_data_dir="./profile"))
+
+    ``user_data_dir`` keeps cookies, storage, and history across runs;
+    ``cookie_state`` keeps just the cookies in a JSON file that is loaded at
+    startup and rewritten whenever they change or the browser closes, which
+    works without a profile; ``dialog_policy`` picks ``dismiss`` (default) or
+    ``accept`` for page dialogs; ``headless``, ``timeout``,
+    ``allowed_schemes``, and ``url_policy`` match :class:`BrowserSession`.
+    Passing any of them together with ``session=`` raises ``ValueError``,
+    because the session would be built twice.
     """
-    target_session = session if session is not None else _default_session
+    options: dict[str, Any] = {}
+    if headless is not None:
+        options["headless"] = headless
+    if timeout is not None:
+        options["timeout"] = timeout
+    if dialog_policy is not None:
+        options["dialog_policy"] = dialog_policy
+    if user_data_dir is not None:
+        options["user_data_dir"] = user_data_dir
+    if cookie_state is not None:
+        options["cookie_state"] = cookie_state
+    if allowed_schemes is not None:
+        options["allowed_schemes"] = allowed_schemes
+    if url_policy is not None:
+        options["url_policy"] = url_policy
+    if session is not None and options:
+        raise ValueError(
+            "pass either session= or session options to Browser(), not both"
+        )
+    if session is not None:
+        target_session = session
+    elif options:
+        target_session = BrowserSession(**options)
+    else:
+        target_session = _default_session
     return _build_tools(
         target_session,
         include_search=include_search,
