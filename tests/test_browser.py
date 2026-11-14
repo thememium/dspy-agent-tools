@@ -3,14 +3,22 @@
 import base64
 import builtins
 import importlib
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import dspy
 import pytest
 from pydoll.constants import ScrollPosition
-from pydoll.exceptions import ConnectionException, FailedToStartBrowser
+from pydoll.exceptions import (
+    ConnectionException,
+    FailedToStartBrowser,
+    TimeoutException,
+)
+from pydoll.protocol.network.events import NetworkEvent
+from pydoll.protocol.runtime.events import RuntimeEvent
 from pydoll.sync import Key, PageEvent
 
 from dspy_agent_tools.browser import (
@@ -36,6 +44,36 @@ class FakeElement:
         self.js_click_error = None
         self.type_error = None
         self.insert_error = None
+        self.visible = True
+        self.enabled = True
+        self.on_top = True
+        self.editable = True
+        self.scroll_calls = 0
+        self.field_state = {
+            "tag": "input",
+            "value": None,
+            "text": None,
+            "type": "text",
+            "disabled": False,
+            "readonly": False,
+        }
+        self.field_state_error = None
+        self.mirror_typing = True
+
+    def is_visible(self):
+        return self.visible
+
+    def is_enabled(self):
+        return self.enabled
+
+    def is_on_top(self):
+        return self.on_top
+
+    def is_editable(self):
+        return self.editable
+
+    def scroll_into_view(self):
+        self.scroll_calls += 1
 
     def click(self):
         self.click_calls += 1
@@ -54,6 +92,8 @@ class FakeElement:
         if self.type_error:
             raise self.type_error
         self.typed.append(value)
+        if self.mirror_typing:
+            self.field_state["value"] = value
 
     def focus(self):
         self.focus_calls += 1
@@ -62,12 +102,17 @@ class FakeElement:
         if self.insert_error:
             raise self.insert_error
         self.inserted.append(value)
+        self.field_state["value"] = value
 
     def hover(self):
         self.hover_calls += 1
 
     def execute_script(self, script, **kwargs):
         self.scripts.append((script, kwargs))
+        if "readOnly" in script:
+            if self.field_state_error:
+                raise self.field_state_error
+            return {"result": {"result": {"value": self.field_state}}}
         return {"result": {"result": {"type": "string", "value": "selected"}}}
 
 
@@ -100,6 +145,13 @@ class FakeScroll:
 class FakeTab:
     def __init__(self, element=None):
         self.element = element or FakeElement()
+        self.target_id = "target-1"
+        self.closed = False
+        self.cookies = [
+            {"name": "sid", "value": "abc", "domain": "example.com", "path": "/"}
+        ]
+        self.set_cookie_calls = []
+        self.network_body = '{"ok": true}'
         self.url = "https://example.com/page"
         self.page_title = "Example"
         self.navigations = []
@@ -120,12 +172,20 @@ class FakeTab:
         self.url_wait_calls = []
         self.wait_error = None
         self.page_events = 0
+        self.runtime_events = 0
+        self.network_events = 0
+        self.events_error = None
         self.callbacks = {}
         self.removed_callbacks = []
         self.commands = []
         self.command_error = None
         self.remove_callback_error = None
         self._next_callback_id = 0
+        self.probe_responses = []
+        self.probe_error = None
+        self.wait_script_calls = []
+        self.wait_script_error = None
+        self.dialogs = []
 
     def go_to(self, url, timeout=300):
         self.navigations.append((url, timeout))
@@ -162,6 +222,14 @@ class FakeTab:
         self.scripts.append((script, kwargs))
         if self.script_error:
             raise self.script_error
+        if "__dspyAgentProbe" in script:
+            if self.probe_error:
+                raise self.probe_error
+            if self.probe_responses:
+                value = self.probe_responses.pop(0)
+            else:
+                value = {"url": self.url, "mutations": 0}
+            return {"result": {"result": {"value": value}}}
         if self.script_response is not None:
             return self.script_response
         return {"result": {"result": {"type": "undefined"}}}
@@ -184,6 +252,43 @@ class FakeTab:
 
     def enable_page_events(self):
         self.page_events += 1
+        if self.events_error:
+            raise self.events_error
+
+    def enable_runtime_events(self):
+        self.runtime_events += 1
+        if self.events_error:
+            raise self.events_error
+
+    def enable_network_events(self):
+        self.network_events += 1
+        if self.events_error:
+            raise self.events_error
+
+    def close(self):
+        self.closed = True
+
+    def get_cookies(self):
+        return list(self.cookies)
+
+    def set_cookies(self, cookies):
+        self.set_cookie_calls.append([dict(cookie) for cookie in cookies])
+
+    def delete_all_cookies(self):
+        self.cookies = []
+
+    def get_network_response_body(self, request_id):
+        self.requested_body = request_id
+        return self.network_body
+
+    def wait_for_script(self, script, timeout=30):
+        self.wait_script_calls.append((script, timeout))
+        if self.wait_script_error:
+            raise self.wait_script_error
+        return True
+
+    def handle_dialog(self, accept, prompt_text=None):
+        self.dialogs.append((accept, prompt_text))
 
     def on(self, event_name, callback, temporary=False):
         self._next_callback_id += 1
@@ -206,12 +311,15 @@ class FakeTab:
 class FakeChrome:
     instances: ClassVar[list["FakeChrome"]] = []
     start_error = None
+    command_error = None
 
     def __init__(self, options=None, connection_port=None):
         self.options = options
         self.started = False
         self.stopped = False
         self.tab = FakeTab()
+        self.tabs = [self.tab]
+        self.opened_urls = []
         FakeChrome.instances.append(self)
 
     def start(self):
@@ -219,6 +327,24 @@ class FakeChrome:
             raise FakeChrome.start_error
         self.started = True
         return self.tab
+
+    def new_tab(self, url="", browser_context_id=None):
+        tab = FakeTab()
+        tab.target_id = f"target-{len(self.tabs) + 1}"
+        self.tabs.append(tab)
+        self.opened_urls.append(url)
+        if url:
+            tab.go_to(url)
+        return tab
+
+    def get_opened_tabs(self):
+        return [tab for tab in self.tabs if not tab.closed]
+
+    def execute_command(self, command, timeout=60):
+        self.commands = getattr(self, "commands", [])
+        self.commands.append(command)
+        if FakeChrome.command_error:
+            raise FakeChrome.command_error
 
     def stop(self):
         self.stopped = True
@@ -284,6 +410,13 @@ def screencast_callback(tab):
     for event, callback, _temporary in tab.callbacks.values():
         if event == PageEvent.SCREENCAST_FRAME:
             return callback
+    raise AssertionError("no screencast callback registered")
+
+
+def screencast_callback_id(tab):
+    for callback_id, (event, _callback, _temporary) in tab.callbacks.items():
+        if event == PageEvent.SCREENCAST_FRAME:
+            return callback_id
     raise AssertionError("no screencast callback registered")
 
 
@@ -740,10 +873,10 @@ class TestActions:
         assert result["status"] == "error"
         assert "cannot be negative" in result["error"]
 
-    def test_wait_rejects_text(self, session):
+    def test_wait_rejects_unknown_condition(self, session):
         result = session.browser("wait", value="soon")
         assert result["status"] == "error"
-        assert "number of seconds" in result["error"]
+        assert "wait value must be" in result["error"]
 
     def test_numeric_value_is_text(self, session):
         result = session.browser("scroll", value=300)
@@ -1032,7 +1165,7 @@ class TestRecording:
         assert result["max_width"] == 800
         assert result["max_height"] == 600
         tab = session._tab
-        assert tab.page_events == 1
+        assert tab.page_events == 2  # session start plus the screencast
         assert tab.commands[0]["method"] == "Page.startScreencast"
         assert tab.commands[0]["params"] == {
             "format": "jpeg",
@@ -1055,6 +1188,7 @@ class TestRecording:
             "Page.screencastFrameAck",
         ]
 
+        screencast_id = screencast_callback_id(tab)
         stopped = session.record_stop()
         assert stopped["status"] == "ok"
         assert stopped["frames"] == 2
@@ -1062,7 +1196,7 @@ class TestRecording:
         assert stopped["format"] == "mp4"
         assert stopped["bytes"] == len(b"fake-video")
         assert Path(stopped["path"]).read_bytes() == b"fake-video"
-        assert tab.removed_callbacks == [1]
+        assert tab.removed_callbacks == [screencast_id]
         assert tab.commands[-1]["method"] == "Page.stopScreencast"
         assert session._recorder is None
 
@@ -1147,7 +1281,7 @@ class TestRecording:
         assert result["status"] == "error"
         assert "no screencast" in result["error"]
         assert session._recorder is None
-        assert tab.removed_callbacks == [1]
+        assert len(tab.removed_callbacks) == 1
 
     def test_bad_frame_and_failed_stop_are_reported(self, session, fake_ffmpeg):
         assert session.record_start()["status"] == "ok"
@@ -1167,10 +1301,11 @@ class TestRecording:
         recorder = session._recorder
         assert recorder is not None
         assert recorder.frames == []
+        screencast_id = screencast_callback_id(tab)
         result = session.record_stop()
         assert result["status"] == "error"
         assert "no video frames" in result["error"]
-        assert tab.removed_callbacks == [1]
+        assert tab.removed_callbacks == [screencast_id]
 
     def test_frame_ack_is_skipped_without_callback_context(self, session, fake_ffmpeg):
         assert session.record_start()["status"] == "ok"
@@ -1344,6 +1479,9 @@ class TestBrowserBundle:
         "browser_open",
         "browser",
         "browser_snapshot",
+        "browser_tabs",
+        "browser_network",
+        "browser_cookies",
         "browser_screenshot",
         "browser_evaluate",
         "browser_close",
@@ -1490,3 +1628,947 @@ class TestHelpers:
     )
     def test_xpath_literal(self, text, expected):
         assert _xpath_literal(text) == expected
+
+
+def watch_callback(tab, event):
+    for name, callback, _temporary in tab.callbacks.values():
+        if name == event:
+            return callback
+    raise AssertionError(f"no {event} callback registered")
+
+
+def fire_console(tab, *args, level="log"):
+    watch_callback(tab, RuntimeEvent.CONSOLE_API_CALLED)(
+        {"params": {"type": level, "args": list(args)}}
+    )
+
+
+def fire_error(tab, text="Uncaught TypeError: boom"):
+    watch_callback(tab, RuntimeEvent.EXCEPTION_THROWN)(
+        {"params": {"exceptionDetails": {"exception": {"description": text}}}}
+    )
+
+
+def fire_dialog(tab, message="Are you sure?", kind="confirm", prompt=None):
+    params = {"type": kind, "message": message}
+    if prompt is not None:
+        params["defaultPrompt"] = prompt
+    watch_callback(tab, PageEvent.JAVASCRIPT_DIALOG_OPENING)({"params": params})
+
+
+class TestActionability:
+    def test_click_refuses_hidden(self, session):
+        session._get_tab()
+        session._tab.element.visible = False
+        result = session.browser("click", target="#go")
+        assert result["status"] == "error"
+        assert "not visible" in result["error"]
+        assert session._tab.element.click_calls == 0
+
+    def test_click_refuses_disabled(self, session):
+        session._get_tab()
+        session._tab.element.enabled = False
+        result = session.browser("click", target="#go")
+        assert result["status"] == "error"
+        assert "disabled" in result["error"]
+        assert session._tab.element.click_calls == 0
+
+    def test_click_refuses_covered(self, session):
+        session._get_tab()
+        session._tab.element.on_top = False
+        result = session.browser("click", target="#go")
+        assert result["status"] == "error"
+        assert "covered" in result["error"]
+        assert session._tab.element.scroll_calls == 1
+        assert session._tab.element.click_calls == 0
+
+    def test_click_probe_errors_do_not_block(self, session):
+        session._get_tab()
+
+        def broken():
+            raise RuntimeError("no probe")
+
+        session._tab.element.is_visible = broken
+        session._tab.element.is_on_top = None
+        result = session.browser("click", target="#go")
+        assert result["status"] == "ok"
+        assert session._tab.element.click_calls == 1
+
+    def test_scroll_into_view_error_is_ignored(self, session):
+        session._get_tab()
+
+        def broken():
+            raise RuntimeError("no scroll")
+
+        session._tab.element.scroll_into_view = broken
+        assert session.browser("click", target="#go")["status"] == "ok"
+
+    def test_hover_skips_enabled_check(self, session):
+        session._get_tab()
+        session._tab.element.enabled = False
+        result = session.browser("hover", target="#menu")
+        assert result["status"] == "ok"
+        assert session._tab.element.hover_calls == 1
+
+    def test_type_refuses_covered_field(self, session):
+        session._get_tab()
+        session._tab.element.on_top = False
+        result = session.browser("type", target="#email", value="hi")
+        assert result["status"] == "error"
+        assert "covered" in result["error"]
+        assert session._tab.element.typed == []
+
+    def test_type_refuses_non_editable(self, session):
+        session._get_tab()
+        session._tab.element.editable = False
+        result = session.browser("type", target="#note", value="hi")
+        assert result["status"] == "error"
+        assert "does not accept text" in result["error"]
+
+    def test_probe_bool_accepts_properties(self):
+        element = SimpleNamespace(is_enabled=True)
+        assert browser_module._probe_bool(element, "is_enabled") is True
+        assert browser_module._probe_bool(element, "is_visible") is True
+
+
+class TestEffect:
+    def test_click_reports_dom_change(self, session):
+        session._get_tab()
+        url = "https://example.com/page"
+        session._tab.probe_responses = [
+            {"url": url, "mutations": 0},
+            {"url": url, "mutations": 4},
+        ]
+        result = session.browser("click", target="#go")
+        assert result["changed"] is True
+        assert result["effect"] == "dom"
+        assert result["mutations"] == 4
+        assert "warning" not in result
+
+    def test_click_reports_navigation(self, session):
+        session._get_tab()
+        session._tab.probe_responses = [
+            {"url": "https://example.com/a", "mutations": 0},
+            {"url": "https://example.com/b", "mutations": 0},
+        ]
+        result = session.browser("click", target="#go")
+        assert result["effect"] == "navigation"
+        assert result["changed"] is True
+
+    def test_click_warns_when_nothing_changed(self, session):
+        result = session.browser("click", target="#go")
+        assert result["changed"] is False
+        assert result["effect"] == "none"
+        assert "did not change" in result["warning"]
+
+    def test_js_fallback_warning_is_reported(self, session):
+        session._get_tab()
+        session._tab.element.click_error = RuntimeError("blocked")
+        result = session.browser("click", target="#go")
+        assert result["method"] == "js"
+        assert "JavaScript click" in result["warning"]
+
+    def test_probe_failure_omits_effect(self, session):
+        session._get_tab()
+        session._tab.probe_error = RuntimeError("no probe")
+        result = session.browser("click", target="#go")
+        assert result["status"] == "ok"
+        assert "changed" not in result
+
+    def test_press_reports_effect(self, session):
+        session._get_tab()
+        url = "https://example.com/page"
+        session._tab.probe_responses = [
+            {"url": url, "mutations": 0},
+            {"url": url, "mutations": 2},
+        ]
+        result = session.browser("press", value="Enter")
+        assert result["effect"] == "dom"
+        assert "warning" not in result
+
+    def test_press_warns_when_nothing_changed(self, session):
+        result = session.browser("press", value="Enter")
+        assert result["changed"] is False
+        assert "did not change" in result["warning"]
+
+
+class TestTypeVerification:
+    def test_verified(self, session):
+        result = session.browser("type", target="#email", value="hi@example.com")
+        assert result["verified"] is True
+
+    def test_mismatch_reports_actual(self, session):
+        session._get_tab()
+        element = session._tab.element
+        element.mirror_typing = False
+        element.field_state["value"] = "hi@example.co"
+        result = session.browser("type", target="#email", value="hi@example.com")
+        assert result["verified"] is False
+        assert result["actual"] == "hi@example.co"
+        assert result["actual_length"] == len("hi@example.co")
+        assert "differs after typing" in result["warning"]
+
+    def test_password_mismatch_is_redacted(self, session):
+        session._get_tab()
+        element = session._tab.element
+        element.mirror_typing = False
+        element.field_state["type"] = "password"
+        element.field_state["value"] = "masked"
+        result = session.browser("type", target="#pw", value="secret")
+        assert result["verified"] is False
+        assert "actual" not in result
+
+    def test_contenteditable_matches_on_text(self, session):
+        session._get_tab()
+        element = session._tab.element
+        element.mirror_typing = False
+        element.field_state["tag"] = "div"
+        element.field_state["value"] = None
+        element.field_state["text"] = "draft hello world"
+        result = session.browser("type", target="#note", value="hello")
+        assert result["verified"] is True
+
+    def test_unreadable_field_skips_verification(self, session):
+        session._get_tab()
+        session._tab.element.field_state_error = RuntimeError("no state")
+        result = session.browser("type", target="#email", value="hi")
+        assert result["status"] == "ok"
+        assert "verified" not in result
+
+
+class TestSelectVerification:
+    def test_verified(self, session):
+        result = session.browser("select", target="#size", value="selected")
+        assert result["verified"] is True
+
+    def test_mismatch_warns(self, session):
+        result = session.browser("select", target="#size", value="large")
+        assert result["verified"] is False
+        assert "after selecting" in result["warning"]
+
+    def test_missing_return_value_is_not_verified(self, session):
+        session._get_tab()
+        session._tab.element.execute_script = lambda *_a, **_k: {
+            "result": {"result": {"type": "undefined"}}
+        }
+        result = session.browser("select", target="#size", value="large")
+        assert result["status"] == "ok"
+        assert "verified" not in result
+
+
+class TestWaitConditions:
+    def test_wait_for_target_selector(self, session):
+        result = session.browser("wait", target="#done")
+        assert result["status"] == "ok"
+        assert result["waited_for"] == "#done"
+        script, timeout = session._tab.wait_script_calls[0]
+        assert "document.querySelector" in script
+        assert '"#done"' in script
+        assert timeout == 15.0
+
+    def test_wait_for_text(self, session):
+        result = session.browser("wait", value="text=Done")
+        assert result["waited_for"] == "text 'Done'"
+        assert '"Done"' in session._tab.wait_script_calls[0][0]
+
+    def test_wait_for_partial_text(self, session):
+        result = session.browser("wait", value="text*=Don")
+        assert result["waited_for"] == "text 'Don'"
+
+    def test_wait_for_url_prefix(self, session):
+        result = session.browser("wait", value="url=https://example.com/next")
+        assert result["waited_for"].startswith("url starting with")
+        assert "location.href.indexOf" in session._tab.wait_script_calls[0][0]
+
+    def test_wait_for_bare_url(self, session):
+        result = session.browser("wait", value="https://example.com/next*")
+        assert result["status"] == "ok"
+        assert '"https://example.com/next"' in session._tab.wait_script_calls[0][0]
+
+    def test_wait_for_selector_prefix(self, session):
+        result = session.browser("wait", value="selector=#done")
+        assert result["waited_for"] == "#done"
+
+    def test_wait_clamps_timeout(self, session):
+        session.browser("wait", target="#done", timeout=120)
+        assert session._tab.wait_script_calls[0][1] == 30.0
+
+    def test_wait_timeout_is_reported(self, session):
+        session._get_tab()
+        session._tab.wait_script_error = TimeoutException("too slow")
+        result = session.browser("wait", value="text=Done", timeout=5)
+        assert result["status"] == "error"
+        assert "timed out after 5s waiting for text 'Done'" in result["error"]
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            ("selector=", "selector= requires"),
+            ("text=", "text= requires"),
+            ("text*=", "text*= requires"),
+            ("url=", "url= requires"),
+        ],
+    )
+    def test_wait_rejects_empty_condition(self, session, value, message):
+        result = session.browser("wait", value=value)
+        assert result["status"] == "error"
+        assert message in result["error"]
+
+
+class TestDialogs:
+    def test_auto_dismissed_by_default(self, session):
+        tab = session._get_tab()
+        fire_dialog(tab)
+        result = session.browser("scroll")
+        assert result["dialog"] == {
+            "type": "confirm",
+            "message": "Are you sure?",
+            "handled": "dismissed",
+        }
+        assert tab.dialogs == [(False, None)]
+
+    def test_accept_policy_confirms(self, fake_chrome):
+        session = BrowserSession(dialog_policy="accept")
+        tab = session._get_tab()
+        fire_dialog(tab)
+        result = session.browser("scroll")
+        assert result["dialog"]["handled"] == "accepted"
+        assert tab.dialogs == [(True, None)]
+        session.close()
+
+    def test_accept_policy_fills_prompt(self, fake_chrome):
+        session = BrowserSession(dialog_policy="accept")
+        tab = session._get_tab()
+        fire_dialog(tab, kind="prompt", prompt="default text")
+        result = session.browser("scroll")
+        assert result["dialog"]["default_prompt"] == "default text"
+        assert tab.dialogs == [(True, "default text")]
+        session.close()
+
+    def test_alert_without_prompt_text(self, fake_chrome):
+        session = BrowserSession(dialog_policy="accept")
+        tab = session._get_tab()
+        fire_dialog(tab, kind="alert")
+        session.browser("scroll")
+        assert tab.dialogs == [(True, None)]
+        session.close()
+
+    def test_dialog_reported_once(self, session):
+        tab = session._get_tab()
+        fire_dialog(tab)
+        assert "dialog" in session.browser("scroll")
+        assert "dialog" not in session.browser("scroll")
+
+    def test_handle_failure_is_reported(self, session):
+        tab = session._get_tab()
+
+        def broken(**_kwargs):
+            raise RuntimeError("no dialog")
+
+        tab.handle_dialog = broken
+        fire_dialog(tab)
+        result = session.browser("scroll")
+        assert result["dialog"]["handled"] == "failed: RuntimeError: no dialog"
+
+    def test_take_waits_for_a_dialog_answer(self, session):
+        watch = session._watch
+        answering = threading.Event()
+        released = threading.Event()
+        entered = threading.Event()
+        result = {}
+
+        def responder(_dialog):
+            answering.set()
+            released.wait(5)
+            return "dismissed"
+
+        def drain():
+            entered.set()
+            result["dialog"] = watch.take()[2]
+
+        watch.on_dialog({"params": {"type": "alert", "message": "hi"}}, responder)
+        assert answering.wait(5)
+
+        reader = threading.Thread(target=drain)
+        reader.start()
+        assert entered.wait(5)
+        time.sleep(0.05)  # a drain that did not wait would be done by now
+        assert reader.is_alive()
+        released.set()
+        reader.join(5)
+        assert not reader.is_alive()
+        assert result["dialog"]["handled"] == "dismissed"
+
+    def test_open_keeps_navigate_diagnostics(self, session):
+        tab = session._get_tab()
+        tab.script_response = snapshot_response([])
+        navigate = tab.go_to
+
+        def go_to(url, timeout=300):
+            navigate(url, timeout)
+            fire_console(tab, {"value": "during navigate"})
+            fire_dialog(tab)
+
+        tab.go_to = go_to
+        result = session.open("https://example.com/page")
+        assert result["action"] == "open"
+        assert result["console"] == [{"level": "log", "text": "during navigate"}]
+        assert result["dialog"]["handled"] == "dismissed"
+
+    def test_invalid_policy_is_rejected(self):
+        policy: Any = "pause"
+        with pytest.raises(ValueError, match="dialog_policy"):
+            BrowserSession(dialog_policy=policy)
+
+
+class TestDiagnostics:
+    def test_console_attached_to_next_action(self, session):
+        session._get_tab()
+        fire_console(session._tab, {"value": "hello"}, {"type": "object"})
+        result = session.browser("scroll")
+        assert result["console"] == [{"level": "log", "text": "hello <object>"}]
+
+    def test_console_reported_once(self, session):
+        session._get_tab()
+        fire_console(session._tab, {"value": "hello"})
+        assert "console" in session.browser("scroll")
+        assert "console" not in session.browser("scroll")
+
+    def test_repeated_console_is_collapsed(self, session):
+        session._get_tab()
+        for _ in range(3):
+            fire_console(session._tab, {"value": "tick"}, level="warning")
+        result = session.browser("scroll")
+        assert result["console"] == [{"level": "warning", "text": "tick", "count": 3}]
+
+    def test_page_errors_attached(self, session):
+        session._get_tab()
+        fire_error(session._tab)
+        result = session.browser("scroll")
+        assert result["errors"] == [{"text": "Uncaught TypeError: boom"}]
+
+    def test_empty_console_args_are_ignored(self, session):
+        session._get_tab()
+        fire_console(session._tab)
+        assert "console" not in session.browser("scroll")
+
+    def test_empty_exception_is_ignored(self, session):
+        session._get_tab()
+        watch_callback(session._tab, RuntimeEvent.EXCEPTION_THROWN)({"params": {}})
+        assert "errors" not in session.browser("scroll")
+
+    def test_bad_events_are_logged_not_raised(self, session):
+        session._get_tab()
+        watch = session._watch
+        watch.on_console(None)
+        watch.on_exception(None)
+        assert session.browser("scroll")["status"] == "ok"
+
+    def test_diagnostics_attach_to_errors(self, session):
+        session._get_tab()
+        fire_console(session._tab, {"value": "before the failure"})
+        session._tab.query_result = None
+        result = session.browser("click", target="#missing")
+        assert result["status"] == "error"
+        assert result["console"][0]["text"] == "before the failure"
+
+    def test_watch_failure_does_not_block_the_session(self, session, monkeypatch):
+        def start_with_failing_events(self):
+            self.tab.events_error = RuntimeError("no events")
+            return self.tab
+
+        monkeypatch.setattr(FakeChrome, "start", start_with_failing_events)
+        assert session.browser("scroll")["status"] == "ok"
+        assert session._tab is not None
+
+    def test_watch_is_reinstalled_after_a_reconnect(self, session):
+        first_tab = session._get_tab()
+        first_watch = session._watch
+
+        def lost(_tab):
+            raise ConnectionException("lost")
+
+        with pytest.raises(ConnectionException):
+            session._run(lost)
+        assert session._watch is not first_watch
+        assert session._tab is not first_tab
+        assert session._tab.runtime_events == 1  # installed on the new tab
+
+    def test_console_text_variants(self):
+        text = browser_module._console_text
+        assert text([{"value": "hi"}]) == "hi"
+        assert text([{"value": None}]) == "null"
+        assert text([{"value": {"a": 1}}]) == '{"a": 1}'
+        assert text([{"description": "Error: x"}]) == "Error: x"
+        assert text([{"type": "object"}]) == "<object>"
+        assert text([5]) == "5"
+        assert text([{"value": True}]) == "true"
+        assert text("not a list") == ""
+        assert len(text([{"value": "x" * 400}])) == 300
+
+    def test_compress_keeps_the_tail(self):
+        entries = [{"text": f"line {index}"} for index in range(12)]
+        compressed = browser_module._compress(entries)
+        assert len(compressed) == browser_module._MAX_CONSOLE_ITEMS
+        assert compressed[-1]["text"] == "line 11"
+        assert "count" not in compressed[-1]
+
+
+def fire_request(tab, request_id="1", url="https://example.com/api", method="GET"):
+    watch_callback(tab, NetworkEvent.REQUEST_WILL_BE_SENT)(
+        {
+            "params": {
+                "requestId": request_id,
+                "type": "Fetch",
+                "request": {"method": method, "url": url},
+            }
+        }
+    )
+
+
+def fire_response(tab, request_id="1", status=200, mime="application/json", **extra):
+    response = {"status": status, "mimeType": mime, **extra}
+    watch_callback(tab, NetworkEvent.RESPONSE_RECEIVED)(
+        {"params": {"requestId": request_id, "response": response}}
+    )
+
+
+class TestTabChangeReporting:
+    def test_click_reports_a_new_tab(self, session):
+        session._get_tab()
+        chrome = session._browser
+        assert chrome is not None
+        original = chrome.get_opened_tabs
+        calls = []
+
+        def counting():
+            calls.append(1)
+            if len(calls) == 1:
+                return original()
+            return [*original(), FakeTab()]
+
+        chrome.get_opened_tabs = counting
+        result = session.browser("click", target="#go")
+        assert result["tabs"] == 2
+        assert result["tabs_changed"] == 1
+        assert "browser_tabs" in result["warning"]
+
+    def test_click_reports_a_closed_tab(self, session):
+        session.tabs("new")
+        chrome = session._browser
+        assert chrome is not None
+        original = chrome.get_opened_tabs
+        calls = []
+
+        def counting():
+            calls.append(1)
+            return original() if len(calls) == 1 else original()[:1]
+
+        chrome.get_opened_tabs = counting
+        result = session.browser("click", target="#go")
+        assert result["tabs_changed"] == -1
+        assert "browser_tabs" not in result.get("warning", "")
+
+    def test_tab_count_is_skipped_for_other_actions(self, session):
+        session._get_tab()
+        chrome = session._browser
+        assert chrome is not None
+        chrome.get_opened_tabs = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        assert session.browser("scroll")["status"] == "ok"
+
+    def test_tab_count_failure_is_ignored(self, session):
+        session._get_tab()
+        chrome = session._browser
+        assert chrome is not None
+        chrome.get_opened_tabs = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        result = session.browser("click", target="#go")
+        assert result["status"] == "ok"
+        assert "tabs" not in result
+
+
+class TestNetwork:
+    def test_requests_are_recorded(self, session):
+        tab = session._get_tab()
+        fire_request(tab)
+        fire_response(tab)
+        result = session.network()
+        assert result["status"] == "ok"
+        assert result["count"] == 1
+        assert result["requests"] == [
+            {
+                "id": "1",
+                "method": "GET",
+                "url": "https://example.com/api",
+                "type": "Fetch",
+                "status": 200,
+                "mime": "application/json",
+            }
+        ]
+
+    def test_cached_response_is_flagged(self, session):
+        tab = session._get_tab()
+        fire_request(tab)
+        fire_response(tab, fromDiskCache=True)
+        assert session.network()["requests"][0]["cached"] is True
+
+    def test_failed_request_is_recorded(self, session):
+        tab = session._get_tab()
+        fire_request(tab, request_id="9", url="https://example.com/broken")
+        watch_callback(tab, NetworkEvent.LOADING_FAILED)(
+            {"params": {"requestId": "9", "errorText": "net::ERR_FAILED"}}
+        )
+        assert session.network()["requests"][0]["failed"] == "net::ERR_FAILED"
+
+    def test_redirect_updates_the_same_entry(self, session):
+        tab = session._get_tab()
+        fire_request(tab, url="https://example.com/one")
+        fire_request(tab, url="https://example.com/two")
+        requests = session.network()["requests"]
+        assert len(requests) == 1
+        assert requests[0]["url"] == "https://example.com/two"
+
+    def test_filter_by_url_and_id(self, session):
+        tab = session._get_tab()
+        fire_request(tab, request_id="req-1", url="https://example.com/alpha")
+        fire_request(tab, request_id="req-2", url="https://example.com/beta")
+        assert [r["id"] for r in session.network(value="beta")["requests"]] == ["req-2"]
+        assert [r["id"] for r in session.network(value="req-1")["requests"]] == [
+            "req-1"
+        ]
+
+    def test_limit_keeps_the_newest(self, session):
+        tab = session._get_tab()
+        for index in range(5):
+            fire_request(tab, request_id=str(index), url=f"https://e.com/{index}")
+        requests = session.network(limit=2)["requests"]
+        assert [r["id"] for r in requests] == ["3", "4"]
+
+    def test_entries_are_evicted(self, session):
+        tab = session._get_tab()
+        for index in range(browser_module._MAX_NETWORK_ENTRIES + 5):
+            fire_request(tab, request_id=str(index), url=f"https://e.com/{index}")
+        requests = session.network(limit=1000)["requests"]
+        assert len(requests) == browser_module._MAX_NETWORK_ITEMS
+
+    def test_clear(self, session):
+        tab = session._get_tab()
+        fire_request(tab)
+        assert session.network("clear")["status"] == "ok"
+        assert session.network()["requests"] == []
+
+    def test_body(self, session):
+        tab = session._get_tab()
+        tab.network_body = "x" * 5000
+        result = session.network("body", "1")
+        assert result["truncated"] is True
+        assert len(result["body"]) == browser_module._MAX_NETWORK_BODY
+        assert tab.requested_body == "1"
+
+    def test_body_requires_an_id(self, session):
+        result = session.network("body")
+        assert result["status"] == "error"
+        assert "request id" in result["error"]
+
+    def test_unknown_action(self, session):
+        result = session.network("har")
+        assert result["status"] == "error"
+        assert "requests, clear, or body" in result["error"]
+
+    def test_bad_events_are_logged(self, session):
+        session._get_tab()
+        watch = session._watch
+        watch.on_request(None)
+        watch.on_response(None)
+        watch.on_failed(None)
+        assert session.network()["requests"] == []
+
+    def test_request_without_an_id_is_ignored(self, session):
+        tab = session._get_tab()
+        watch_callback(tab, NetworkEvent.REQUEST_WILL_BE_SENT)(
+            {"params": {"request": {"method": "GET", "url": "https://e.com"}}}
+        )
+        assert session.network()["requests"] == []
+
+    def test_events_for_unknown_requests_are_ignored(self, session):
+        tab = session._get_tab()
+        fire_response(tab, request_id="missing")
+        watch_callback(tab, NetworkEvent.LOADING_FAILED)(
+            {"params": {"requestId": "missing", "errorText": "x"}}
+        )
+        assert session.network()["requests"] == []
+
+    def test_limit_is_coerced(self):
+        limit = browser_module._coerce_limit
+        assert limit(None) == 20
+        assert limit("5") == 5
+        assert limit(0) == 1
+        assert limit(1000) == browser_module._MAX_NETWORK_ITEMS
+        with pytest.raises(browser_module._ToolError, match="limit must be"):
+            limit("many")
+
+    def test_module_tool_uses_default_session(self, default_session):
+        tab = default_session._get_tab()
+        fire_request(tab)
+        assert browser_module.browser_network()["count"] == 1
+
+
+class TestTabs:
+    def test_list_reports_the_active_tab(self, session):
+        result = session.tabs()
+        assert result["status"] == "ok"
+        assert result["action"] == "list"
+        assert result["count"] == 1
+        assert result["active"] == 0
+        assert result["tabs"][0]["url"] == "https://example.com/page"
+        assert result["tabs"][0]["title"] == "Example"
+
+    def test_new_tab_with_url_becomes_active(self, session):
+        result = session.tabs("new", "https://example.com/second")
+        assert result["count"] == 2
+        assert result["active"] == 1
+        assert result["tabs"][1]["url"] == "https://example.com/second"
+        assert session._tab is session._browser.tabs[1]
+
+    def test_new_tab_without_url(self, session):
+        result = session.tabs("new")
+        assert result["count"] == 2
+        assert session._browser.opened_urls == [""]
+
+    def test_new_tab_rejects_blocked_scheme(self, session):
+        result = session.tabs("new", "file:///etc/passwd")
+        assert result["status"] == "error"
+        assert "scheme" in result["error"]
+
+    def test_switch_by_index(self, session):
+        session.tabs("new", "https://example.com/second")
+        result = session.tabs("switch", "0")
+        assert result["active"] == 0
+        assert result["tabs"][0]["active"] is True
+
+    def test_switch_by_substring(self, session):
+        session.tabs("new", "https://example.com/second")
+        result = session.tabs("switch", "second")
+        assert result["active"] == 1
+
+    def test_switch_without_value_keeps_the_active_tab(self, session):
+        session.tabs("new", "https://example.com/second")
+        assert session.tabs("switch")["active"] == 1
+
+    def test_switch_out_of_range(self, session):
+        result = session.tabs("switch", "9")
+        assert result["status"] == "error"
+        assert "out of range" in result["error"]
+
+    def test_switch_without_a_match(self, session):
+        result = session.tabs("switch", "nothing")
+        assert result["status"] == "error"
+        assert "no tab matches" in result["error"]
+
+    def test_switch_with_an_ambiguous_match(self, session):
+        session.tabs("new", "https://example.com/second")
+        result = session.tabs("switch", "example.com")
+        assert result["status"] == "error"
+        assert "2 tabs match" in result["error"]
+
+    def test_close_the_active_tab(self, session):
+        session.tabs("new", "https://example.com/second")
+        result = session.tabs("close", "1")
+        assert result["count"] == 1
+        assert result["active"] == 0
+        assert session._tab is session._browser.tabs[0]
+
+    def test_close_the_last_tab_stops_the_browser(self, session):
+        result = session.tabs("close")
+        assert result["closed_all"] is True
+        assert result["count"] == 0
+        assert session._browser is None
+        assert session._tab is None
+
+    def test_unknown_action(self, session):
+        result = session.tabs("duplicate")
+        assert result["status"] == "error"
+        assert "list, new, switch, or close" in result["error"]
+
+    def test_resolving_against_no_tabs_is_an_error(self, session):
+        with pytest.raises(browser_module._ToolError, match="no tabs are open"):
+            browser_module._resolve_tab(session, [], None)
+
+    def test_tab_text_survives_a_dead_tab(self):
+        dead = SimpleNamespace(
+            current_url=lambda: (_ for _ in ()).throw(RuntimeError("gone")),
+            title=lambda: "Fallback",
+        )
+        assert browser_module._tab_text(dead) == "fallback"
+
+    def test_module_tool_uses_default_session(self, default_session):
+        assert browser_module.browser_tabs()["count"] == 1
+
+
+class TestCookies:
+    def test_get(self, session):
+        result = session.cookies()
+        assert result["status"] == "ok"
+        assert result["count"] == 1
+        assert result["cookies"][0]["name"] == "sid"
+
+    def test_get_filters_by_name(self, session):
+        assert session.cookies("get", "nope")["count"] == 0
+        assert session.cookies("get", "example.com")["count"] == 1
+
+    def test_set_from_json_scopes_to_the_page(self, session):
+        result = session.cookies("set", '[{"name": "a", "value": "1"}]')
+        assert result["status"] == "ok"
+        assert result["count"] == 1
+        assert session._tab.set_cookie_calls == [
+            [{"name": "a", "value": "1", "url": "https://example.com/page"}]
+        ]
+
+    def test_set_from_a_cookie_header(self, session):
+        result = session.cookies("set", "a=1; b=2")
+        assert result["count"] == 2
+        assert [c["name"] for c in session._tab.set_cookie_calls[0]] == ["a", "b"]
+
+    def test_set_keeps_an_explicit_domain(self, session):
+        session.cookies("set", '[{"name": "a", "value": "1", "domain": "e.com"}]')
+        assert "url" not in session._tab.set_cookie_calls[0][0]
+
+    def test_set_rejects_bad_json(self, session):
+        result = session.cookies("set", "[{oops")
+        assert result["status"] == "error"
+        assert "not valid JSON" in result["error"]
+
+    def test_set_rejects_an_empty_list(self, session):
+        result = session.cookies("set", '{"cookies": []}')
+        assert result["status"] == "error"
+        assert "list of cookie objects" in result["error"]
+
+    def test_set_rejects_a_cookie_without_a_name(self, session):
+        result = session.cookies("set", '[{"value": "1"}]')
+        assert result["status"] == "error"
+        assert "name and a value" in result["error"]
+
+    def test_set_rejects_an_empty_header(self, session):
+        result = session.cookies("set", "; ;")
+        assert result["status"] == "error"
+        assert "name=value" in result["error"]
+
+    def test_set_requires_a_value(self, session):
+        result = session.cookies("set")
+        assert result["status"] == "error"
+        assert "Cookie header" in result["error"]
+
+    def test_clear(self, session):
+        assert session.cookies("clear")["status"] == "ok"
+        assert session._tab.cookies == []
+
+    def test_save_and_load(self, session, tmp_path):
+        target = tmp_path / "state.json"
+        saved = session.cookies("save", str(target))
+        assert saved["status"] == "ok"
+        assert saved["count"] == 1
+        assert target.exists()
+
+        session._tab.set_cookie_calls.clear()
+        loaded = session.cookies("load", str(target))
+        assert loaded["status"] == "ok"
+        assert loaded["count"] == 1
+        assert session._tab.set_cookie_calls[0][0]["name"] == "sid"
+
+    def test_save_requires_a_path(self, session):
+        result = session.cookies("save")
+        assert result["status"] == "error"
+        assert "value=path" in result["error"]
+
+    def test_load_requires_a_path(self, session):
+        result = session.cookies("load")
+        assert result["status"] == "error"
+        assert "value=path" in result["error"]
+
+    def test_load_reports_a_missing_file(self, session, tmp_path):
+        result = session.cookies("load", str(tmp_path / "missing.json"))
+        assert result["status"] == "error"
+        assert "could not read" in result["error"]
+
+    def test_load_reports_bad_json(self, session, tmp_path):
+        target = tmp_path / "bad.json"
+        target.write_text("nope", encoding="utf-8")
+        result = session.cookies("load", str(target))
+        assert result["status"] == "error"
+        assert "not valid JSON" in result["error"]
+
+    def test_unknown_action(self, session):
+        result = session.cookies("export")
+        assert result["status"] == "error"
+        assert "get, set, clear, save, or load" in result["error"]
+
+    def test_cookie_records_ignore_junk(self):
+        assert browser_module._cookie_records("nope") == []
+        assert browser_module._cookie_records([{"name": "a"}, 5]) == [{"name": "a"}]
+
+    def test_module_tool_uses_default_session(self, default_session):
+        assert browser_module.browser_cookies()["count"] == 1
+
+
+class TestPersistentProfile:
+    def test_user_data_dir_is_passed_to_chrome(self, fake_chrome, tmp_path):
+        profile = tmp_path / "profile"
+        session = BrowserSession(user_data_dir=str(profile))
+        session._get_tab()
+        options = FakeChrome.instances[0].options
+        assert options is not None
+        arguments = list(options.arguments)
+        assert f"--user-data-dir={profile.resolve()}" in arguments
+        assert profile.is_dir()
+        assert session.user_data_dir == profile.resolve()
+        session.close()
+
+    def test_close_flushes_a_persistent_profile(
+        self, fake_chrome, tmp_path, monkeypatch
+    ):
+        slept = []
+        monkeypatch.setattr(browser_module.time, "sleep", slept.append)
+        session = BrowserSession(user_data_dir=str(tmp_path / "profile"))
+        session._get_tab()
+        assert session.close() is True
+        chrome = FakeChrome.instances[0]
+        assert chrome.commands[0]["method"] == "Browser.close"
+        assert slept == [browser_module._PROFILE_FLUSH_S]
+
+    def test_reset_flushes_a_persistent_profile(
+        self, fake_chrome, tmp_path, monkeypatch
+    ):
+        slept = []
+        monkeypatch.setattr(browser_module.time, "sleep", slept.append)
+        session = BrowserSession(user_data_dir=str(tmp_path / "profile"))
+        session._get_tab()
+        session._reset()
+        chrome = FakeChrome.instances[0]
+        assert chrome.commands[0]["method"] == "Browser.close"
+        assert slept == [browser_module._PROFILE_FLUSH_S]
+
+    def test_close_skips_the_flush_without_a_profile(
+        self, session, fake_chrome, monkeypatch
+    ):
+        slept = []
+        monkeypatch.setattr(browser_module.time, "sleep", slept.append)
+        session._get_tab()
+        assert session.close() is True
+        assert not getattr(FakeChrome.instances[0], "commands", [])
+        assert slept == []
+
+    def test_flush_ignores_a_close_error(self, fake_chrome, tmp_path, monkeypatch):
+        slept = []
+        monkeypatch.setattr(browser_module.time, "sleep", slept.append)
+        FakeChrome.command_error = RuntimeError("already gone")
+        session = BrowserSession(user_data_dir=str(tmp_path / "profile"))
+        session._get_tab()
+        assert session.close() is True
+        assert slept == []
+
+    def test_no_profile_by_default(self, session, fake_chrome):
+        session._get_tab()
+        options = FakeChrome.instances[0].options
+        assert options is not None
+        assert not any(
+            argument.startswith("--user-data-dir=") for argument in options.arguments
+        )
