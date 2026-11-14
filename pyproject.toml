@@ -23,6 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ffmpeg = ["imageio-ffmpeg>=0.8.1"]
 mcp = ["dspy>=3.1", "httpx2>=2.10", "mcp>=2"]
 
 [build-system]
@@ -47,6 +48,13 @@ dev = [
 
 [tool.deptry]
 known_first_party = ["dspy_agent_tools"]
+
+[tool.deptry.per_rule_ignores]
+# Imported dynamically only when the optional [ffmpeg] extra is installed.
+DEP002 = ["imageio-ffmpeg"]
+
+[tool.deptry.package_module_name_map]
+imageio-ffmpeg = "imageio_ffmpeg"
 
 [tool.isort]
 profile = "black"
