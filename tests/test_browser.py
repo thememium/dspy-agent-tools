@@ -1271,26 +1271,36 @@ class TestModuleFunctions:
 
 
 class TestBrowserBundle:
-    BROWSER_NAMES: ClassVar[list[str]] = [
+    DEFAULT_NAMES: ClassVar[list[str]] = [
         "browser_open",
         "browser",
         "browser_snapshot",
         "browser_screenshot",
         "browser_evaluate",
+        "browser_close",
+    ]
+    RECORDING_NAMES: ClassVar[list[str]] = [
         "browser_record_start",
         "browser_record_stop",
-        "browser_close",
     ]
 
     def test_browser_returns_dspy_tools(self):
         tools = browser_module.Browser()
         assert isinstance(tools, browser_module.BrowserTools)
-        assert [tool.name for tool in tools] == self.BROWSER_NAMES
+        assert [tool.name for tool in tools] == self.DEFAULT_NAMES
         assert all(isinstance(tool, dspy.Tool) for tool in tools)
+
+    def test_browser_can_include_recording(self):
+        tools = browser_module.Browser(include_recording=True)
+        assert [tool.name for tool in tools] == [
+            *self.DEFAULT_NAMES[:-1],
+            *self.RECORDING_NAMES,
+            "browser_close",
+        ]
 
     def test_browser_can_include_search(self):
         tools = browser_module.Browser(include_search=True)
-        assert [tool.name for tool in tools] == [*self.BROWSER_NAMES, "web_search"]
+        assert [tool.name for tool in tools] == [*self.DEFAULT_NAMES, "web_search"]
 
     def test_browser_close_delegates_to_shared_browser(self, monkeypatch):
         monkeypatch.setattr(
