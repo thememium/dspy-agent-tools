@@ -212,6 +212,7 @@ class FakeChrome:
 
 @pytest.fixture
 def fake_chrome(monkeypatch):
+    browser_module._require_pydoll()
     FakeChrome.instances = []
     FakeChrome.start_error = None
     monkeypatch.setattr(browser_module, "Chrome", FakeChrome)
@@ -1289,6 +1290,19 @@ class TestBrowserBundle:
         assert isinstance(tools, browser_module.BrowserTools)
         assert [tool.name for tool in tools] == self.DEFAULT_NAMES
         assert all(isinstance(tool, dspy.Tool) for tool in tools)
+
+    def test_browser_requires_pydoll(self, monkeypatch):
+        monkeypatch.setattr(browser_module, "_pydoll_loaded", False)
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "pydoll" or name.startswith("pydoll."):
+                raise ImportError("pydoll is not installed")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        with pytest.raises(ImportError, match=r"\[browser\]"):
+            browser_module.Browser()
 
     def test_browser_can_include_recording(self):
         tools = browser_module.Browser(include_recording=True)
