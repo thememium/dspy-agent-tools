@@ -10,6 +10,14 @@ from .bash import (
     bash_ripgrep,
     bash_ripgrep_batch,
 )
+from .browser import (
+    BrowserSession,
+    browser,
+    browser_close,
+    browser_evaluate,
+    browser_screenshot,
+    browser_snapshot,
+)
 from .cli import CLI, Argument, CLITools, Command, Option
 from .files import delete_file, edit_file, read_file, write_file
 from .mcp import MCP, MCPTools
@@ -20,6 +28,7 @@ __all__ = [
     "CLI",
     "MCP",
     "Argument",
+    "BrowserSession",
     "CLITools",
     "Command",
     "MCPTools",
@@ -35,6 +44,11 @@ __all__ = [
     "bash_ls",
     "bash_ripgrep",
     "bash_ripgrep_batch",
+    "browser",
+    "browser_close",
+    "browser_evaluate",
+    "browser_screenshot",
+    "browser_snapshot",
     "delete_file",
     "edit_file",
     "read_file",
