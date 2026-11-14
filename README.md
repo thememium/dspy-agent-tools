@@ -91,6 +91,12 @@ the `rg` and `fd` binaries, then to POSIX `grep` and `find`, and report an
 resort: it skips hidden paths and VCS directories like the default backends but
 cannot read `.gitignore` rules, so ignored files are still searched.
 
+The browser tools (`browser`, `browser_snapshot`, `browser_screenshot`,
+`browser_evaluate`) drive a locally installed Chrome in headless mode through
+pydoll. Chrome must be installed; there is no separate browser download step.
+The browser starts on the first tool call and is reused until you call
+`browser_close` or the process exits.
+
 The MCP bridge is an optional extra (it pulls in DSPy, `httpx2`, and MCP
 SDK 2.x). Importing `MCP` works without it; calling `MCP()` raises an
 `ImportError` with the install hint:
@@ -201,6 +207,50 @@ coder = dspy.RLM(
 )
 
 result = coder(task="Rename the class SessionManager to Session across the repo")
+```
+
+### With the headless browser
+
+The browser tools are ordinary functions, so they go straight into
+`dspy.ReAct` or `dspy.RLM`. Nothing is created or cleaned up by hand:
+
+```python
+import dspy
+from dspy_agent_tools import browser, browser_snapshot, browser_screenshot
+
+agent = dspy.ReAct(
+    "task -> result",
+    tools=[browser, browser_snapshot, browser_screenshot],
+    max_iters=12,
+)
+
+result = agent(task="Open https://example.com and summarize the page")
+```
+
+`browser_snapshot` returns structured nodes, not a text blob. Each interactive
+element has a ref such as `@e3`, and the same ref works as the `target` of the
+next action:
+
+```python
+snapshot = browser_snapshot()
+email = next(node for node in snapshot["nodes"] if node["role"] == "textbox")
+browser("type", target=email["ref"], value="hello@example.com")
+browser("click", target="text=Sign in")
+browser("press", value="Enter")
+```
+
+Every call returns a dict whose `status` is `ok` or `error`. The browser is
+headless by default. For a server that needs one browser per user or session,
+create a `BrowserSession` per scope instead of using the shared module-level
+functions:
+
+```python
+from dspy_agent_tools import BrowserSession
+
+session = BrowserSession()
+session.browser("navigate", value="https://example.com")
+nodes = session.snapshot()["nodes"]
+session.close()
 ```
 
 A full coding-agent toolbox, all in one import:
@@ -618,6 +668,10 @@ bash_ripgrep_batch(
   the file's content, and `edit_file`/`write_file`/`delete_file` reject the
   change if the file has changed since it was read, so concurrent edits can't
   be silently overwritten.
+- Browser tools drive a real headless Chrome with the caller's network reach,
+  and `browser_evaluate` runs arbitrary JavaScript in the page. Treat page
+  content as untrusted input, and use one `BrowserSession` per user or session
+  on a shared server so cookies and tabs do not leak between callers.
 - Non-zero exits, timeouts, and failed transfers are reported inline as
   `"[exit code N]"` / `"[command timed out ...]"` notices rather than raised,
   so an agent can read and recover from failures.
@@ -642,6 +696,21 @@ bash_ripgrep_batch(
 | **`bash_ls`** | List one directory's entries in long format. |
 | **`bash_curl`** | Fetch a URL and return the **raw** response body — API JSON, headers, binaries. |
 | **`bash_fetch`** | Fetch a web page and return **readable markdown** — nav, ads, cookie banners stripped, title kept. Prefer over `bash_curl` when the goal is reading. |
+
+### Browser (`dspy_agent_tools.browser`)
+
+| Tool | Use it for |
+| --- | --- |
+| **`browser`** | Run one action: `navigate`, `click`, `type`, `press`, `hover`, `select`, `scroll`, `back`, `forward`, `reload`, or `wait`. `target` accepts an `@ref`, CSS, XPath, `text=Exact`, or `text*=Partial`; `value` carries the URL, text, key, option value, scroll direction, or seconds. |
+| **`browser_snapshot`** | Return `{url, title, nodes, node_count, truncated, text}`. Nodes carry `ref` (`@e1`), `role`, `name`, `tag`, `depth`, and relevant `value`/`href`/`checked`/`disabled`. Refs are reassigned on every snapshot. |
+| **`browser_screenshot`** | Save a PNG/JPEG/WebP (temp file by default) and return `path`, `format`, `bytes`; `full_page` captures beyond the viewport, `as_base64` returns the image inline. |
+| **`browser_evaluate`** | Run JavaScript with a `return` statement and get the value by value (`return document.title`). `await_promise` waits for promises. |
+| **`browser_close`** | Stop the shared browser early; the next call starts a fresh one. Optional, because exit also cleans up. |
+| **`BrowserSession`** | Advanced: one lazily started headless browser per user/request with the same methods, for server-side isolation. |
+
+Chrome runs headless by default. Actions return `{"status": "ok" | "error", ...}`;
+on failure `error` carries the reason, and a stale `@ref` asks for a fresh
+snapshot.
 
 ### Files (`dspy_agent_tools.files`)
 
