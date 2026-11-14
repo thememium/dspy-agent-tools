@@ -116,6 +116,9 @@ class FakeTab:
         self.current_url_error = None
         self.title_error = None
         self.screenshot_error = None
+        self.network_idle_calls = []
+        self.url_wait_calls = []
+        self.wait_error = None
         self.page_events = 0
         self.callbacks = {}
         self.removed_callbacks = []
@@ -137,6 +140,17 @@ class FakeTab:
         if self.title_error:
             raise self.title_error
         return self.page_title
+
+    def wait_for_network_idle(self, idle_time=0.5, timeout=30):
+        self.network_idle_calls.append((idle_time, timeout))
+        if self.wait_error:
+            raise self.wait_error
+
+    def wait_for_url(self, url, timeout=30):
+        self.url_wait_calls.append((url, timeout))
+        if self.wait_error:
+            raise self.wait_error
+        return self.url
 
     def query(self, expression, timeout=0, find_all=False, raise_exc=True):
         self.queries.append((expression, timeout, find_all, raise_exc))
@@ -232,11 +246,6 @@ def default_session(monkeypatch, fake_chrome):
     monkeypatch.setattr(browser_module, "_default_session", session)
     yield session
     BrowserSession.close(session)
-
-
-@pytest.fixture
-def no_sleep(monkeypatch):
-    monkeypatch.setattr(browser_module.time, "sleep", lambda _seconds: None)
 
 
 @pytest.fixture
@@ -439,13 +448,41 @@ class TestNavigate:
             ("localhost:8000", "http://localhost:8000"),
             ("127.0.0.1:9000", "http://127.0.0.1:9000"),
             ("data:text/html,hi", "data:text/html,hi"),
-            ("file:///tmp/a", "file:///tmp/a"),
             ("about:blank", "about:blank"),
         ],
     )
     def test_url_normalization(self, session, value, expected):
         session.browser("navigate", value=value)
         assert session._tab.navigations[-1][0] == expected
+
+    def test_file_url_blocked_by_default(self, session):
+        result = session.browser("navigate", value="file:///tmp/a")
+        assert result["status"] == "error"
+        assert "scheme file" in result["error"]
+        assert session._tab is None
+
+    def test_allowed_schemes_can_include_file(self, fake_chrome):
+        session = BrowserSession(allowed_schemes=("http", "https", "file"))
+        try:
+            result = session.browser("navigate", value="file:///tmp/a")
+            assert result["status"] == "ok"
+            assert session._tab is not None
+            assert session._tab.navigations == [("file:///tmp/a", 15)]
+        finally:
+            session.close()
+
+    def test_url_policy_can_reject_and_accept(self, fake_chrome):
+        session = BrowserSession(url_policy=lambda url: "example.com" in url)
+        try:
+            rejected = session.browser("navigate", value="https://blocked.test")
+            assert rejected["status"] == "error"
+            assert "URL policy" in rejected["error"]
+            accepted = session.browser("navigate", value="https://example.com")
+            assert accepted["status"] == "ok"
+            assert session._tab is not None
+            assert session._tab.navigations == [("https://example.com", 15)]
+        finally:
+            session.close()
 
     def test_missing_url(self, session):
         result = session.browser("navigate")
@@ -487,6 +524,7 @@ class TestActions:
         assert result["method"] == "native"
         assert session._tab.queries[0][0] == '[data-dspy-agent-ref="e3"]'
         assert session._tab.element.click_calls == 1
+        assert session._tab.network_idle_calls == [(0.2, 2.0)]
 
     def test_click_falls_back_to_js(self, session):
         session._get_tab()
@@ -657,15 +695,30 @@ class TestActions:
         assert "scroll value" in result["error"]
 
     @pytest.mark.parametrize("action", ["back", "forward"])
-    def test_history(self, session, action, no_sleep):
+    def test_history(self, session, action):
         result = session.browser(action)
         assert result["status"] == "ok"
         assert session._tab.scripts[-1][0] == f"history.{action}()"
+        assert len(session._tab.url_wait_calls) == 1
+        idle_time, wait_timeout = session._tab.network_idle_calls[0]
+        assert idle_time == 0.2
+        assert 0.1 <= wait_timeout <= 2.0
 
     def test_reload(self, session):
         result = session.browser("reload")
         assert result["status"] == "ok"
         assert session._tab.refresh_calls == 1
+        assert session._tab.network_idle_calls == [(0.2, 2.0)]
+
+    def test_settle_errors_are_best_effort(self, session):
+        session._get_tab()
+        session._tab.wait_error = RuntimeError("timed out")
+        assert (
+            browser_module._settle(
+                session._tab, 15, previous_url="https://example.com/old"
+            )
+            is False
+        )
 
     def test_wait(self, session, monkeypatch):
         slept = []
@@ -749,7 +802,7 @@ class TestSnapshot:
             ],
             truncated=True,
         )
-        result = session.snapshot()
+        result = session.snapshot(format="both")
         assert result["status"] == "ok"
         assert result["node_count"] == 4
         assert result["truncated"] is True
@@ -762,12 +815,25 @@ class TestSnapshot:
             + '  @e4 textbox "Name" value="Ada"'
         )
 
-    def test_include_text_false(self, session):
+    def test_default_format_is_nodes_only(self, session):
         session._get_tab()
         session._tab.script_response = snapshot_response([])
-        result = session.snapshot(include_text=False)
+        result = session.snapshot()
+        assert "nodes" in result
         assert "text" not in result
         assert result["node_count"] == 0
+
+    def test_text_format_omits_nodes(self, session):
+        session._get_tab()
+        session._tab.script_response = snapshot_response([])
+        result = session.snapshot(format="text")
+        assert "nodes" not in result
+        assert result["text"] == ""
+
+    def test_invalid_format(self, session):
+        result = session.snapshot(format="html")
+        assert result["status"] == "error"
+        assert "format must be" in result["error"]
 
     def test_max_nodes_is_clamped(self, session):
         session._get_tab()
@@ -1213,6 +1279,8 @@ class TestOpen:
         assert result["action"] == "open"
         assert result["url"] == "https://example.com/page"
         assert result["node_count"] == 0
+        assert result["nodes"] == []
+        assert "text" not in result
         assert session._tab.navigations == [("https://example.com", 15)]
 
     def test_navigation_error_skips_snapshot(self, session):
@@ -1220,7 +1288,7 @@ class TestOpen:
         assert result["status"] == "error"
         assert result["action"] == "open"
         assert "navigate requires" in result["error"]
-        assert session._tab.scripts == []
+        assert session._tab is None
 
     def test_snapshot_error_keeps_open_action(self, session):
         session._get_tab()
@@ -1316,22 +1384,51 @@ class TestBrowserBundle:
         tools = browser_module.Browser(include_search=True)
         assert [tool.name for tool in tools] == [*self.DEFAULT_NAMES, "web_search"]
 
-    def test_browser_close_delegates_to_shared_browser(self, monkeypatch):
-        monkeypatch.setattr(
-            browser_module,
-            "browser_close",
-            lambda: {"status": "ok", "closed": True},
-        )
-        assert browser_module.Browser().close() == {"status": "ok", "closed": True}
+    def test_browser_binds_tools_to_session(self, session):
+        tools = browser_module.Browser(session=session)
+        assert tools.session is session
+        session._get_tab()
+        session._tab.script_response = snapshot_response([])
+        snapshot = next(tool for tool in tools if tool.name == "browser_snapshot")
+        assert snapshot.func()["status"] == "ok"
+        assert snapshot.args["format"]["default"] == "nodes"
+        assert "include_text" not in snapshot.args
 
-    def test_browser_context_manager_closes(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(
-            browser_module,
+    def test_session_tools_binds_tools_to_session(self, session):
+        tools = session.tools(include_recording=True)
+        assert tools.session is session
+        assert [tool.name for tool in tools] == [
+            *self.DEFAULT_NAMES[:-1],
+            *self.RECORDING_NAMES,
             "browser_close",
-            lambda: calls.append(True) or {"status": "ok"},
-        )
-        with browser_module.Browser() as tools:
+        ]
+
+    def test_browser_close_delegates_to_session(self, session):
+        calls = []
+        session.close = lambda: calls.append(True) or True
+        session.take_last_recording = lambda: None
+        tools = browser_module.Browser(session=session)
+        assert tools.close() == {"status": "ok", "action": "close", "closed": True}
+        assert calls == [True]
+
+    def test_browser_close_tool_delegates_to_session(self, session):
+        calls = []
+        session.close = lambda: calls.append(True) or False
+        session.take_last_recording = lambda: None
+        tools = browser_module.Browser(session=session)
+        close_tool = next(tool for tool in tools if tool.name == "browser_close")
+        assert close_tool.func() == {
+            "status": "ok",
+            "action": "close",
+            "closed": False,
+        }
+        assert calls == [True]
+
+    def test_browser_context_manager_closes_session(self, session):
+        calls = []
+        session.close = lambda: calls.append(True) or False
+        session.take_last_recording = lambda: None
+        with browser_module.Browser(session=session) as tools:
             assert isinstance(tools, browser_module.BrowserTools)
         assert calls == [True]
 
