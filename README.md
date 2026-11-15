@@ -82,16 +82,7 @@ Or with pip:
 pip install dspy-agent-tools
 ```
 
-`bash_curl`, `bash_exec`, and `bash_ls` shell out to real `bash`/`curl`/`ls`
-binaries, which must be on your PATH. The search tools
-(`bash_ripgrep`, `bash_find`, `bash_glob`) run through the `rgapi` library —
-ripgrep's and fd's engines as Python modules — so no `rg`/`fd` binary is
-needed. rgapi ships a compiled extension: when it cannot be imported (no wheel
-for your interpreter and no working local build), the search tools fall back to
-the `rg` and `fd` binaries, then to POSIX `grep` and `find`, and report an
-`[Error]` body only when none of those exist. The `grep`/`find` tier is a last
-resort: it skips hidden paths and VCS directories like the default backends but
-cannot read `.gitignore` rules, so ignored files are still searched.
+### Optional Installs
 
 The browser tools are an optional extra (DSPy plus pydoll). Importing
 `Browser` works without it; calling `Browser()` raises an `ImportError` with
