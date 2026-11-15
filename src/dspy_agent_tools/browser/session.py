@@ -330,8 +330,8 @@ class BrowserSession:
         with self._lock:
             recorder, self._recorder = self._recorder, None
             if recorder is not None:
-                if self._tab is not None:
-                    recording._stop_screencast(self._tab, recorder)
+                if recorder.tab is not None:
+                    recording._stop_screencast(recorder.tab, recorder)
                 try:
                     data = recording._finalize_recording(recorder)
                 except Exception as exc:  # noqa: BLE001 - returned by browser_close
@@ -378,8 +378,8 @@ class BrowserSession:
             recorder, self._recorder = self._recorder, None
             if recorder is None:
                 raise errors._ToolError("no video recording is in progress")
-            if self._tab is not None:
-                recording._stop_screencast(self._tab, recorder)
+            if recorder.tab is not None:
+                recording._stop_screencast(recorder.tab, recorder)
         return recording._finalize_recording(recorder)
 
     def record_start(

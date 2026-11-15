@@ -12,6 +12,8 @@ from . import coerce, config, errors, session
 def _cookie_list(value: str | None) -> list[dict[str, Any]]:
     """Parse a JSON cookie list, a ``Cookie:`` header, or a saved state file."""
     text = (value or "").strip()
+    if text.lower().startswith("cookie:"):
+        text = text[len("cookie:") :].strip()
     if not text:
         raise errors._ToolError(
             "cookies set requires value=JSON or a Cookie header such as a=1; b=2"
@@ -152,6 +154,11 @@ def _cookies_action(
                     "action": "save",
                     "path": str(target.absolute()),
                     "count": len(state["cookies"]),
+                    **{
+                        key: state[key]
+                        for key in ("console", "errors", "dialog")
+                        if key in state
+                    },
                 }
             if action == "load":
                 if not text:
@@ -165,7 +172,15 @@ def _cookies_action(
                     raise errors._ToolError(
                         f"{source} is not valid JSON: {exc.msg}"
                     ) from exc
-                result = _apply_cookies(session, _cookie_list(json.dumps(state)))
+                raw = state.get("cookies") if isinstance(state, dict) else state
+                if raw == []:
+                    return {"status": "ok", "action": "set", "count": 0}
+                restored = _cookie_list(json.dumps(state))
+                if isinstance(state, dict) and state.get("url"):
+                    for cookie in restored:
+                        if "url" not in cookie and "domain" not in cookie:
+                            cookie["url"] = state["url"]
+                result = _apply_cookies(session, restored)
                 _persist_cookie_state(session)
                 return result
             result = _apply_cookies(session, _cookie_list(text))

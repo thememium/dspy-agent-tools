@@ -46,6 +46,7 @@ def _network_action(
                     "id": text,
                     "body": body[: config._MAX_NETWORK_BODY],
                     "truncated": len(body) > config._MAX_NETWORK_BODY,
+                    **session.take_diagnostics(),
                 }
             session._run(lambda tab: None)
             entries = session._watch.network(tabs._coerce_limit(limit), text)

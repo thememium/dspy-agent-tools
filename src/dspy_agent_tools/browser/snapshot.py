@@ -85,6 +85,9 @@ def _snapshot(
         payload["nodes"] = nodes
     if view in ("text", "both"):
         payload["text"] = _render_nodes(nodes)
+    for key in ("console", "errors", "dialog"):
+        if key in data:
+            payload[key] = data[key]
     return payload
 
 

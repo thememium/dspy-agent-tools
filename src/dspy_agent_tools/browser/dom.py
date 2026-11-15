@@ -187,7 +187,7 @@ def _verify_typed(state: dict[str, Any] | None, expected: str) -> dict[str, Any]
     actual = state.get("value")
     if actual is None:
         actual_text = str(state.get("text") or "")
-        verified = expected in actual_text
+        verified = actual_text == expected
     else:
         actual_text = str(actual)
         verified = actual_text == expected
