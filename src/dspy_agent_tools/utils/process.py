@@ -65,7 +65,10 @@ def execute(
     except subprocess.TimeoutExpired:
         pid = popen.pid
         assert pid is not None  # a process that timed out still has a pid
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:  # the process group already exited
+            pass
         raw, _ = popen.communicate()
         timed_out = True
     elapsed = time.monotonic() - started

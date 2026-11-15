@@ -34,8 +34,9 @@ def sync_tool_class(*, drop_nulls: bool = False) -> type[Tool]:
     call keeps ``agent(...)`` working without mutating global DSPy settings,
     and leaves ``acall`` fully asynchronous.
 
-    ``drop_nulls`` treats ``None`` as "not supplied", which MCP input schemas
-    require; local Python tools keep explicit ``None`` values.
+    ``drop_nulls`` treats ``None`` as "not supplied" only when the argument's
+    JSON schema rejects null. Nullable MCP arguments retain explicit nulls;
+    local Python tools keep all explicit ``None`` values.
     """
     import dspy
     from dspy import Tool as DspyTool
@@ -52,11 +53,21 @@ def sync_tool_class(*, drop_nulls: bool = False) -> type[Tool]:
         async def acall(self, **kwargs: Any) -> Any:
             return await super().acall(**self._prepare(kwargs))
 
-        @staticmethod
-        def _prepare(kwargs: dict[str, Any]) -> dict[str, Any]:
+        def _prepare(self, kwargs: dict[str, Any]) -> dict[str, Any]:
             if not drop_nulls:
                 return kwargs
-            return {name: value for name, value in kwargs.items() if value is not None}
+            from jsonschema.validators import validator_for
+
+            schemas = self.args or {}
+            return {
+                name: value
+                for name, value in kwargs.items()
+                if value is not None
+                or (
+                    name in schemas
+                    and validator_for(schemas[name])(schemas[name]).is_valid(None)
+                )
+            }
 
     _SYNC_TOOL_CLASSES[drop_nulls] = _SyncCapableTool
     return _SyncCapableTool
