@@ -13,7 +13,8 @@ Patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")], guide="Never comm
 ```
 
 It works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`, returns the same
-agent, and keeps its settings (iterations, callbacks, history, the compiled
+agent, and keeps its settings (iterations, predictor LMs and configuration,
+callbacks, history, the compiled
 flag, and for `dspy.RLM` its call budget, sub-LM, and interpreter factory).
 
 ## Why instructions, not input fields

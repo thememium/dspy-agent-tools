@@ -12,7 +12,7 @@ uv add "dspy-agent-tools[mcp]"
 # or: pip install "dspy-agent-tools[mcp]"
 ```
 
-The extra installs DSPy, `httpx2`, and MCP SDK 2.x. Importing `MCP` works
+The extra installs DSPy 3.4.1+, `httpx2`, and MCP SDK 2.x. Importing `MCP` works
 without it; calling `MCP()` raises `ImportError` with the install hint.
 
 ## Quick start
@@ -57,8 +57,14 @@ def transport_factory():
 tools = MCP(transport=transport_factory)
 ```
 
-`MCP()` starts the server and lists its tools immediately. It does not wait
-for the first tool call.
+`MCP()` starts the server and lists its tools immediately, following every
+pagination cursor. Initialization and all listing pages share the
+`startup_timeout` deadline.
+
+Optional arguments remain optional in DSPy's schema. Explicit `None` is
+preserved when the argument schema allows JSON null; for a non-nullable
+argument it is treated as omitted. JSON Schema type unions such as
+`{"type": ["string", "null"]}` are supported.
 
 ## Transports
 
@@ -92,7 +98,7 @@ Validation is strict:
 | `cwd` | `None` | Working directory for the stdio server. |
 | `url` | `None` | Remote MCP endpoint. |
 | `transport` | `"auto"` | `"auto"`, `"stdio"`, `"http"`, `"sse"`, or a custom factory. |
-| `startup_timeout` | `60` | Seconds to wait for the server to initialize before the initial tool listing. |
+| `startup_timeout` | `60` | Shared deadline in seconds for initialization and all tool-listing pages. |
 | `name_prefix` | `""` | Prepended to every tool name. |
 | `result_mode` | `"text"` | `"text"` flattens MCP text content to strings; `"structured"` returns the server's `structuredContent` when it provides it. |
 | `retry_timeout` | `30` | Seconds to replay a read-only tool while it answers with an error payload; `0` disables the replay. |
@@ -220,7 +226,7 @@ any caller loop.
 - Calling `MCP()` without the `[mcp]` extra raises `ImportError` with the
   install hint.
 - `MCP()` raises `ValueError` for invalid transport combinations and
-  `TimeoutError` when the server does not initialize within
+  `TimeoutError` when initialization or tool discovery does not finish within
   `startup_timeout`.
 - Remote HTTP failures report the server's HTTP status and a short hint in the
   raised error.

@@ -59,8 +59,8 @@ assemble the instructions it sends to the LM. These docstrings are written for
 that purpose — each one tells the model WHAT the tool does, WHEN to use it
 instead of a sibling tool, and HOW to pass arguments.
 
-Requires **Python 3.13+**; run agents with **DSPy 3.1+** (the `[browser]` and
-`[mcp]` extras install it).
+Requires **Python 3.13+**; run agents with **DSPy 3.1+**. The `[browser]` extra
+installs DSPy; `[mcp]` requires **DSPy 3.4.1+** for its MCP result conversion API.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
