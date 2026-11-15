@@ -29,11 +29,11 @@ The list holds four progressive-disclosure tools:
 - ``run_skill_script`` — one script from ``scripts/``, run in the sandbox
   described in :mod:`dspy_agent_tools.sandbox`.
 
-Call :meth:`SkillTools.patch` on an already-built agent to append the tools
-and inject the skill catalog into its instructions. It is shorthand for
-:func:`dspy_agent_tools.patch`, which adds any other tool family in the same
-call; the agent class decides how the inner predictor is rebuilt, so both work
-for ``dspy.ReAct``, ``dspy.ReActV2``, and ``dspy.RLM``.
+Pass the list to :func:`dspy_agent_tools.patch` on an already-built agent to
+append the tools and inject the skill catalog into its instructions, together
+with any other tool family in the same call; the agent class decides how the
+inner predictor is rebuilt, so it works for ``dspy.ReAct``, ``dspy.ReActV2``,
+and ``dspy.RLM``.
 
 ``mode="search"`` (default) returns text for ReAct-style agents;
 ``mode="code"`` returns dictionaries for ``dspy.RLM``.
@@ -51,7 +51,6 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 
 from .guide import names_in
-from .patch import patch
 from .sandbox import (
     DEFAULT_INTERPRETERS,
     DEFAULT_SCRIPT_TIMEOUT,
@@ -789,12 +788,11 @@ class SkillTools(list):
     concatenated with other tools. ``skills`` holds the discovered
     :class:`Skill` objects and ``errors`` the skipped directories.
 
-    :meth:`patch` appends these tools to an existing ``dspy.ReAct``,
-    ``dspy.ReActV2``, or ``dspy.RLM`` agent and injects the skill catalog
-    into the instructions the model sees. It is shorthand for
-    :func:`dspy_agent_tools.patch`, whose ``section`` protocol this class
-    implements: ``family`` names the tool family and :meth:`section` renders
-    the guidance that replaces that family's template.
+    Pass it to :func:`dspy_agent_tools.patch` on an existing ``dspy.ReAct``,
+    ``dspy.ReActV2``, or ``dspy.RLM`` agent to append these tools and inject
+    the skill catalog into the instructions the model sees. It implements that
+    function's ``section`` protocol: ``family`` names the tool family and
+    :meth:`section` renders the guidance that replaces the family template.
     """
 
     #: Tool family used by :func:`dspy_agent_tools.patch` (see guide.py).
@@ -857,26 +855,6 @@ class SkillTools(list):
         return "\n\n".join(
             [self._guidance(), self._execution_note(tools), self._catalog]
         )
-
-    def patch(self, agent: Any) -> Any:
-        """Append the skill tools to ``agent`` and inject the catalog.
-
-        Shorthand for :func:`dspy_agent_tools.patch`, which appends the skill
-        guidance, the execution rules, and the ``<available_skills>`` catalog
-        to the agent's instructions and adds the four skill tools to its tool
-        list. The execution rules name the tools the agent already has that
-        can run host commands, so a skill whose instructions call a CLI is
-        either followed for real or reported as a command the user must run;
-        the model is told never to invent command output.
-
-        Works for ``dspy.ReAct``, ``dspy.ReActV2``, and ``dspy.RLM``; other
-        module types raise ``TypeError``. Patching twice with the same
-        ``Skills`` changes nothing, and patching an agent that already
-        received these tools through ``tools=`` only adds the catalog.
-
-        Returns the agent for chaining: ``agent = Skills(...).patch(agent)``.
-        """
-        return patch(agent, self)
 
 
 # ---------------------------------------------------------------------------
@@ -951,7 +929,7 @@ def Skills(
         >>> agent = dspy.ReAct("question -> answer", tools=skills)
 
         >>> agent = dspy.ReAct("question -> answer", tools=[bash_exec])
-        >>> Skills("./skills").patch(agent)
+        >>> dspy_agent_tools.patch(agent, Skills("./skills"))
 
         >>> rlm = dspy.RLM("task -> report", tools=Skills("./skills", mode="code"))
     """
