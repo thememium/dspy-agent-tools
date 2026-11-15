@@ -216,6 +216,8 @@ tools.close()  # stops this session only
 See [docs/browser.md](docs/browser.md) for actions, snapshots and refs, tabs,
 network capture, cookies and profiles, video recording, and URL policy.
 
+### With a coding agent
+
 A full coding-agent toolbox, all in one import:
 
 ```python
