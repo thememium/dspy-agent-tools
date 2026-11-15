@@ -209,7 +209,7 @@ def sections(tools: Sequence[Any], skip: frozenset[str] = frozenset()) -> list[s
 def present_keys(text: str) -> frozenset[str]:
     """Family keys whose section heading already appears in ``text``.
 
-    A caller who wrote their own ``## Shell`` paragraph keeps it: ``patch``
+    A caller who wrote their own ``## Shell`` paragraph keeps it: ``Patch``
     skips the template it would otherwise add.
     """
     return frozenset(
