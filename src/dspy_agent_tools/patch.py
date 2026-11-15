@@ -1,6 +1,6 @@
 """Add tools and tool guidance to an agent that was already built.
 
-``patch`` takes any number of tool sources — tool lists such as ``MCP(...)``,
+``Patch`` adds tool sources to a built agent — tool lists such as ``MCP(...)``,
 ``CLI(...)``, ``Browser()``, ``Skills(...)``, ``Toolbox(...)``, or bare
 ``dspy.Tool`` objects and functions — appends them to an existing agent, and
 recomputes a short policy section per tool family in the agent's
@@ -8,10 +8,10 @@ instructions.
 
 ```python
 import dspy
-from dspy_agent_tools import CLI, Skills, bash_exec, patch, read_file
+from dspy_agent_tools import CLI, Skills, bash_exec, Patch, read_file
 
 agent = dspy.ReAct("question -> answer", tools=[bash_exec])
-patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")])
+Patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")])
 ```
 
 The guidance goes into the signature's instructions, which DSPy sends as the
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 #: Module bookkeeping that belongs to the instance, not to the rebuilt predictor.
 _MODULE_STATE = frozenset({"callbacks", "history", "_compiled"})
 
-#: Where the agent keeps the guide from its last ``patch`` call.
+#: Where the agent keeps the guide from its last ``Patch`` call.
 _GUIDE_ATTR = "_dspy_agent_tools_guide"
 
 #: Delimit the managed region so a later call replaces it instead of appending.
@@ -68,7 +68,7 @@ def _flatten(source: Any) -> list[Tool]:
         return [source]
     if isinstance(source, (str, bytes)):
         raise TypeError(
-            "patch() takes tools, callables, or lists of them; "
+            "Patch() takes tools, callables, or lists of them; "
             f"got {type(source).__name__}"
         )
     if callable(source):
@@ -77,7 +77,7 @@ def _flatten(source: Any) -> list[Tool]:
         items = list(source)
     except TypeError as exc:
         raise TypeError(
-            "patch() takes tools, callables, or lists of them; "
+            "Patch() takes tools, callables, or lists of them; "
             f"got {type(source).__name__}"
         ) from exc
     tools: list[Tool] = []
@@ -95,7 +95,7 @@ def _kind(agent: Any) -> str:
         if cls is not None and isinstance(agent, cls):
             return name
     raise TypeError(
-        "patch() supports dspy.ReAct, dspy.ReActV2, and dspy.RLM; "
+        "Patch() supports dspy.ReAct, dspy.ReActV2, and dspy.RLM; "
         f"got {type(agent).__name__}"
     )
 
@@ -227,7 +227,7 @@ def _drop_names(drop: Any) -> set[str]:
     return {name for name in names if name}
 
 
-def patch(
+def Patch(
     agent: Any,
     tools: Any = (),
     *,
@@ -264,7 +264,7 @@ def patch(
             ``guide``.
 
     Returns:
-        The same ``agent``, for chaining: ``agent = patch(agent, tools=...)``.
+        The same ``agent``, for chaining: ``agent = Patch(agent, tools=...)``.
 
     Raises:
         TypeError: ``agent`` is not one of the supported modules, or ``tools``
@@ -279,7 +279,7 @@ def patch(
     is recomputed on every call from the tools the agent holds, the sources
     passed now, and the guide, so patching repeatedly converges instead of
     growing: edited guidance replaces the old copy, and a family whose heading
-    you already wrote yourself (``## Shell``) is left to you. Calling ``patch``
+    you already wrote yourself (``## Shell``) is left to you. Calling ``Patch``
     again with the same arguments changes nothing.
 
     Rebuilding replaces the agent's inner predictor, so few-shot demos an
@@ -288,18 +288,18 @@ def patch(
 
     Examples:
         >>> import dspy
-        >>> from dspy_agent_tools import CLI, Skills, bash_exec, patch, read_file
+        >>> from dspy_agent_tools import CLI, Skills, bash_exec, Patch, read_file
         >>> agent = dspy.ReAct("question -> answer", tools=[bash_exec])
-        >>> patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")])
+        >>> Patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")])
 
-        >>> patch(agent, drop="bash_exec")  # revoke a capability
+        >>> Patch(agent, drop="bash_exec")  # revoke a capability
 
         >>> agent = dspy.RLM("task -> report")
-        >>> patch(agent, guide="Never edit files under vendor/.")
+        >>> Patch(agent, guide="Never edit files under vendor/.")
     """
     if not hasattr(agent, "signature"):
         raise TypeError(
-            f"patch() needs a dspy module with a signature, got {type(agent).__name__}"
+            f"Patch() needs a dspy module with a signature, got {type(agent).__name__}"
         )
     kind = _kind(agent)
     existing = _agent_tools(agent, kind)
@@ -330,7 +330,7 @@ def patch(
     unknown = removed - set(existing)
     if unknown:
         logger.warning(
-            "patch() has no tool named %s to drop", ", ".join(sorted(unknown))
+            "Patch() has no tool named %s to drop", ", ".join(sorted(unknown))
         )
 
     kept = [
@@ -356,7 +356,7 @@ def patch(
     demos = _demos(agent)
     if demos:
         logger.warning(
-            "patch() rebuilds %s and drops %d few-shot demo(s) on its inner "
+            "Patch() rebuilds %s and drops %d few-shot demo(s) on its inner "
             "predictor; patch before compiling, or recompile afterwards.",
             kind,
             demos,
@@ -372,4 +372,4 @@ def patch(
     return agent
 
 
-__all__ = ["patch"]
+__all__ = ["Patch"]
