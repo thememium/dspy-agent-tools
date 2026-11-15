@@ -6,6 +6,12 @@ from .fakes import DDG_REDIRECT
 
 
 class TestCleanUrl:
+    def test_non_duckduckgo_urls_are_not_unwrapped(self):
+        url = "https://example.com/duckduckgo.com/l/?uddg=other"
+        assert _clean_url(url) == url
+        url = "https://duckduckgo.com.evil.example/l/?uddg=other"
+        assert _clean_url(url) == url
+
     def test_unwraps_redirect(self):
         assert _clean_url(DDG_REDIRECT) == "https://example.com/real"
 
