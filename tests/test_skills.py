@@ -15,6 +15,7 @@ from dspy.utils.dummies import DummyLM
 import dspy_agent_tools.sandbox as sandbox_module
 import dspy_agent_tools.skills as skills_module
 from dspy_agent_tools import Skill, Skills, SkillTools, bash_exec, web_search
+from dspy_agent_tools.patch import _agent_tools
 from dspy_agent_tools.sandbox import (
     ScriptSandbox,
     _family,
@@ -24,7 +25,6 @@ from dspy_agent_tools.sandbox import (
     sandbox_exec_profile,
 )
 from dspy_agent_tools.skills import (
-    _agent_tools,
     _argv,
     _discover,
     _load_skill,
@@ -530,7 +530,7 @@ class TestPatch:
         agent = dspy.ReAct(QA, tools=[])
 
         first.patch(agent)
-        with pytest.raises(ValueError, match="already patched"):
+        with pytest.raises(ValueError, match="different tool named .list_skills."):
             second.patch(agent)
 
     def test_patch_rejects_unsupported_modules(self):
@@ -870,14 +870,14 @@ class TestCatalogAndCodeMode:
             "<allowed-tools>Bash(git:*) Bash(jq:*)</allowed-tools>" in tools.catalog()
         )
 
-    def test_instructions_drop_script_guidance_when_disabled(self):
-        text = Skills(SKILLS, scripts=False).instructions()
+    def test_section_drops_script_guidance_when_disabled(self):
+        text = Skills(SKILLS, scripts=False).section()
 
         assert "script running is disabled" in text
         assert "run_skill_script" not in text
 
-    def test_instructions_name_the_script_tool(self):
-        text = Skills(SKILLS).instructions()
+    def test_section_names_the_script_tool(self):
+        text = Skills(SKILLS).section()
 
         assert "`run_skill_script`" in text
         assert "<available_skills>" in text
