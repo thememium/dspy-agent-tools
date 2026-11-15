@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from .guide import present_keys as _present_keys
@@ -124,6 +125,13 @@ def _demos(agent: Any) -> int:
 
 def _copy_module_state(agent: Any, rebuilt: Any) -> None:
     """Copy a rebuilt module's own state onto ``agent`` in place."""
+    predictors = dict(agent.named_predictors())
+    for name, predictor in rebuilt.named_predictors():
+        previous = predictors.get(name)
+        if previous is not None:
+            predictor.lm = previous.lm
+            predictor.config = dict(previous.config)
+            predictor.callbacks = copy(previous.callbacks)
     for name, value in vars(rebuilt).items():
         if name not in _MODULE_STATE:
             setattr(agent, name, value)
@@ -258,14 +266,16 @@ def Patch(
     sources = _sources(tools)
     incoming = [tool for source in sources for tool in _flatten(source)]
 
+    checked = dict(existing)
     for tool in incoming:
-        found = existing.get(tool.name)
+        found = checked.get(tool.name)
         if found is not None and not _same(found, tool):
             raise ValueError(
                 f"Agent already has a different tool named {tool.name!r}; "
                 "pass name_prefix=... to the factory that built it."
             )
-    additions = [tool for tool in incoming if tool.name not in existing]
+        checked[str(tool.name)] = tool
+    additions = [tool for name, tool in checked.items() if name not in existing]
 
     removed = _drop_names(drop)
     internal = (
