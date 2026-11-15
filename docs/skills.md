@@ -140,8 +140,9 @@ agent = dspy.ReAct("question -> answer", tools=[bash_exec, read_file])
 Skills("./skills").patch(agent)
 ```
 
-`patch` rebuilds the inner predictor, so it works for `dspy.ReAct`,
-`dspy.ReActV2`, and `dspy.RLM`:
+`patch` is shorthand for `dspy_agent_tools.patch(agent, skills)`, which
+rebuilds the inner predictor so it works for `dspy.ReAct`, `dspy.ReActV2`,
+and `dspy.RLM`:
 
 - The agent's signature gets the skill guidance, the execution rules, and the
   `<available_skills>` catalog appended to its instructions.
@@ -153,15 +154,19 @@ Skills("./skills").patch(agent)
   onto the patched instance.
 - It returns the agent for chaining: `agent = Skills(...).patch(agent)`.
 
+Use [patch](patch.md) directly to add other tools in the same call —
+`patch(agent, Skills("./skills"), read_file)` — or to add policy of your own.
+
 The injected block carries execution rules, not just the catalog. Only
 `run_skill_script` can start a bundled file, and a skill's prose may call for
 host commands (`npx skills find ...`, `gh skill search ...`) or a page to
 read. `patch` names whichever it finds on the agent:
 
-- Host-command tools: tools from `dspy_agent_tools.bash` or
-  `dspy_agent_tools.cli`, plus common shell names such as `bash_exec`,
-  `shell`, and `run_command`.
-- URL-reading tools: tools from `dspy_agent_tools.search`, such as
+- Host-command tools: tools from the shell family —
+  `dspy_agent_tools.bash`, `dspy_agent_tools.cli`, and foreign tools named
+  like a shell (`shell`, `run_command`).
+- URL-reading tools: tools from the web or browser family —
+  `dspy_agent_tools.search`, `dspy_agent_tools.browser`, such as
   `web_search`.
 
 When the agent holds neither, the model is told to report the exact command
@@ -188,9 +193,8 @@ Rules:
   adds the catalog.
 - It raises `ValueError` when the agent already has a *different* tool with one
   of the skill tool names; pass `name_prefix="skill_"` to resolve the
-  collision.
-- It raises `ValueError` when the agent was patched with a different
-  `Skills()` catalog. Build one `Skills(...)` call with every folder.
+  collision. A second `Skills()` instance collides exactly this way, so put
+  every folder into one `Skills(...)` call.
 - It raises `TypeError` for module types other than `dspy.ReAct`,
   `dspy.ReActV2`, and `dspy.RLM`.
 - An agent accepts one catalog, so put every folder into one `Skills(...)`
@@ -200,7 +204,7 @@ The public helpers behind the injected block are also available:
 
 ```python
 skills.catalog()  # the <available_skills> XML block
-skills.instructions(tools=())  # guidance + execution rules + catalog
+skills.section(tools=())  # guidance + execution rules + catalog
 skills.skills  # parsed Skill objects
 skills.errors  # skipped directories
 ```
