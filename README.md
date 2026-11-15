@@ -46,7 +46,7 @@ bridge, and optional MCP and browser bridges:
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
-- **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable.
+- **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable. See [docs/cli.md](docs/cli.md).
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
 - **Skills** — `Skills("~/.agents/skills")` loads [Agent Skills](https://agentskills.io/specification) folders and returns progressive-disclosure tools for listing, activating, reading, and running them, with sandboxed script execution. `Skills(...).patch(agent)` appends the catalog and tools to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`. See [docs/skills.md](docs/skills.md).
 - **Browser** (optional) — `Browser()` returns the headless-Chrome toolset as one `dspy.Tool` list; `include_recording=True` adds video recording and `include_search=True` adds `web_search`; requires the `[browser]` extra. See [docs/browser.md](docs/browser.md).
@@ -389,8 +389,8 @@ earlier.
 
 `CLI` wraps an executable that has no MCP server. By default it exposes a
 two-tool discovery facade (`get_command_help`, `run_command`) and reads the
-program's own help on demand; add `include_search=True` for name lookup, or
-pass `commands=` to define typed tools explicitly (see below).
+program's own help on demand; `include_search=True` adds `search_commands`,
+and `commands=[Command(...)]` defines typed tools explicitly instead.
 
 ```python
 import dspy
@@ -402,142 +402,11 @@ agent = dspy.ReAct("question -> answer", tools=gh + [bash_exec])
 worker = dspy.RLM("task -> report", tools=CLI("docker", mode="code"))
 ```
 
-| Tool | Purpose |
-| --- | --- |
-| `get_command_help(command="")` | Usage, subcommands, parsed flags, and JSON help for one path. `command=""` returns the root command list. |
-| `run_command(command="", args=[])` | Execute `[executable, *base_args, *command_path, *args]`; no shell. |
-| `search_commands(query, limit=8)` | Optional (`include_search=True`): rank command paths by name/description. Usually unnecessary because root help lists commands. |
-
-Discovery starts on the first tool call, not when `CLI()` is called. Every
-help page is cached; `tools.refresh()` drops the cache. With
-`include_search=True`, a search expands at most `max_expands` pages to depth
-`max_depth`, so searching for `pr list` costs two help calls (root, then
-`pr`); asking for its details then fetches `pr list`. Nothing walks the whole
-tree.
-
-```python
-git = CLI("git")
-tools = {tool.name: tool for tool in git}
-tools["git_get_command_help"](command="")  # root command list
-tools["git_get_command_help"](command="status")  # usage + flags
-tools["git_run_command"](command="status", args=["--short"])
-
-# Optional name lookup over a large command tree:
-CLI("git", include_search=True)
-```
-
-- `base_args=["-m", "mytool"]` handles wrappers such as `python -m mytool`.
-- `name_prefix` defaults to the executable name (`gh_`).
-- `cwd`, `env`, and `timeout` configure execution; `help_timeout` bounds each
-  discovery call; `max_help_chars` caps JSON/raw help in `get_command_help`.
-- `mode="search"` (default) returns text for `dspy.ReAct`; `mode="code"`
-  returns `list[dict]` / `dict` for `dspy.RLM`.
-- `help_flag="--help"` (default) controls the help invocation. Use `"-h"`,
-  `"help"`, or a token sequence such as `("help", "commands")`; `None` skips
-  help entirely. If the help invocation is rejected or returns nothing, the
-  command itself runs so the agent can inspect that output.
-- `json_flag` is disabled by default. Pass `json_flag="--json"` to try it for
-  every command run and help call, inserted after the command path. If the
-  CLI rejects it as an unknown flag, the attempt is retried without it; real
-  failures are not retried. JSON help is kept alongside the text help used
-  for discovery, so `search_commands` (when enabled) keeps working. A
-  `--json` argument you declare in `args` or `fixed` is passed through
-  unchanged.
-- `max_output_chars` caps one command result (default `0`, unlimited). Use it
-  for token-heavy commands; prefer the CLI's own output-limit flags when
-  available. Truncation is head-only and appends a marker, so keep it off
-  when the agent parses JSON.
-- Command paths resolve lazily inside `run_command`; fetching help first is
-  optional. Run a command directly when you know its path, and call
-  `get_command_help` when flags or positional arity are unclear.
-- Help output includes parsed `Arguments:` entries and marks value-taking
-  flags as `(value)`, not boolean.
-- A usage failure appends the exact argv, an argv-list hint, and the command's
-  parsed help. The agent can fix one item and retry without another help call.
-
-The parsed flag table is best-effort. `--help` is the schema, and the raw help
-is authoritative: positional grammars such as kubectl's usage line are
-returned as text rather than turned into a fake JSON schema. Discovery runs
-with pagers disabled; when `--help` opens a man page (git) or fails, it
-retries `-h`.
-
-Only the configured executable is reachable, and every argument is passed as
-an argv item, so metacharacters are not interpreted. The program can still do
-anything its own flags allow; use a container or an MCP server for a real
-security boundary. When a CLI has an MCP server, prefer `MCP` — its schemas
-are exact rather than inferred.
-
-`CLI` is already a discovery facade: pass its tools directly to the agent
-instead of wrapping them in `Toolbox(mode="search")`. Use `Toolbox` when you
-need to combine them with other tools under one catalog.
-
-#### Explicit commands
-
-If you know exactly which commands the agent needs, pass `commands=` and skip
-`--help` discovery entirely. Each `Command` becomes one typed `dspy.Tool`:
-
-```python
-from dspy_agent_tools import Argument, CLI, Command, Option
-
-gh = CLI(
-    "gh",
-    commands=[
-        Command(
-            command="pr list",
-            name="pr_list",
-            description="List pull requests in a repository.",
-            args={
-                "repo": Argument(help="owner/name"),
-                "state": Option(
-                    "--state",
-                    default="open",
-                    choices=("open", "closed", "merged"),
-                ),
-                "limit": Option("--limit", default=30, type=int),
-                "label": Option("--label", repeatable=True),
-                "draft": Option("--draft", is_flag=True),
-            },
-            fixed=("--json",),
-        )
-    ],
-)
-# gh == [gh_pr_list]; no search_commands/get_command_help/run_command.
-```
-
-`commands=` replaces discovery for that CLI group; the `--help` tools are
-not created. Each tool name is `name_prefix + Command.name` (default prefix is
-the executable name).
-
-`Argument` and `Option` are the two public declaration helpers.
-
-- `Argument(...)` is a required positional; `Argument(default=...)` is
-  optional. Positional indices are assigned in `Command.args` order. Indices
-  must be contiguous, required positionals must come before optional ones,
-  and a repeatable positional must be last.
-- `Option("--limit", default=30, type=int)` becomes `--limit VALUE`. The
-  usecli form `Option(30, "--limit", type=int)` works too.
-- `Option("--verbose", is_flag=True)` becomes `--verbose` when true and is
-  omitted when false.
-- `Option("...", "--state")` / `Option(..., "--state")` marks a required
-  option.
-- `type=` is `str`, `int`, `float`, or `bool`.
-- `default=` makes an argument optional. Boolean flags default to `False` and
-  repeatable flags default to empty when no default is given; every other
-  argument is required.
-- `repeatable=True` repeats the flag for each value in a list.
-- `choices=` adds an enum to the schema.
-- `max_output_chars` (or the CLI's own output-limit flags) keeps search-style
-  results from dominating the context.
-- `fixed=` adds always-present argv items, such as `("--json",)`.
-- `ok_codes=` suppresses the `[exit code N]` notice for accepted exits.
-- `Command.command` accepts `"pr list"`, `"db:migrate"` (one token), or
-  `("pr", "list")`.
-
-Arguments are built as
-`[executable, *base_args, *command_tokens, *positionals, *fixed, *flags]` and
-run without a shell. The same `json_flag` probe applies to explicit commands.
-Explicit commands do not probe `--help`, so they also work for hidden
-commands and plugin commands that do not appear in help.
+Discovery starts on the first tool call; help pages are cached, and
+`tools.refresh()` drops them. Only the configured executable is reachable and
+no shell is involved. See [docs/cli.md](docs/cli.md) for the tool set,
+discovery budget, help and JSON probing, execution options, and explicit
+`Command`/`Argument`/`Option` definitions.
 
 ### With Agent Skills
 
@@ -797,21 +666,12 @@ Shared behaviour across the bash tools:
 
 ### CLI (`dspy_agent_tools.cli`)
 
-`CLI(executable, ...)` returns `get_command_help` and `run_command` by
-default. Names are prefixed by the executable (or `name_prefix`).
-`include_search=True` adds `search_commands`. With `commands=[...]`, it
-returns one tool per explicit `Command` instead and skips discovery:
-
-| Tool | Use it for |
-| --- | --- |
-| **`get_command_help`** | Read one path's usage, subcommands, parsed flags, JSON help, and fallback raw help before running it. |
-| **`search_commands`** | Optional (`include_search=True`): find command paths by name or description. |
-| **`run_command`** | Run one resolved path with raw argv strings. No shell; only the configured executable is reachable. |
-
-The parsed flag table supports the common help formats (argparse, click,
-clap, cobra, git short help, kubectl), but it is advisory. The raw help text
-is authoritative, and `mode="code"` returns the same data as dictionaries for
-`dspy.RLM`.
+`CLI(executable, ...)` returns `get_command_help` and `run_command` by default;
+`include_search=True` adds `search_commands`. With `commands=[...]`, it returns
+one typed tool per explicit `Command` and skips discovery. Names are prefixed
+by the executable (or `name_prefix`), and `mode="code"` returns dictionaries
+for `dspy.RLM`. The parsed flag table is advisory; the raw help is
+authoritative. See [docs/cli.md](docs/cli.md).
 
 ### Skills (`dspy_agent_tools.skills`)
 
