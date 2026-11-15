@@ -29,7 +29,7 @@ from .browser import (
 from .cli import CLI, Argument, CLITools, Command, Option
 from .files import delete_file, edit_file, read_file, write_file
 from .mcp import MCP, MCPTools
-from .patch import patch
+from .patch import Patch
 from .search import web_news, web_search
 from .skills import Skill, Skills, SkillTools
 from .toolbox import Toolbox
@@ -45,6 +45,7 @@ __all__ = [
     "Command",
     "MCPTools",
     "Option",
+    "Patch",
     "Skill",
     "SkillTools",
     "Skills",
@@ -72,7 +73,6 @@ __all__ = [
     "browser_tabs",
     "delete_file",
     "edit_file",
-    "patch",
     "read_file",
     "web_news",
     "web_search",
