@@ -202,8 +202,8 @@ def bwrap_argv(
         "--tmpfs",
         "/tmp",
     ]
-    if allow_write:
-        argv += ["--bind", str(skill_dir), str(skill_dir)]
+    # Re-expose the skill after /tmp is masked, including skills stored there.
+    argv += ["--bind" if allow_write else "--ro-bind", str(skill_dir), str(skill_dir)]
     argv += ["--chdir", str(skill_dir), "--"]
     return [*argv, *tail]
 
@@ -219,8 +219,9 @@ def firejail_argv(
     argv = ["firejail", "--quiet", "--noprofile", "--private-tmp"]
     if not allow_network:
         argv.append("--net=none")
-    if not allow_write:
-        argv.append("--read-only=/")
+    argv.append("--read-only=/")
+    if allow_write:
+        argv.append(f"--read-write={skill_dir}")
     argv.append(f"--working-directory={skill_dir}")
     return [*argv, "--", *tail]
 
