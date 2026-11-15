@@ -53,6 +53,7 @@ def transport_factory():
     # Return an async context manager yielding (read, write).
     ...
 
+
 tools = MCP(transport=transport_factory)
 ```
 

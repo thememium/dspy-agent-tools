@@ -59,8 +59,8 @@ details then fetches `pr list`. Nothing walks the whole tree.
 git = CLI("git")
 tools = {tool.name: tool for tool in git}
 
-tools["git_get_command_help"](command="")       # root command list
-tools["git_get_command_help"](command="status") # usage + flags
+tools["git_get_command_help"](command="")  # root command list
+tools["git_get_command_help"](command="status")  # usage + flags
 tools["git_run_command"](command="status", args=["--short"])
 
 # Name lookup over a large command tree:

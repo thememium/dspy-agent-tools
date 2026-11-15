@@ -443,10 +443,12 @@ ownership, duplicate-name checks, and `name_prefix` handling.
 independent lookups to save round trips:
 
 ```python
-bash_ripgrep_batch([
-    {"pattern": r"def main", "path": "src", "options": "-n"},
-    {"pattern": "TODO|FIXME", "options": "-n -i"},
-])
+bash_ripgrep_batch(
+    [
+        {"pattern": r"def main", "path": "src", "options": "-n"},
+        {"pattern": "TODO|FIXME", "options": "-n -i"},
+    ]
+)
 ```
 
 `bash_find_batch` and `bash_glob_batch` work the same way for path lookups.
