@@ -102,8 +102,30 @@ patch(
 | Option | Default | Effect |
 | --- | --- | --- |
 | `*sources` | — | Tools to add: `dspy.Tool` objects, plain functions, or lists of either. |
-| `guide` | `None` | Your text, placed before the family sections. Use it for project rules no tool family knows. |
+| `guide` | `None` | Your text, placed before the family sections. Use it for project rules no tool family knows. Omitted, the agent keeps its last guide; `guide=""` clears it. |
 | `describe` | `True` | Inject the family sections. `False` appends tools (and `guide`) only. |
+
+## The managed region
+
+Everything `patch` adds lives between two markers and is recomputed on every
+call, so patching repeatedly converges instead of growing the system prompt:
+
+```markdown
+<!-- dspy-agent-tools:begin -->
+Never commit.
+## Files — `read_file`
+…
+<!-- dspy-agent-tools:end -->
+```
+
+- Editing `guide` replaces the old copy; it does not append a second one.
+- The last guide carries over to later calls. `patch(agent, read_file,
+  guide="Never commit.")` then `patch(agent, bash_exec)` keeps the rule and
+  adds the shell section.
+- A family you already documented — `## Shell` in your own docstring — is
+  skipped, so hand-written policy wins. Source sections such as the skill
+  catalog are always injected.
+- Your own text outside the region is never touched.
 
 ## Rules
 
@@ -111,7 +133,10 @@ patch(
   object, or the function behind it, so `patch(agent, read_file)` is
   idempotent.
 - Patching a second family adds its section and leaves the first alone; the
-  block is deduplicated by text, so no section appears twice.
+  region holds one copy of each.
+- Patching after an optimizer has run warns and drops the few-shot demos on
+  the inner predictor it rebuilds (the instructions survive). Patch before
+  compiling, or recompile afterwards.
 - An agent that already has a *different* tool with an incoming name raises
   `ValueError`; pass `name_prefix=...` to the factory that built that tool
   (`Skills(..., name_prefix="skill_")`, `CLI(..., name_prefix="gh_")`).

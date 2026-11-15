@@ -132,17 +132,20 @@ tool, rather than decoded into garbage.
 
 ## Patching an existing agent
 
-`tools=skills` is enough on its own. `Skills(...).patch(agent)` appends the
-catalog and tools to an agent that was already built:
+`tools=skills` is enough on its own. `patch(agent, Skills("./skills"))`
+appends the catalog and tools to an agent that was already built:
 
 ```python
+from dspy_agent_tools import Skills, bash_exec, patch, read_file
+
 agent = dspy.ReAct("question -> answer", tools=[bash_exec, read_file])
-Skills("./skills").patch(agent)
+patch(agent, Skills("./skills"))
 ```
 
-`patch` is shorthand for `dspy_agent_tools.patch(agent, skills)`, which
-rebuilds the inner predictor so it works for `dspy.ReAct`, `dspy.ReActV2`,
-and `dspy.RLM`:
+There is no `Skills.patch` method: [patch](patch.md) is the one way to extend a
+built agent, and a skill list is just another tool source. `patch` rebuilds
+the inner predictor so it works for `dspy.ReAct`, `dspy.ReActV2`, and
+`dspy.RLM`:
 
 - The agent's signature gets the skill guidance, the execution rules, and the
   `<available_skills>` catalog appended to its instructions.
@@ -152,10 +155,11 @@ and `dspy.RLM`:
   its iteration, output, verbosity, sub-LM, and interpreter settings.
 - Module state such as callbacks, history, and the compiled flag is copied
   onto the patched instance.
-- It returns the agent for chaining: `agent = Skills(...).patch(agent)`.
+- It returns the agent for chaining: `agent = patch(agent, skills)`.
 
-Use [patch](patch.md) directly to add other tools in the same call —
-`patch(agent, Skills("./skills"), read_file)` — or to add policy of your own.
+Add other tools in the same call —
+`patch(agent, Skills("./skills"), read_file)` — or add policy of your own with
+`guide=`.
 
 The injected block carries execution rules, not just the catalog. Only
 `run_skill_script` can start a bundled file, and a skill's prose may call for
@@ -176,25 +180,28 @@ install counts:
 ```python
 # No shell tool: the model reports `npx skills find "git review"` for you to run.
 agent = dspy.RLM("question -> answer")
-Skills("./skills", mode="code").patch(agent)
+patch(agent, Skills("./skills", mode="code"))
 
 # With a CLI tool: the model runs the command for real and quotes the output.
 from dspy_agent_tools import CLI
 
 agent = dspy.ReAct("question -> answer", tools=list(CLI("gh")))
-Skills("./skills").patch(agent)
+patch(agent, Skills("./skills"))
 ```
 
 Rules:
 
 - `patch` is idempotent: patching twice with the same `Skills` instance
-  changes nothing.
+  changes nothing, and the catalog appears once in the instructions.
 - Patching an agent that already received these tools through `tools=` only
   adds the catalog.
 - It raises `ValueError` when the agent already has a *different* tool with one
   of the skill tool names; pass `name_prefix="skill_"` to resolve the
   collision. A second `Skills()` instance collides exactly this way, so put
   every folder into one `Skills(...)` call.
+- A skill whose instructions call for a shell command is followed with the
+  shell or command tools on the agent; without one, the model names the
+  command for the user to run.
 - It raises `TypeError` for module types other than `dspy.ReAct`,
   `dspy.ReActV2`, and `dspy.RLM`.
 - An agent accepts one catalog, so put every folder into one `Skills(...)`
