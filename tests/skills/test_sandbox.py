@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -129,10 +130,11 @@ class TestSandboxEnforcement:
         assert "wrote written-by-skill.txt" in output
         assert (skill / "written-by-skill.txt").read_text() == "ok"
 
-    def test_scripts_cannot_write_outside_the_skill(self, tmp_path):
+    @pytest.mark.parametrize("allow_write", [False, True])
+    def test_scripts_cannot_write_outside_the_skill(self, tmp_path, allow_write):
         copy_skill(tmp_path)
         outside = tmp_path / "escaped.txt"
-        tools = by_name(Skills(tmp_path))
+        tools = by_name(Skills(tmp_path, allow_write=allow_write))
 
         output = tools["run_skill_script"](
             skill="demo-skill", script="escape.py", args=[str(outside)]
@@ -190,6 +192,28 @@ class TestSandboxConstruction:
         assert "--net=none" in argv
         assert "--read-only=/" in argv
         assert f"--working-directory={tmp_path}" in argv
+
+    def test_firejail_write_permission_is_limited_to_skill(self, tmp_path):
+        argv = firejail_argv(
+            ["python", "s.py"], tmp_path, allow_network=True, allow_write=True
+        )
+        assert "--read-only=/" in argv
+        assert f"--read-write={tmp_path}" in argv
+        assert argv.index("--read-only=/") < argv.index(f"--read-write={tmp_path}")
+        assert "--net=none" not in argv
+
+    def test_bwrap_reexposes_readonly_skill_after_masking_tmp(self):
+        skill = Path("/tmp/skills/demo")
+        argv = bwrap_argv(
+            ["python", "s.py"], skill, allow_network=False, allow_write=False
+        )
+        position = argv.index(str(skill))
+        assert argv[position - 1 : position + 2] == [
+            "--ro-bind",
+            str(skill),
+            str(skill),
+        ]
+        assert position > argv.index("--tmpfs")
 
     def test_sandbox_exec_profile(self, tmp_path):
         profile = sandbox_exec_profile(
