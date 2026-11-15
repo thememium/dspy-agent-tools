@@ -59,8 +59,8 @@ assemble the instructions it sends to the LM. These docstrings are written for
 that purpose — each one tells the model WHAT the tool does, WHEN to use it
 instead of a sibling tool, and HOW to pass arguments.
 
-Requires **Python 3.13+**; run agents with **DSPy 3.1+** (the `[browser]` and
-`[mcp]` extras install it).
+Requires **Python 3.13+**; run agents with **DSPy 3.1+**. The `[browser]` extra
+installs DSPy; `[mcp]` requires **DSPy 3.4.1+** for its MCP result conversion API.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -606,7 +606,7 @@ See [docs/mcp.md](docs/mcp.md).
 | **`Patch`** | Add `tools=` to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`, remove `drop=`, and inject one guidance section per tool family the agent holds. `guide=` adds your own policy before those sections; `describe=False` appends tools without them. |
 
 Tools are accepted as `dspy.Tool` objects, plain functions, or lists of them.
-The sections live in `dspy_agent_tools.guide`, one per family. See
+The sections live in `dspy_agent_tools.patch.guide`, one per family. See
 [docs/patch.md](docs/patch.md).
 
 ### Browser (`dspy_agent_tools.browser`)
@@ -672,7 +672,7 @@ uv run pytest
 uv run poe test-cov
 
 # Run specific test
-uv run pytest path/to/test.py::test_name
+uv run pytest tests/files/test_edit.py::TestEditLines::test_replace_range
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
