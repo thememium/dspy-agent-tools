@@ -14,7 +14,7 @@ from dspy.utils.dummies import DummyLM
 
 import dspy_agent_tools.sandbox as sandbox_module
 import dspy_agent_tools.skills as skills_module
-from dspy_agent_tools import Skill, Skills, SkillTools, bash_exec, web_search
+from dspy_agent_tools import Skill, Skills, SkillTools, bash_exec, patch, web_search
 from dspy_agent_tools.patch import _agent_tools
 from dspy_agent_tools.sandbox import (
     ScriptSandbox,
@@ -132,7 +132,7 @@ class TestToolSurface:
     def test_identifier_prefix_patches_rlm(self):
         agent = dspy.RLM(QA, tools=[])
 
-        Skills(SKILLS, mode="code", name_prefix="sk_").patch(agent)
+        patch(agent, Skills(SKILLS, mode="code", name_prefix="sk_"))
 
         assert "sk_activate_skill" in cast(Any, agent._user_tools)
 
@@ -457,7 +457,7 @@ class TestPatch:
         tools = Skills(SKILLS)
         agent = dspy.ReAct(QA, tools=[], max_iters=2)
 
-        returned = tools.patch(agent)
+        returned = patch(agent, tools)
 
         assert returned is agent
         assert set(cast(Any, agent.tools)) == {
@@ -479,7 +479,7 @@ class TestPatch:
         tools = Skills(SKILLS)
         agent = dspy.ReActV2(QA, tools=[], max_iters=2)
 
-        tools.patch(agent)
+        patch(agent, tools)
 
         assert "run_skill_script" in cast(Any, agent.tools)
         assert "<available_skills>" in cast(Any, agent.react.signature).instructions
@@ -488,7 +488,7 @@ class TestPatch:
         tools = Skills(SKILLS)
         agent = dspy.RLM(QA, tools=[], max_iters=2)
 
-        tools.patch(agent)
+        patch(agent, tools)
 
         assert "activate_skill" in cast(Any, agent._user_tools)
         instructions = cast(Any, agent.generate_action.signature).instructions
@@ -498,9 +498,9 @@ class TestPatch:
         tools = Skills(SKILLS)
         agent = dspy.ReAct(QA, tools=[])
 
-        tools.patch(agent)
+        patch(agent, tools)
         before = dict(cast(Any, agent.tools))
-        tools.patch(agent)
+        patch(agent, tools)
 
         assert dict(cast(Any, agent.tools)) == before
         instructions = cast(Any, agent.react.signature).instructions
@@ -510,7 +510,7 @@ class TestPatch:
         tools = Skills(SKILLS)
         agent = dspy.ReAct(QA, tools=tools)
 
-        tools.patch(agent)
+        patch(agent, tools)
 
         assert sum(name == "list_skills" for name in cast(Any, agent.tools)) == 1
         instructions = cast(Any, agent.react.signature).instructions
@@ -522,27 +522,27 @@ class TestPatch:
         agent = dspy.ReAct(QA, tools=[foreign])
 
         with pytest.raises(ValueError, match="different tool named 'list_skills'"):
-            tools.patch(agent)
+            patch(agent, tools)
 
     def test_patch_rejects_a_second_catalog(self):
         first = Skills(SKILLS)
         second = Skills(SKILLS)
         agent = dspy.ReAct(QA, tools=[])
 
-        first.patch(agent)
+        patch(agent, first)
         with pytest.raises(ValueError, match="different tool named .list_skills."):
-            second.patch(agent)
+            patch(agent, second)
 
     def test_patch_rejects_unsupported_modules(self):
         agent = dspy.Predict("question -> answer")
 
         with pytest.raises(TypeError, match="supports dspy.ReAct"):
-            Skills(SKILLS).patch(agent)
+            patch(agent, Skills(SKILLS))
 
     def test_patch_forbids_inventing_command_output(self):
         agent = dspy.ReAct(QA, tools=[], max_iters=2)
 
-        Skills(SKILLS).patch(agent)
+        patch(agent, Skills(SKILLS))
 
         instructions = cast(Any, agent.react.signature).instructions
         assert "never claim you ran a command" in instructions
@@ -552,7 +552,7 @@ class TestPatch:
     def test_patch_names_the_shell_tools_it_has(self):
         agent = dspy.ReAct(QA, tools=[bash_exec], max_iters=2)
 
-        Skills(SKILLS).patch(agent)
+        patch(agent, Skills(SKILLS))
 
         instructions = cast(Any, agent.react.signature).instructions
         assert "Host command tools available to you: `bash_exec`." in instructions
@@ -560,7 +560,7 @@ class TestPatch:
     def test_patch_names_fetch_tools_without_a_shell(self):
         agent = dspy.ReAct(QA, tools=[web_search], max_iters=2)
 
-        Skills(SKILLS).patch(agent)
+        patch(agent, Skills(SKILLS))
 
         instructions = cast(Any, agent.react.signature).instructions
         assert "Tools available to read a URL a skill points at" in instructions
@@ -569,7 +569,7 @@ class TestPatch:
     def test_patch_tells_rlm_the_repl_cannot_spawn_processes(self):
         agent = dspy.RLM(QA, tools=[], max_iters=2)
 
-        Skills(SKILLS, mode="code").patch(agent)
+        patch(agent, Skills(SKILLS, mode="code"))
 
         instructions = cast(Any, agent.generate_action.signature).instructions
         assert "cannot spawn processes" in instructions
@@ -578,7 +578,7 @@ class TestPatch:
     def test_patch_uses_the_prefixed_tool_names(self):
         agent = dspy.ReAct(QA, tools=[], max_iters=2)
 
-        Skills(SKILLS, name_prefix="sk_").patch(agent)
+        patch(agent, Skills(SKILLS, name_prefix="sk_"))
 
         instructions = cast(Any, agent.react.signature).instructions
         assert "`sk_activate_skill`" in instructions
@@ -591,7 +591,7 @@ class TestPatch:
 
         tools = Skills(SKILLS)
         agent = dspy.ReAct(QA, tools=[], max_iters=3)
-        tools.patch(agent)
+        patch(agent, tools)
         lm = DummyLM(
             [
                 {
@@ -932,7 +932,7 @@ class TestCatalogAndCodeMode:
 
     def test_patch_requires_a_dspy_module(self):
         with pytest.raises(TypeError, match="signature"):
-            Skills(SKILLS).patch(object())
+            patch(object(), Skills(SKILLS))
 
     def test_unsupported_tool_containers_are_rejected(self):
         with pytest.raises(TypeError, match="Unsupported ReAct tool container"):
