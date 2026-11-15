@@ -40,17 +40,16 @@ DSPy Agent Tools is a library of **tool functions** for
 function with a tool-optimized docstring, so you can hand them straight to
 `dspy.ReAct` or `dspy.RLM` — no adapters, no wrappers.
 
-Three built-in tool families, plus Agent Skills, a generic Toolbox, a CLI
-bridge, and optional MCP and browser bridges:
+Core tools, optional bridges, and progressive discovery:
 
-- **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
-- **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
-- **Search** — multi-engine web and news search with failover and explicit outcomes
-- **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable. See [docs/cli.md](docs/cli.md).
-- **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra. See [docs/mcp.md](docs/mcp.md).
-- **Skills** — `Skills("~/.agents/skills")` loads [Agent Skills](https://agentskills.io/specification) folders and returns progressive-disclosure tools for listing, activating, reading, and running them, with sandboxed script execution. `Skills(...).patch(agent)` appends the catalog and tools to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`. See [docs/skills.md](docs/skills.md).
-- **Browser** (optional) — `Browser()` returns the headless-Chrome toolset as one `dspy.Tool` list; `include_recording=True` adds video recording and `include_search=True` adds `web_search`; requires the `[browser]` extra. See [docs/browser.md](docs/browser.md).
-- **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
+- **Bash** — shell execution, file search, directory listing, and URL fetching
+- **Files** — read, write, and edit with snapshot guards and tree-sitter addressing
+- **Search** — web and news search with engine failover and explicit status
+- **CLI** — shell-free typed facade over any executable; discovery or explicit `Command` tools. See [docs/cli.md](docs/cli.md).
+- **MCP** (optional) — local stdio or remote HTTP/SSE servers as `dspy.Tool`s. See [docs/mcp.md](docs/mcp.md).
+- **Skills** — Agent Skills folders as progressive-disclosure tools, with `patch(agent)`. See [docs/skills.md](docs/skills.md).
+- **Browser** (optional) — headless Chrome as one `dspy.Tool` list, with optional recording and search. See [docs/browser.md](docs/browser.md).
+- **Toolbox** — mix MCP servers, tools, and functions; optional progressive discovery.
 
 Tools are just Python functions, exactly as
 [DSPy's docs describe](https://dspy.ai/current/getting-started/react-and-tools/#tools-are-just-python-functions):
@@ -84,34 +83,24 @@ pip install dspy-agent-tools
 
 ### Optional Installs
 
-The browser tools are an optional extra (DSPy plus pydoll). Importing
-`Browser` works without it; calling `Browser()` raises an `ImportError` with
-the install hint:
+The browser and MCP bridges are optional extras. Importing `Browser` or `MCP`
+works without them; calling either raises `ImportError` with the install hint.
 
 ```bash
 uv add 'dspy-agent-tools[browser]'
 # or: pip install 'dspy-agent-tools[browser]'
 ```
 
-`Browser()` returns the browser toolset as one ready-made list of `dspy.Tool`
-objects. Pass `include_recording=True` to add video recording and
-`include_search=True` to add `web_search`. The tools drive a locally installed
-Chrome in headless mode through pydoll; Chrome must be installed, with no
-separate browser download step. Video recording uses `ffmpeg` from `PATH` when
-available. To let the package supply one, install the optional extra:
+`Browser()` drives an installed Chrome headless through pydoll; no separate
+browser download is needed. Recording uses `ffmpeg` from `PATH`; install the
+extra to bundle one, otherwise `browser_record_start` returns an error:
 
 ```bash
 uv add 'dspy-agent-tools[ffmpeg]'
 # or: pip install 'dspy-agent-tools[ffmpeg]'
 ```
 
-The extra uses `imageio-ffmpeg`'s bundled binary. Without either a system
-`ffmpeg` or the extra, `browser_record_start` returns an error instead of
-silently producing no file.
-
-The MCP bridge is an optional extra (it pulls in DSPy, `httpx2`, and MCP
-SDK 2.x). Importing `MCP` works without it; calling `MCP()` raises an
-`ImportError` with the install hint:
+The MCP bridge pulls in DSPy, `httpx2`, and MCP SDK 2.x:
 
 ```bash
 uv add "dspy-agent-tools[mcp]"
@@ -351,14 +340,11 @@ constructor option.
 
 ### Tool discovery with Toolbox
 
-`Toolbox` accepts any mix of MCP servers, regular `dspy.Tool` objects, and
-plain sync or async Python functions, and flattens nested lists. With no
-`mode` (the default, `mode=None`), it returns every tool eagerly — the same
-full load you would pass directly. With `mode="search"` or `mode="code"`, it
-keeps the catalog in the Python process and exposes three discovery tools
-instead, which matters for large catalogs: a 46-tool server such as GitHub's
-MCP endpoint costs roughly 14k tokens of function definitions on every turn
-when every tool is passed as its own `dspy.Tool`.
+`Toolbox` accepts any mix of MCP servers, `dspy.Tool` objects, and sync or
+async Python functions, and flattens nested lists. With no `mode`, it returns
+every tool eagerly. With `mode="search"` or `mode="code"`, it keeps the
+catalog in-process and exposes three discovery tools instead — useful when
+every schema would cost tokens on every turn.
 
 ```python
 from dspy_agent_tools import MCP, Toolbox, bash_exec, read_file
@@ -393,11 +379,10 @@ agent = dspy.ReActV2("question -> answer", tools=catalog)
 | `get_tool_details(name)` | Full description and JSON input schema for one tool. |
 | `call_tool(name, arguments)` | Runs that tool; MCP calls stay on the live session. |
 
-The catalog stays in the Python process, so only the tools the agent searches,
-inspects, or calls are sent to the model. `mode="code"` returns the same three
-tools with structured results — `list[dict]` from `search_tools`, `dict` from
-`get_tool_details` — so `dspy.RLM` code can compose calls without parsing
-text:
+The catalog stays in the Python process, so only tools the agent searches,
+inspects, or calls reach the model. `mode="code"` returns structured results
+(`list[dict]` from `search_tools`, `dict` from `get_tool_details`) so
+`dspy.RLM` code can compose calls without parsing text:
 
 ```python
 worker = dspy.RLM(
@@ -417,68 +402,51 @@ through the context.
 
 | | `mode="search"` | `mode="code"` |
 | --- | --- | --- |
-| Agent | `dspy.ReAct` / `dspy.ReActV2` and other tool-calling modules | `dspy.RLM` or another agent that executes Python |
+| Agent | `dspy.ReAct` / `dspy.ReActV2` | `dspy.RLM` or another Python-executing agent |
 | Return shape | text (`str`) | structured (`list[dict]`, `dict`) |
-| Orchestration | The model picks one tool per turn | The model writes code that can call many tools |
-| Intermediate results | Returned to the model as observations | Stay in the interpreter unless printed |
-| Best for | A few lookups with small results | Multi-step workflows, loops, filtering, large payloads |
-| Cost profile | Saves schema tokens; observations still enter context | Saves schema tokens and can keep large results out of context |
+| Orchestration | One tool per turn | Code can call many tools |
+| Intermediate results | Returned as observations | Stay in the REPL unless printed |
+| Best for | A few small lookups | Multi-step workflows, loops, large payloads |
+| Cost profile | Saves schema tokens; observations still enter context | Saves schema tokens; large results can stay out of context |
 | Requirement | None beyond DSPy | A working code interpreter |
 
 Use `mode="search"` when:
 
 - You are building a ReAct-style agent.
-- The task usually needs one to three tool calls with small outputs.
-- You want the safest option: the model never writes or executes code.
+- The task needs a few calls with small outputs.
+- You want the model to never write or execute code.
 - You are unsure which mode to pick — start here.
 
 Use `mode="code"` when:
 
 - You are building an RLM that can write Python.
-- The task needs several calls combined with Python logic (filter, rank,
-  join, aggregate).
-- Tool results are large and only a summary needs to reach the model. In RLM,
-  `search_tools`, `get_tool_details`, and `call_tool` are Python callables;
-  intermediate values stay in the REPL unless you `print()` them or assign
-  them to the final output.
+- The task needs several calls combined with Python logic.
+- Results are large and only a summary needs to reach the model.
 
-Skip both modes when the catalog is small (roughly fewer than ten tools) and
-the task is straightforward. The discovery round trip — search, inspect, then
-call — can cost more than just passing the function definitions directly as
-`tools=`. Omit `mode` (or pass `mode=None`) to get the full load while still
-keeping `Toolbox`'s source ownership, duplicate-name checks, and
-`name_prefix` handling.
+Skip discovery for small catalogs (roughly fewer than ten tools); the
+search/inspect/call round trip can cost more than passing definitions
+directly. Omit `mode` for the full load while keeping `Toolbox`'s source
+ownership, duplicate-name checks, and `name_prefix` handling.
 
-- Plain functions and `dspy.Tool` instances are catalogued from their DSPy
-  metadata: function name, docstring, type hints, and defaults.
-- Names must be unique (case-insensitively); pass `name_prefix="..."` or rename
-  the function. `MCP(..., name_prefix=...)` still works for MCP-side names.
-- `Toolbox` owns its sources, so `catalog.close()` (or a `with` block) stops
-  every MCP server it was given. Addition (`catalog + [other_tool]`) keeps
-  that ownership.
-- `MCP` always returns the eager tool list; pass it to `Toolbox` to get
-  discovery mode.
+- Plain functions and `dspy.Tool` instances use DSPy metadata: name,
+  docstring, type hints, and defaults.
+- Names must be unique case-insensitively; pass `name_prefix="..."` or rename.
+  `MCP(..., name_prefix=...)` still works for MCP-side names.
+- `Toolbox` owns its sources: `catalog.close()` or `with` stops every MCP
+  server; `catalog + [other_tool]` keeps that ownership.
+- `MCP` always returns the eager list; pass it to `Toolbox` for discovery.
 
 ### Batching
 
-Search tools come in single and `_batch` variants. A batch takes
-`list[dict]` — one spec per search, each with `pattern`, `path`, and
-`options` — and returns labeled sections. Use it when several independent
-lookups are needed; it saves round trips and shares one timeout across the
-batch:
+`_batch` variants accept `list[dict]` specs with `pattern`, `path`, and
+`options`, returning labeled sections with one shared timeout. Use them for
+independent lookups to save round trips:
 
 ```python
-bash_ripgrep_batch(
-    [
-        {"pattern": r"def main", "path": "src", "options": "-n"},
-        {"pattern": "TODO|FIXME", "options": "-n -i"},
-    ]
-)
-# == def main in src ==
-# src/cli.py:12:def main(args):
-# ...
-# == TODO|FIXME in . ==
-# ...
+bash_ripgrep_batch([
+    {"pattern": r"def main", "path": "src", "options": "-n"},
+    {"pattern": "TODO|FIXME", "options": "-n -i"},
+])
 ```
 
 `bash_find_batch` and `bash_glob_batch` work the same way for path lookups.
