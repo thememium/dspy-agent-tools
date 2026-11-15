@@ -4,13 +4,56 @@ from __future__ import annotations
 
 import inspect
 import json
+import keyword
 from collections.abc import Callable
+from copy import copy
 from typing import TYPE_CHECKING, Any, cast
 
 from ..utils.dspy import sync_tool_class
 
 if TYPE_CHECKING:
     from dspy import Tool
+
+
+def _dspy_compatible(tool: Any) -> Any:
+    """Express union types as compositions for DSPy's MCP schema converter.
+
+    DSPy 3.4.1 indexes its Python type map with each property's ``type``;
+    JSON Schema's valid array form (e.g. ``["string", "null"]``) is unhashable.
+    An equivalent ``allOf`` leaves validation constraints intact and avoids
+    that lookup. Keep the server's original schema for the catalog.
+    """
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {
+            key: item
+            if key in ("default", "const", "enum", "examples")
+            else normalize(item)
+            for key, item in value.items()
+        }
+        types = result.get("type")
+        if isinstance(types, list):
+            result.pop("type")
+            result.setdefault("allOf", []).append(
+                {"anyOf": [{"type": item} for item in types]}
+            )
+        return result
+
+    schema = getattr(tool, "input_schema", {})
+    compatible = copy(tool)
+    normalized = normalize(schema)
+    required = set(normalized.get("required") or ())
+    for name, spec in (normalized.get("properties") or {}).items():
+        if name in required:
+            spec.pop("default", None)
+        else:
+            spec.setdefault("default", None)
+    compatible.input_schema = normalized
+    return compatible
 
 
 def _accepted_kwargs(func: Any, **kwargs: Any) -> dict[str, Any]:
@@ -50,7 +93,11 @@ def _mcp_signature(
     ordered += [name for name in args if name not in required]
 
     parameters = []
+    extra_names = False
     for name in ordered:
+        if not name.isidentifier() or keyword.iskeyword(name):
+            extra_names = True
+            continue
         parameter = inspect.Parameter(
             name,
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -62,6 +109,11 @@ def _mcp_signature(
                 default=prop.get("default") if isinstance(prop, dict) else None
             )
         parameters.append(parameter)
+    if extra_names:
+        rest = "kwargs"
+        while rest in args:
+            rest = "_" + rest
+        parameters.append(inspect.Parameter(rest, inspect.Parameter.VAR_KEYWORD))
     return inspect.Signature(parameters)
 
 
@@ -76,11 +128,20 @@ def _as_sync_capable(
     call = tool.func if func is None else func
     if signature is not None:
         cast(Any, call).__signature__ = signature
+    args = {name: dict(spec) for name, spec in (tool.args or {}).items()}
+    if signature is not None:
+        for name, parameter in signature.parameters.items():
+            if name not in args:
+                continue
+            if parameter.default is inspect.Parameter.empty:
+                args[name].pop("default", None)
+            else:
+                args[name].setdefault("default", parameter.default)
     return cls(
         func=call,
         name=tool.name,
         desc=tool.desc,
-        args=tool.args,
+        args=args,
         arg_types=tool.arg_types,
         arg_desc=tool.arg_desc,
     )

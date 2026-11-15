@@ -174,7 +174,11 @@ class _Connection:
     def run(self, coro: Coroutine[Any, Any, T], timeout: float | None = None) -> T:
         """Run a coroutine on the server's loop and wait for its result."""
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise
 
     def close(self) -> None:
         """Stop the session, the transport, and the loop thread."""

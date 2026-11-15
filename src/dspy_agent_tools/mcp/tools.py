@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import time
 from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,6 +13,7 @@ from ..toolbox.catalog import CatalogEntry
 from .adapter import (
     _accepted_kwargs,
     _as_sync_capable,
+    _dspy_compatible,
     _mcp_signature,
     _read_only,
     _zero_arg_factory,
@@ -72,10 +74,12 @@ class MCPTools(list):
         self.close()
 
     def __add__(self, other: Any) -> MCPTools:
-        return MCPTools(list(self) + list(other), self._connections)
+        connections = [*self._connections, *getattr(other, "_connections", ())]
+        return MCPTools(list(self) + list(other), dict.fromkeys(connections))
 
     def __radd__(self, other: Any) -> MCPTools:
-        return MCPTools(list(other) + list(self), self._connections)
+        connections = [*getattr(other, "_connections", ()), *self._connections]
+        return MCPTools(list(other) + list(self), dict.fromkeys(connections))
 
 
 def _stdio_transport(
@@ -116,17 +120,44 @@ def _build_tools(
 ) -> MCPTools:
     """Connect a transport, list its tools, and build the owning list."""
     Tool, ClientSession = _load()
+    from mcp.types import PaginatedRequestParams
 
+    deadline = time.monotonic() + startup_timeout
     connection = _Connection(transport, ClientSession, label, startup_timeout, failures)
     try:
         session = connection.session
         if session is None:
             raise RuntimeError("MCP server failed to initialize")
-        listed = connection.run(session.list_tools())
+        advertised_tools = []
+        cursor = None
+        seen_cursors: set[str] = set()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"MCP tool listing exceeded {startup_timeout}s")
+            request = (
+                session.list_tools()
+                if cursor is None
+                else session.list_tools(params=PaginatedRequestParams(cursor=cursor))
+            )
+            listed = connection.run(request, timeout=remaining)
+            advertised_tools.extend(listed.tools)
+            cursor = getattr(listed, "next_cursor", None)
+            if cursor is None:
+                cursor = getattr(listed, "nextCursor", None)
+            if cursor is None:
+                break
+            if cursor in seen_cursors:
+                raise RuntimeError(
+                    f"MCP tool listing repeated pagination cursor {cursor!r}"
+                )
+            seen_cursors.add(cursor)
         proxy = _SessionProxy(connection)
         entries: list[CatalogEntry] = []
-        for advertised in listed.tools:
-            tool = Tool.from_mcp_tool(proxy, advertised, result_mode=result_mode)
+        for advertised in advertised_tools:
+            tool = Tool.from_mcp_tool(
+                proxy, _dspy_compatible(advertised), result_mode=result_mode
+            )
             signature = _mcp_signature(
                 advertised, tool.args or {}, tool.arg_types or {}
             )
