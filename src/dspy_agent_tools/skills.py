@@ -29,7 +29,7 @@ The list holds four progressive-disclosure tools:
 - ``run_skill_script`` — one script from ``scripts/``, run in the sandbox
   described in :mod:`dspy_agent_tools.sandbox`.
 
-Pass the list to :func:`dspy_agent_tools.patch` on an already-built agent to
+Pass the list to :func:`dspy_agent_tools.Patch` on an already-built agent to
 append the tools and inject the skill catalog into its instructions, together
 with any other tool family in the same call; the agent class decides how the
 inner predictor is rebuilt, so it works for ``dspy.ReAct``, ``dspy.ReActV2``,
@@ -788,14 +788,14 @@ class SkillTools(list):
     concatenated with other tools. ``skills`` holds the discovered
     :class:`Skill` objects and ``errors`` the skipped directories.
 
-    Pass it to :func:`dspy_agent_tools.patch` on an existing ``dspy.ReAct``,
+    Pass it to :func:`dspy_agent_tools.Patch` on an existing ``dspy.ReAct``,
     ``dspy.ReActV2``, or ``dspy.RLM`` agent to append these tools and inject
     the skill catalog into the instructions the model sees. It implements that
     function's ``section`` protocol: ``family`` names the tool family and
     :meth:`section` renders the guidance that replaces the family template.
     """
 
-    #: Tool family used by :func:`dspy_agent_tools.patch` (see guide.py).
+    #: Tool family used by :func:`dspy_agent_tools.Patch` (see guide.py).
     family = "skills"
 
     def __init__(
@@ -821,7 +821,7 @@ class SkillTools(list):
         self._names = present or names
 
     def catalog(self) -> str:
-        """The ``<available_skills>`` XML block injected by :meth:`patch`."""
+        """The ``<available_skills>`` XML block injected by :meth:`Patch`."""
         return self._catalog
 
     def _guidance(self) -> str:
@@ -850,7 +850,7 @@ class SkillTools(list):
 
         Pass the agent's full tool list so the model is told which tools it
         has that can run a command or read a page a skill points at. This is
-        the ``skills`` section :func:`dspy_agent_tools.patch` injects.
+        the ``skills`` section :func:`dspy_agent_tools.Patch` injects.
         """
         return "\n\n".join(
             [self._guidance(), self._execution_note(tools), self._catalog]
@@ -916,7 +916,7 @@ def Skills(
         max_resource_chars: Cap one ``read_skill_resource`` result
             (``0`` keeps everything).
         max_catalog_chars: Cap the ``<available_skills>`` block injected by
-            ``patch`` (``0`` keeps every skill).
+            ``Patch`` (``0`` keeps every skill).
 
     Returns:
         A :class:`SkillTools` list with ``list_skills``, ``activate_skill``,
@@ -929,7 +929,7 @@ def Skills(
         >>> agent = dspy.ReAct("question -> answer", tools=skills)
 
         >>> agent = dspy.ReAct("question -> answer", tools=[bash_exec])
-        >>> dspy_agent_tools.patch(agent, tools=Skills("./skills"))
+        >>> dspy_agent_tools.Patch(agent, tools=Skills("./skills"))
 
         >>> rlm = dspy.RLM("task -> report", tools=Skills("./skills", mode="code"))
     """
