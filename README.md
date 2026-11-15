@@ -47,7 +47,7 @@ bridge, and optional MCP and browser bridges:
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
 - **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable. See [docs/cli.md](docs/cli.md).
-- **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
+- **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra. See [docs/mcp.md](docs/mcp.md).
 - **Skills** — `Skills("~/.agents/skills")` loads [Agent Skills](https://agentskills.io/specification) folders and returns progressive-disclosure tools for listing, activating, reading, and running them, with sandboxed script execution. `Skills(...).patch(agent)` appends the catalog and tools to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`. See [docs/skills.md](docs/skills.md).
 - **Browser** (optional) — `Browser()` returns the headless-Chrome toolset as one `dspy.Tool` list; `include_recording=True` adds video recording and `include_search=True` adds `web_search`; requires the `[browser]` extra. See [docs/browser.md](docs/browser.md).
 - **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
@@ -282,10 +282,10 @@ from dspy_agent_tools import (
 
 ### With MCP servers
 
-`MCP` is one wrapper for every transport. It starts the server, converts every
-tool it advertises into a `dspy.Tool`, and returns them as an `MCPTools` list.
-The server keeps running while the tools are referenced, so repeated calls
-reuse one session:
+`MCP` starts a server, converts every tool it advertises into a `dspy.Tool`,
+and returns them as an `MCPTools` list. Use `command=` for a local stdio server
+or `url=` for Streamable HTTP; `transport="sse"` selects legacy HTTP+SSE, and
+`transport=<factory>` takes any custom async transport.
 
 ```python
 import dspy
@@ -305,76 +305,20 @@ result = agent(question="List the files inside /tmp")
 print(result.answer)
 ```
 
-Remote servers use the same wrapper. `url=` selects Streamable HTTP, and
-`transport="sse"` selects the legacy HTTP+SSE transport:
+Remote servers use the same wrapper:
 
 ```python
-tools = MCP(
+hosted = MCP(
     url="https://example.com/mcp",
     headers={"Authorization": "Bearer <token>"},
 )
-
-legacy = MCP(url="https://example.com/sse", transport="sse")
 ```
 
-- `MCP(command=..., args=[...])` runs a local **stdio** server; `env=` and
-  `cwd=` configure its environment and working directory.
-- `MCP(url=...)` connects over **Streamable HTTP**, the transport used by most
-  hosted MCP servers.
-- `MCP(url=..., transport="sse")` connects over legacy **HTTP+SSE**.
-- `MCP(transport=factory)` uses a custom async transport: `factory` is a
-  zero-argument callable returning an async context manager that yields a
-  read/write pair.
-- `transport="auto"` (the default) infers the transport from `command=` vs
-  `url=`; pass `"stdio"`, `"http"`, or `"sse"` to be explicit.
-
-Every transport accepts `startup_timeout` (seconds to wait for initialization
-and tool listing, default 60), `name_prefix` (prepended to every tool name),
-and `result_mode`: `"text"` (default) flattens MCP text content to strings,
-`"structured"` returns the server's `structuredContent` when it provides it.
-The stdio transport ignores the HTTP-only options.
-
-MCP servers often finish startup work after the handshake — an index
-reconcile, a cache warm-up — advertising their tools immediately and answering
-calls with an error payload (`{"error": ...}` or `{"ok": false}`) until it
-ends. Read-only tools (`readOnlyHint`) are therefore replayed while they
-answer with such a payload: `retry_timeout` (default 30 s) bounds the replay
-and `0` disables it. The last payload is returned unchanged when the budget
-runs out. Tools without the annotation are never replayed, so a side effect
-cannot be duplicated.
-
-Remote transports (`url=`, `transport="http"` or `"sse"`) additionally accept:
-
-- `headers` — extra HTTP headers such as an `Authorization` bearer token.
-- `timeout` — HTTP timeout; defaults to 30 s for Streamable HTTP and 5 s for
-  legacy SSE.
-- `sse_read_timeout` — how long to wait on the server stream (default 300 s).
-- `auth` — an `httpx`/`httpx2` auth handler, e.g. an MCP OAuth client
-  provider.
-- `http_client_factory` — zero-argument callable returning an async HTTP
-  client, created and closed on the connection's event loop. For Streamable
-  HTTP it replaces the default client, so `headers`, `timeout`, and `auth`
-  are then ignored; for legacy SSE it is passed to the SDK as
-  `httpx_client_factory` alongside the other options.
-- `terminate_on_close` — ask the server to terminate the HTTP session on close
-  (Streamable HTTP only, default `True`).
-
-For legacy SSE, `headers`, `timeout`, `sse_read_timeout`, and `auth` are only
-forwarded when the installed MCP SDK's `sse_client` accepts them.
-
-Both paths work out of the box: `agent(...)` synchronously converts the
-async MCP calls (scoped to those tools, no global DSPy setting), and
-`await agent.acall(...)` runs fully asynchronously in async applications.
-No cleanup is required: the session keeps running while the tools or the
-`MCPTools` list are referenced, then closes when they are garbage-collected,
-with an interpreter-exit fallback. Call `tools.close()` only to stop it
-earlier.
-
-- Call `MCP` once per server and concatenate the results for several servers;
-  use `name_prefix="fs_"` when servers expose identically named tools.
-- The return value, `MCPTools`, is a `list` subclass: passing it as `tools=`,
-  concatenating with `+` on either side, and unpacking all work. It is also a
-  context manager (`with MCP(...) as tools:`) that closes the server on exit.
+`MCPTools` is a `list` subclass, so it composes with other tools; it is also a
+context manager with `.close()`. `agent(...)` works synchronously and
+`await agent.acall(...)` runs fully asynchronously. See
+[docs/mcp.md](docs/mcp.md) for transport selection, result modes, startup
+retries, HTTP options, and lifecycle.
 
 ### With any CLI
 
@@ -663,6 +607,15 @@ one typed tool per explicit `Command` and skips discovery. Names are prefixed
 by the executable (or `name_prefix`), and `mode="code"` returns dictionaries
 for `dspy.RLM`. The parsed flag table is advisory; the raw help is
 authoritative. See [docs/cli.md](docs/cli.md).
+
+### MCP (`dspy_agent_tools.mcp`)
+
+`MCP()` returns an `MCPTools` list of `dspy.Tool` objects backed by one live
+session. `command=` runs a local stdio server; `url=` connects over Streamable
+HTTP; `transport="sse"` selects legacy HTTP+SSE; `transport=<factory>` takes a
+custom async transport. `name_prefix`, `result_mode`, `startup_timeout`, and
+`retry_timeout` tune the conversion, and `.close()` stops the session early.
+See [docs/mcp.md](docs/mcp.md).
 
 ### Skills (`dspy_agent_tools.skills`)
 
