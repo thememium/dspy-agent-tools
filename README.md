@@ -321,16 +321,16 @@ agent = dspy.ReAct("question -> answer", tools=skills + [bash_exec])
 worker = dspy.RLM("task -> report", tools=Skills("./skills", mode="code"))
 ```
 
-`Skills(...).patch(agent)` appends the `<available_skills>` catalog and the
-skill tools to an agent that was already built. It rebuilds the inner
+`patch(agent, Skills("./skills"))` appends the `<available_skills>` catalog
+and the skill tools to an agent that was already built. It rebuilds the inner
 predictor, so it works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`, is
 idempotent, and returns the agent:
 
 ```python
-from dspy_agent_tools import Skills, bash_exec, read_file
+from dspy_agent_tools import Skills, bash_exec, patch, read_file
 
 agent = dspy.ReAct("question -> answer", tools=[bash_exec, read_file])
-Skills("./skills").patch(agent)
+patch(agent, Skills("./skills"))
 ```
 
 The injected block names the host-command and URL-reading tools the agent
@@ -359,9 +359,15 @@ Each section names the tools the agent actually has and carries what a tool
 cannot say about itself: which family to reach for (search, fetch, browser),
 how it behaves (no shell in a command tool, no process spawning from the RLM
 REPL), and how to load tools on demand (`search_tools` → `call_tool`).
-`describe=False` appends tools without sections. Patching twice with the same
-tools changes nothing; patching a second family adds that family's section.
-See [docs/patch.md](docs/patch.md).
+`describe=False` appends tools without sections.
+
+Patch keeps its guidance in one delimited region of the instructions and
+recomputes it on every call: edited `guide` text replaces the old copy, the
+last guide carries over to later calls (`guide=""` clears it), and a family
+whose heading you already wrote yourself (`## Shell`) is left to you. Patching
+twice with the same arguments changes nothing. Rebuilding replaces the inner
+predictor, so few-shot demos from an optimizer are dropped with a warning —
+patch before compiling, or recompile afterwards. See [docs/patch.md](docs/patch.md).
 
 ### Tool discovery with Toolbox
 
@@ -588,10 +594,10 @@ See [docs/mcp.md](docs/mcp.md).
 | **`activate_skill`** | The full `SKILL.md` body, bundled file list, and declared `allowed-tools` (code mode also returns `license`, `compatibility`, and `metadata`). |
 | **`read_skill_resource`** | One file from `references/` or `assets/`, relative to the skill folder; escapes are rejected. |
 | **`run_skill_script`** | One file from `scripts/` with an argv list, run in the sandbox; omitted when `scripts=False`. |
-| **`SkillTools`** | `list` subclass with `.skills`, `.errors`, `.catalog()`, `.section(tools=())`, and `.patch(agent)`. |
+| **`SkillTools`** | `list` subclass with `.skills`, `.errors`, `.catalog()`, and `.section(tools=())`. |
 
-`patch(agent)` appends the catalog and tools to an existing `dspy.ReAct`,
-`dspy.ReActV2`, or `dspy.RLM`. See [docs/skills.md](docs/skills.md).
+`patch(agent, skills)` appends the catalog and tools to an existing
+`dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`. See [docs/skills.md](docs/skills.md).
 
 ### Patch (`dspy_agent_tools.patch`)
 
