@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.14 (2026-11-15)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.13...v0.1.14)
+
+### 📖 Documentation
+
+- improve pyproject.toml description ([83c403d](https://github.com/thememium/dspy-agent-tools/commit/83c403d63694e39d17091dc9b2f76164a0121b19))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.13 (2026-11-15)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.12...v0.1.13)

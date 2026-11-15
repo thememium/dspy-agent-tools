@@ -1,6 +1,6 @@
 [project]
 name = "dspy-agent-tools"
-version = "0.1.13"
+version = "0.1.14"
 description = "Ready-made, tool-annotated Python functions for DSPy agents: bash, files, search, CLI, MCP, skills, and browser."
 readme = "README.md"
 authors = [{ name = "Edward Boswell", email = "thememium@gmail.com" }]
