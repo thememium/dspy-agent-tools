@@ -62,7 +62,12 @@ def test_sync_tool_class_drop_nulls_removes_none_kwargs():
         calls.append({"value": value, "other": other})
         return "recorded"
 
-    dropping = sync_tool_class(drop_nulls=True)(record, name="drop", desc="drop")
+    dropping = sync_tool_class(drop_nulls=True)(
+        record,
+        name="drop",
+        desc="drop",
+        args={"value": {"type": "string"}, "other": {"type": "integer"}},
+    )
     keeping = sync_tool_class(drop_nulls=False)(record, name="keep", desc="keep")
 
     assert dropping(value=None, other=2) == "recorded"
@@ -71,3 +76,19 @@ def test_sync_tool_class_drop_nulls_removes_none_kwargs():
         {"value": "DEFAULT", "other": 2},
         {"value": None, "other": 2},
     ]
+
+
+def test_drop_nulls_preserves_schema_valid_nulls():
+    async def record(**kwargs):
+        return kwargs
+
+    tool = sync_tool_class(drop_nulls=True)(
+        record,
+        args={
+            "value": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "other": {"type": "integer"},
+        },
+        arg_types={},
+    )
+    assert tool(value=None, other=None) == {"value": None}
+    assert asyncio.run(tool.acall(value=None, other=None)) == {"value": None}

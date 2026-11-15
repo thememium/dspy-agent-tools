@@ -1,5 +1,6 @@
 """Tests for dspy_agent_tools.utils.process."""
 
+import os
 import sys
 
 import pytest
@@ -47,6 +48,26 @@ class TestResolveCwd:
 
 
 class TestExecute:
+    def test_timeout_survives_process_exit_race(self, monkeypatch):
+        original = os.killpg
+
+        def kill_then_report_gone(pid, sig):
+            original(pid, sig)
+            raise ProcessLookupError("group exited")
+
+        monkeypatch.setattr(os, "killpg", kill_then_report_gone)
+        output, notices, _, code = execute(
+            [
+                sys.executable,
+                "-c",
+                "import time; print('partial', flush=True); time.sleep(30)",
+            ],
+            timeout=0.1,
+        )
+        assert output == "partial\n"
+        assert code != 0
+        assert "timed out" in notices[0]
+
     def test_returns_output_and_exit_code(self):
         output, notices, elapsed, code = execute(["echo", "hi"])
 
