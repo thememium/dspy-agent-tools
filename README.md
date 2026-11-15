@@ -525,18 +525,6 @@ bash_ripgrep_batch(
 | **`bash_curl`** | Fetch a URL and return the **raw** response body — API JSON, headers, binaries. |
 | **`bash_fetch`** | Fetch a web page and return **readable markdown** — nav, ads, cookie banners stripped, title kept. Prefer over `bash_curl` when the goal is reading. |
 
-### Browser (`dspy_agent_tools.browser`)
-
-`Browser()` returns `browser_open`, `browser`, `browser_snapshot`,
-`browser_tabs`, `browser_network`, `browser_cookies`, `browser_screenshot`,
-`browser_evaluate`, and `browser_close` as one `BrowserTools` list of
-`dspy.Tool` objects; `include_recording=True` adds video recording and
-`include_search=True` adds `web_search`. `BrowserSession` binds the same tools
-to one lazily started browser for per-user isolation, and
-`BrowserTools.close()` stops that list's session. Chrome runs headless by
-default, and every action returns `{"status": "ok" | "error", ...}`. See
-[docs/browser.md](docs/browser.md).
-
 ### Files (`dspy_agent_tools.files`)
 
 | Tool | Use it for |
@@ -595,6 +583,27 @@ See [docs/mcp.md](docs/mcp.md).
 dictionaries for `dspy.RLM`; `patch(agent)` appends the catalog and tools to an
 existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`. See
 [docs/skills.md](docs/skills.md).
+
+### Browser (`dspy_agent_tools.browser`)
+
+| Tool | Use it for |
+| --- | --- |
+| **`Browser`** | Return the core browser tools as one `BrowserTools` list of `dspy.Tool` objects. `include_recording=True` adds video recording, `include_search=True` adds `web_search`, and `.close()` stops that list's browser session. Pass `session=BrowserSession(...)` for per-user isolation; `session.tools()` is equivalent. |
+| **`browser_open`** | Navigate to a URL and return its snapshot in one call. `format="nodes"` is the default; `format="text"` returns the compact tree, and `format="both"` returns both. |
+| **`browser`** | Run one action: `navigate`, `click`, `type`, `press`, `hover`, `select`, `scroll`, `back`, `forward`, `reload`, or `wait`. `target` accepts an `@ref`, CSS, XPath, `text=Exact`, or `text*=Partial`; `value` carries the URL, text, key, option value, scroll direction, or seconds. |
+| **`browser_snapshot`** | Return `{url, title, node_count, truncated}` plus `nodes`, `text`, or both selected by `format` (default `nodes`). Nodes carry `ref` (`@e1`), `role`, `name`, `tag`, `depth`, and relevant `value`/`href`/`checked`/`disabled`. Every snapshot clears and reassigns refs. |
+| **`browser_tabs`** | List, open, switch, and close tabs. `switch` takes an index or a URL/title substring; closing the last tab stops the browser. |
+| **`browser_network`** | Inspect recorded requests, return a response body by request id, or clear the record. |
+| **`browser_cookies`** | Read, write, clear, save, and load cookies for the current browser context. |
+| **`browser_screenshot`** | Save a PNG/JPEG/WebP (temp file by default) and return `path`, `format`, `bytes`; `full_page` captures beyond the viewport, `as_base64` returns the image inline. |
+| **`browser_evaluate`** | Run JavaScript with a `return` statement and get the value by value (`return document.title`). `await_promise` waits for promises. |
+| **`browser_record_start`** / **`browser_record_stop`** | Optional (`include_recording=True`): start and stop a CDP screencast recording. MP4 (H.264) by default, WebM/VP9 on `.webm`; uses `ffmpeg` from PATH or the optional `[ffmpeg]` extra. |
+| **`browser_close`** | Stop this tool list's browser session early; the next call starts a fresh one. An active recording is encoded and returned under `recording`. |
+| **`BrowserSession`** | Advanced: one lazily started headless browser per user/session with the same methods, plus `.tools()` for a session-bound `dspy.Tool` list and `allowed_schemes`/`url_policy` for navigation restrictions. |
+
+Chrome runs headless by default. Actions return `{"status": "ok" | "error", ...}`;
+on failure `error` carries the reason, and a stale `@ref` asks for a fresh
+snapshot. See [docs/browser.md](docs/browser.md).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
