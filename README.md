@@ -41,15 +41,15 @@ function with a tool-optimized docstring, so you can hand them straight to
 `dspy.ReAct` or `dspy.RLM` — no adapters, no wrappers.
 
 Three built-in tool families, plus Agent Skills, a generic Toolbox, a CLI
-bridge, and an optional MCP bridge:
+bridge, and optional MCP and browser bridges:
 
 - **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
 - **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
 - **Search** — multi-engine web and news search with failover and explicit outcomes
 - **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable.
 - **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
-- **Skills** — `Skills("~/.agents/skills")` loads [Agent Skills](https://agentskills.io/specification) folders and returns progressive-disclosure tools for listing, activating, reading, and running them, with sandboxed script execution. `Skills(...).patch(agent)` appends the catalog and tools to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`.
-- **Browser** (optional) — `Browser()` returns the headless-Chrome toolset as one `dspy.Tool` list; every action verifies its effect, refuses hidden/disabled/covered targets, waits on conditions, and reports console output, page errors, and dialogs with the result; `browser_tabs`, `browser_network`, and `browser_cookies` cover multi-tab flows, request inspection, and saved logins, and `BrowserSession(user_data_dir=...)` keeps a profile; `include_recording=True` adds video recording and `include_search=True` adds `web_search`; requires the `[browser]` extra
+- **Skills** — `Skills("~/.agents/skills")` loads [Agent Skills](https://agentskills.io/specification) folders and returns progressive-disclosure tools for listing, activating, reading, and running them, with sandboxed script execution. `Skills(...).patch(agent)` appends the catalog and tools to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`. See [docs/skills.md](docs/skills.md).
+- **Browser** (optional) — `Browser()` returns the headless-Chrome toolset as one `dspy.Tool` list; `include_recording=True` adds video recording and `include_search=True` adds `web_search`; requires the `[browser]` extra. See [docs/browser.md](docs/browser.md).
 - **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
 
 Tools are just Python functions, exactly as
@@ -102,17 +102,12 @@ uv add 'dspy-agent-tools[browser]'
 # or: pip install 'dspy-agent-tools[browser]'
 ```
 
-`Browser()` returns the core browser tools (`browser`, `browser_open`,
-`browser_snapshot`, `browser_screenshot`, `browser_evaluate`, `browser_close`)
-as one ready-made list of `dspy.Tool` objects. Pass `include_recording=True` to
-add video recording, and `include_search=True` to add `web_search`. The tools
-drive a locally installed Chrome in headless mode through pydoll. Chrome
-must be installed; there is no separate browser download step. `browser_open`
-combines navigation and the first snapshot, so a page costs one call instead of
-two. The browser starts on the first tool call and is reused until you call
-`browser_close` or the process exits. Video recording uses
-`ffmpeg` from `PATH` when available. To let the package supply one, install the
-optional extra:
+`Browser()` returns the browser toolset as one ready-made list of `dspy.Tool`
+objects. Pass `include_recording=True` to add video recording and
+`include_search=True` to add `web_search`. The tools drive a locally installed
+Chrome in headless mode through pydoll; Chrome must be installed, with no
+separate browser download step. Video recording uses `ffmpeg` from `PATH` when
+available. To let the package supply one, install the optional extra:
 
 ```bash
 uv add 'dspy-agent-tools[ffmpeg]'
@@ -254,177 +249,22 @@ result = agent(task="Open https://example.com and summarize the page")
 ```
 
 `Browser(include_search=True)` appends `web_search` for research agents, and
-`Browser(include_recording=True)` adds `browser_record_start` and
-`browser_record_stop`. The individual functions remain available when you want
-a hand-picked list.
+`Browser(include_recording=True)` adds video recording. The individual
+functions remain available when you want a hand-picked list.
 
-`browser_snapshot` returns structured nodes by default. Each interactive
-element has a ref such as `@e3`, and the same ref works as the `target` of the
-next action:
+For a server that needs one browser per user or session, bind the tool list to
+a session:
 
 ```python
-from dspy_agent_tools import browser, browser_snapshot
-
-snapshot = browser_snapshot()
-email = next(node for node in snapshot["nodes"] if node["role"] == "textbox")
-browser("type", target=email["ref"], value="hello@example.com")
-browser("click", target="text=Sign in")
-browser("press", value="Enter")
-```
-
-Pass `format="text"` for only the compact indented tree, or `format="both"`
-when you need both representations. Every snapshot clears the previous refs.
-
-Actions report what actually happened instead of assuming it worked. A click
-is refused before it fires when the target is hidden, disabled, or covered by
-an overlay, and a click that runs reports whether the page changed:
-
-```python
-browser("click", target="@e3")
-# {"status": "ok", "method": "native", "changed": True, "effect": "dom", ...}
-
-browser("type", target="#email", value="hi@example.com")
-# {"status": "ok", "verified": True, ...}
-# a maxlength or mask adds verified=False, actual="...", and a warning
-```
-
-`effect` is `dom`, `navigation`, or `none`; `none` adds a `warning`, because a
-click that changes nothing usually means the target was inert or an overlay ate
-it. `type` and `select` read the field back and report `verified`.
-
-Wait for a condition instead of sleeping:
-
-```python
-browser("wait", target="#results")  # visible selector
-browser("wait", value="text=Order confirmed")  # body text
-browser("wait", value="url=https://example.com/next")  # URL prefix
-```
-
-A wait that times out returns `status="error"` naming the condition, rather
-than letting the next action run against a half-loaded page.
-
-Page diagnostics ride along with every result, so a failed step explains
-itself without a second call: `console` (page console output, repeats
-collapsed into `count`), `errors` (uncaught exceptions), and `dialog`.
-JavaScript dialogs are answered automatically — dismissed by default, so a
-`confirm()` never hangs the session — and reported under `dialog`:
-
-```python
-browser("click", target="text=Delete")
-# {"status": "ok", ..., "dialog": {"type": "confirm",
-#  "message": "Delete everything?", "handled": "dismissed"}}
-```
-
-Dialogs are answered as they open, from a separate thread, because the command
-that triggered one — a click, a navigation — does not return until the dialog
-closes. That is why the policy is fixed per session rather than decided per
-dialog: pass `BrowserSession(dialog_policy="accept")` to confirm instead of
-cancel. A page that asks "discard your changes?" therefore needs `accept` to
-let the navigation through.
-
-Tabs are first-class. `browser_tabs` lists them, and `new`, `switch`, and
-`close` change which one every other tool acts on:
-
-```python
-browser_tabs()  # [{"index": 0, "url": ..., "active": True}, ...]
-browser_tabs("switch", "checkout")  # by URL or title substring, or by index
-browser_tabs("new", "https://example.com/report")
-```
-
-A click that opens a popup reports `tabs_changed` and a warning naming
-`browser_tabs`, so "nothing changed" never means "a tab opened behind you".
-Closing the last tab stops the browser; the next call starts a fresh one.
-
-`browser_network` answers what the page actually fetched — recorded from the
-moment the browser starts, so no second click is needed — and can return a
-response body:
-
-```python
-browser_network("clear")
-browser("click", target="text=Load orders")
-browser_network()  # [{"method": "GET", "url": ".../orders", "status": 200, ...}]
-browser_network("body", "1234.5")  # the JSON that came back
-```
-
-`browser_cookies` reads, writes, clears, saves, and loads cookies. Saving and
-loading is manual; `cookie_state=` does it for you — the file is loaded when
-the browser starts and rewritten after any cookie change and on close, with no
-profile needed:
-
-```python
-agent = dspy.ReAct("task -> result", tools=Browser(cookie_state="state.json"))
-```
-
-That is the same format `browser_cookies("save", path)` writes, so a state
-captured by hand can be handed to the constructor, and the other way round:
-
-```python
-browser_cookies("save", "state.json")  # after logging in once
-browser_cookies("load", "state.json")  # in a later run, or pass cookie_state=
-```
-
-For a session that keeps its own logins, storage, and history, give the browser
-a profile directory — directly on the ready-made tool list, or on a session you
-manage yourself:
-
-```python
-agent = dspy.ReAct("task -> result", tools=Browser(user_data_dir="./browser-profile"))
-
-session = BrowserSession(user_data_dir="./browser-profile", dialog_policy="accept")
-tools = Browser(session=session)
-```
-
-`Browser()` forwards `headless`, `timeout`, `dialog_policy`, `user_data_dir`,
-`cookie_state`, `allowed_schemes`, and `url_policy` to the session it creates;
-passing any of them together with `session=` raises `ValueError`.
-
-Chrome writes that profile on shutdown, so `close()` asks it to exit and waits
-briefly before ending the process — without that wait the cookie database is
-left half-written and the login the profile was meant to keep is lost.
-
-Record the same session to a video by bracketing the actions:
-
-```python
-from dspy_agent_tools import browser_record_start, browser_record_stop
-
-browser_record_start(path="checkout.mp4", fps=10)
-browser("navigate", value="https://example.com/checkout")
-browser("click", target="text=Pay")
-video = browser_record_stop()  # {"status": "ok", "path": ..., "frames": ...}
-```
-
-Frames come from Chrome's CDP screencast and are encoded with `ffmpeg` when
-recording stops. `fps` is a capture cap, not a guarantee: Chrome only emits
-frames when the page changes, and the video preserves those timestamps. The
-recording is video-only; page audio is not captured. `browser_close` also stops
-and encodes an active recording.
-
-Every call returns a dict whose `status` is `ok` or `error`. The browser is
-headless by default. For a server that needs one browser per user or session,
-bind the ready-made tool list to a session:
-
-```python
-import dspy
 from dspy_agent_tools import Browser, BrowserSession
 
 session = BrowserSession()
 tools = Browser(session=session)  # or session.tools()
-agent = dspy.ReAct("task -> result", tools=tools)
-result = agent(task="Open https://example.com and summarize the page")
 tools.close()  # stops this session only
 ```
 
-`BrowserSession` allows `http`, `https`, `about`, and `data` URLs by default.
-Pass `allowed_schemes=(...)` to extend or restrict that set, or pass
-`url_policy` to reject individual normalized URLs. `file:`, `chrome:`, and
-`view-source:` are blocked unless explicitly enabled.
-
-```python
-session = BrowserSession(
-    url_policy=lambda url: not url.startswith("https://internal.example")
-)
-tools = Browser(session=session)
-```
+See [docs/browser.md](docs/browser.md) for actions, snapshots and refs, tabs,
+network capture, cookies and profiles, video recording, and URL policy.
 
 A full coding-agent toolbox, all in one import:
 
@@ -703,14 +543,14 @@ commands and plugin commands that do not appear in help.
 
 `Skills` loads folders that follow the [Agent Skills
 specification](https://agentskills.io/specification) — the same `SKILL.md`
-folders Claude Code, Codex, and other clients use. Point it at the folder that
-houses the skills; each immediate subdirectory with a `SKILL.md` is discovered
-at startup from its frontmatter, so only the name and description enter the
-model context. The body loads when the agent activates the skill.
+folders Claude Code, Codex, and other clients use. Each immediate subdirectory
+with a `SKILL.md` is discovered at startup, so only its name, description, and
+declared `allowed-tools` enter the model context; the body loads when the agent
+activates the skill.
 
 ```python
 import dspy
-from dspy_agent_tools import CLI, Skills, bash_exec, read_file
+from dspy_agent_tools import Skills, bash_exec
 
 skills = Skills("~/.agents/skills", ".agents/skills")
 
@@ -718,112 +558,23 @@ agent = dspy.ReAct("question -> answer", tools=skills + [bash_exec])
 worker = dspy.RLM("task -> report", tools=Skills("./skills", mode="code"))
 ```
 
-| Tool | Purpose |
-| --- | --- |
-| `list_skills()` | Names, descriptions, declared `allowed-tools`, and bundled scripts for every skill. |
-| `activate_skill(skill)` | The skill's full `SKILL.md` body plus its bundled file list and frontmatter (`allowed-tools`, `license`, `compatibility`, `metadata`). |
-| `read_skill_resource(skill, path)` | One file from `references/` or `assets/`, addressed relative to the skill folder. |
-| `run_skill_script(skill, script, args=[])` | One file from `scripts/`, run in the sandbox below. |
-
-A skill is a directory with a `SKILL.md` (YAML frontmatter carrying `name` and
-`description`) and optional `scripts/`, `references/`, and `assets/` folders:
-
-```
-sqlite-tools/
-├── SKILL.md              # name, description, metadata + instructions
-├── scripts/query.py      # executable code the agent can run
-├── references/schema.md  # documentation loaded on demand
-└── assets/report.html    # templates and data
-```
-
-- `name` must be lowercase, hyphen-separated, at most 64 characters, and match
-  the directory name; `description` is required and at most 1024 characters.
-  Skills that break the spec are skipped and reported on `skills.errors`.
-  Pass `strict=True` to raise instead.
-- A root that is itself a skill (`Skills("./pdf")`) is accepted.
-- `mode="search"` (default) returns text for `dspy.ReAct` / `dspy.ReActV2`;
-  `mode="code"` returns `list[dict]` / `dict` for `dspy.RLM`. Under
-  `mode="code"` the model also runs in a REPL, so the injected guidance says
-  that only tool calls reach the machine.
-- `name_prefix="skill_"` avoids tool-name collisions with other tools. It must
-  form valid Python identifiers (required for `dspy.RLM`, whose tools are
-  called from code), so `"skill_"` is accepted and `"sk-"` raises.
-- `scripts=False` omits `run_skill_script` and never executes skill code.
-
-#### Patching an existing agent
-
-`tools=skills` is enough on its own. `Skills(...).patch(agent)` appends the
-`<available_skills>` catalog to the instructions the model sees and adds the
-four tools to an agent that was already built. It rebuilds the inner
-predictor, so it works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`:
+`Skills(...).patch(agent)` appends the `<available_skills>` catalog and the
+skill tools to an agent that was already built. It rebuilds the inner
+predictor, so it works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`, is
+idempotent, and returns the agent:
 
 ```python
+from dspy_agent_tools import Skills, bash_exec, read_file
+
 agent = dspy.ReAct("question -> answer", tools=[bash_exec, read_file])
 Skills("./skills").patch(agent)
 ```
 
-The injected block carries the execution rules, not just the catalog: only
-`run_skill_script` can start a bundled file, and the skill's prose may call for
-host commands (`npx skills find ...`, `gh skill search ...`) or a page to read.
-`patch` names whichever it finds on the agent — host command tools
-(`bash_exec`, `CLI(...)`), fetch tools (`web_search`, `bash_curl`), or both.
-When the agent holds neither, the model is told to report the exact command
-instead of running it, and never to invent command output, search results, or
-install counts:
-
-```python
-# No shell tool: the model reports `npx skills find "git review"` for you to run.
-agent = dspy.RLM("question -> answer")
-Skills("./skills", mode="code").patch(agent)
-
-# With a CLI tool: the model runs the command for real and quotes the output.
-agent = dspy.ReAct("question -> answer", tools=list(CLI("gh")))
-Skills("./skills").patch(agent)
-```
-
-- `patch` returns the agent and is idempotent: patching twice changes nothing.
-- Patching an agent that already received `tools=skills` only adds the catalog.
-- It raises when the agent has a *different* tool with one of the skill tool
-  names; pass `name_prefix="skill_"` to resolve the collision.
-- Put every folder into one `Skills(...)` call: an agent accepts one catalog.
-
-#### Sandboxed scripts
-
-Scripts are argv-only (no shell), use an allowlisted interpreter
-(`python`, `bash`, `sh`, `node`, `deno`, `ruby`, `perl` by default), must
-resolve inside the skill folder, and run with a *replacement* environment: no
-ambient secrets, and `HOME`/`TMPDIR` point at a throwaway directory. The
-process runs in its own group, so a timeout kills any children it spawned.
-
-Where an OS sandbox is installed, it wraps the run:
-
-| Platform | Backend | Enforcement |
-| --- | --- | --- |
-| Linux | `bwrap` (preferred) | all namespaces unshared, host read-only, tmpfs `/tmp`, network unshared |
-| Linux | `firejail` (fallback) | read-only root, private `/tmp`, `--net=none` |
-| macOS | `sandbox-exec` | writes denied outside the throwaway temp dir, `network*` denied |
-| any | none | process confinement only (allowlist, path guard, env scrub, timeout) |
-
-`allow_network=False` and `allow_write=False` are the defaults, so a script
-can read the skill and the host but cannot reach the network or modify files;
-`allow_write=True` opens the skill folder, and the throwaway temp directory is
-always writable. `sandbox="auto"` uses an installed OS backend and falls back
-to process confinement with a log warning; `sandbox="required"` refuses to
-fall back; a backend name (`"bwrap"`, `"firejail"`, `"sandbox-exec"`) forces
-one and fails at construction if it is missing; `"off"` skips the OS layer.
-Use `sandbox="required"` when skill scripts are not trusted.
-
-```python
-Skills(
-    "./skills",
-    timeout=60,
-    allow_network=True,
-    allow_write=True,
-    sandbox="required",
-    interpreters=("python", "bash"),
-    max_output_chars=20_000,
-)
-```
+The injected block names the host-command and URL-reading tools the agent
+actually has. When it has neither, the model reports the exact command for you
+to run instead of inventing output. See [docs/skills.md](docs/skills.md) for
+the skill layout, validation rules, sandbox for bundled scripts, and every
+constructor option.
 
 ### Tool discovery with Toolbox
 
@@ -1003,22 +754,15 @@ bash_ripgrep_batch(
 
 ### Browser (`dspy_agent_tools.browser`)
 
-| Tool | Use it for |
-| --- | --- |
-| **`Browser`** | Return the core browser tools as one `BrowserTools` list of `dspy.Tool` objects. `include_recording=True` adds video recording, `include_search=True` adds `web_search`, and `.close()` stops that list's browser session. Pass `session=BrowserSession(...)` for per-user or per-request isolation; `session.tools()` is equivalent. |
-| **`browser`** | Run one action: `navigate`, `click`, `type`, `press`, `hover`, `select`, `scroll`, `back`, `forward`, `reload`, or `wait`. `target` accepts an `@ref`, CSS, XPath, `text=Exact`, or `text*=Partial`; `value` carries the URL, text, key, option value, scroll direction, or seconds. Navigation defaults to http/https/about/data; mutating actions wait briefly for navigation and in-flight requests. |
-| **`browser_open`** | Navigate to a URL and return its snapshot in one call (`action="open"`). `format="nodes"` is the default; `format="text"` returns the compact tree, and `format="both"` returns both. |
-| **`browser_snapshot`** | Return `{url, title, node_count, truncated}` plus `nodes`, `text`, or both selected by `format` (default `nodes`). Nodes carry `ref` (`@e1`), `role`, `name`, `tag`, `depth`, and relevant `value`/`href`/`checked`/`disabled`. Every snapshot clears and reassigns refs. |
-| **`browser_screenshot`** | Save a PNG/JPEG/WebP (temp file by default) and return `path`, `format`, `bytes`; `full_page` captures beyond the viewport, `as_base64` returns the image inline. |
-| **`browser_record_start`** | Start a CDP screencast recording (`path`, `fps`, `quality`, `max_width`, `max_height`). MP4 (H.264) by default, WebM/VP9 on `.webm`; uses `ffmpeg` from PATH or the optional `[ffmpeg]` extra. |
-| **`browser_record_stop`** | Stop the active recording, encode the captured frames, and return `path`, `format`, `bytes`, `frames`, and `duration_s`. |
-| **`browser_evaluate`** | Run JavaScript with a `return` statement and get the value by value (`return document.title`). `await_promise` waits for promises. |
-| **`browser_close`** | Stop this tool list's browser session early; the next call starts a fresh one. Optional, because exit also cleans up. An active recording is encoded and returned under `recording`. |
-| **`BrowserSession`** | Advanced: one lazily started headless browser per user/session with the same methods, plus `.tools()` for a session-bound `dspy.Tool` list and `allowed_schemes`/`url_policy` for navigation restrictions. |
-
-Chrome runs headless by default. Actions return `{"status": "ok" | "error", ...}`;
-on failure `error` carries the reason, and a stale `@ref` asks for a fresh
-snapshot.
+`Browser()` returns `browser_open`, `browser`, `browser_snapshot`,
+`browser_tabs`, `browser_network`, `browser_cookies`, `browser_screenshot`,
+`browser_evaluate`, and `browser_close` as one `BrowserTools` list of
+`dspy.Tool` objects; `include_recording=True` adds video recording and
+`include_search=True` adds `web_search`. `BrowserSession` binds the same tools
+to one lazily started browser for per-user isolation, and
+`BrowserTools.close()` stops that list's session. Chrome runs headless by
+default, and every action returns `{"status": "ok" | "error", ...}`. See
+[docs/browser.md](docs/browser.md).
 
 ### Files (`dspy_agent_tools.files`)
 
@@ -1072,21 +816,12 @@ is authoritative, and `mode="code"` returns the same data as dictionaries for
 ### Skills (`dspy_agent_tools.skills`)
 
 `Skills(*roots, ...)` scans each root's immediate subdirectories for
-`SKILL.md` (a root that is itself a skill is accepted) and returns the
-progressive-disclosure tools. `scripts=False` omits `run_skill_script`.
-
-| Tool | Use it for |
-| --- | --- |
-| **`list_skills`** | Every discovered skill with its description, declared `allowed-tools`, and bundled files. Corrupt or non-conforming skills are listed at the end. |
-| **`activate_skill`** | The full `SKILL.md` body, plus `scripts/`, `references/`, and `assets/` listings, and the rest of the frontmatter (`allowed-tools`, `license`, `compatibility`, `metadata`). |
-| **`read_skill_resource`** | One `references/` or `assets/` file, addressed relative to the skill folder. `../` and absolute paths are rejected; binary files are reported rather than decoded. |
-| **`run_skill_script`** | One `scripts/` file with an argv list. The interpreter is allowlisted, the environment is replaced, and the OS sandbox is applied when available. |
-
-`Skills(...)` also exposes `skills` (the parsed `Skill` objects), `errors`
-(skipped directories), `catalog()` (the XML block), `instructions(tools=())`
-(the full block `patch` injects for a given tool set), and `patch(agent)`.
-`dspy.RLM` gets the same tools with `mode="code"`, where each returns a
-dictionary instead of text.
+`SKILL.md` (a root that is itself a skill is accepted) and returns
+`list_skills`, `activate_skill`, `read_skill_resource`, and
+`run_skill_script` (unless `scripts=False`). `mode="code"` returns
+dictionaries for `dspy.RLM`; `patch(agent)` appends the catalog and tools to an
+existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`. See
+[docs/skills.md](docs/skills.md).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
