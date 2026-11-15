@@ -9,7 +9,7 @@ from dspy_agent_tools import CLI, Skills, bash_exec, patch, read_file
 
 agent = dspy.ReAct("question -> answer", tools=[bash_exec], max_iters=8)
 
-patch(agent, read_file, Skills("./skills"), CLI("gh"), guide="Never commit.")
+patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")], guide="Never commit.")
 ```
 
 It works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`, returns the same
@@ -90,10 +90,8 @@ that cannot spawn processes or open network connections, so an install or a
 ```python
 patch(
     agent,
-    read_file,  # a tool
-    [write_file, delete_file],  # a list of tools
-    bash_exec,  # a plain function
-    Skills("./skills"),  # a tool list that knows its own section
+    tools=[read_file, bash_exec, Skills("./skills")],  # add
+    drop="browser_open",  # revoke
     guide="Never edit vendor/.",  # your own policy, placed first
     describe=False,  # tools only, no family sections
 )
@@ -101,9 +99,17 @@ patch(
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `*sources` | — | Tools to add: `dspy.Tool` objects, plain functions, or lists of either. |
+| `tools` | `()` | Tools to add: `dspy.Tool` objects, plain functions, or lists of either — the same keyword `dspy.ReAct` and `Toolbox` take. Adding accumulates, so two call sites can both extend one agent. |
+| `drop` | `()` | Tools to remove, by name, tool, or function. Unknown names warn and are ignored, so a conditional drop stays idempotent; a name in both `tools` and `drop`, or an internal tool such as ReAct's `finish`, raises `ValueError`. |
 | `guide` | `None` | Your text, placed before the family sections. Use it for project rules no tool family knows. Omitted, the agent keeps its last guide; `guide=""` clears it. |
 | `describe` | `True` | Inject the family sections. `False` appends tools (and `guide`) only. |
+
+Removing a tool removes its section too, since the region is recomputed from
+the tools that remain:
+
+```python
+patch(agent, drop="bash_exec")  # the ## Shell section goes with it
+```
 
 ## The managed region
 
@@ -119,9 +125,9 @@ Never commit.
 ```
 
 - Editing `guide` replaces the old copy; it does not append a second one.
-- The last guide carries over to later calls. `patch(agent, read_file,
-  guide="Never commit.")` then `patch(agent, bash_exec)` keeps the rule and
-  adds the shell section.
+- The last guide carries over to later calls. `patch(agent, tools=read_file,
+  guide="Never commit.")` then `patch(agent, tools=bash_exec)` keeps the rule
+  and adds the shell section.
 - A family you already documented — `## Shell` in your own docstring — is
   skipped, so hand-written policy wins. Source sections such as the skill
   catalog are always injected.
@@ -130,7 +136,7 @@ Never commit.
 ## Rules
 
 - The same function patched twice is one tool: `patch` compares the tool
-  object, or the function behind it, so `patch(agent, read_file)` is
+  object, or the function behind it, so `patch(agent, tools=read_file)` is
   idempotent.
 - Patching a second family adds its section and leaves the first alone; the
   region holds one copy of each.
