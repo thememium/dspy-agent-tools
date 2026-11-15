@@ -2,6 +2,7 @@
 
 import difflib
 import re
+import textwrap
 
 from tree_sitter_language_pack import get_parser
 
@@ -115,6 +116,10 @@ def _edit_text(
     recovery: the most similar window of lines is replaced instead when
     its similarity reaches min_similarity.
     """
+    if not old_text:
+        raise ValueError("old_text must be non-empty")
+    if not 0 <= min_similarity <= 1:
+        raise ValueError("min_similarity must be between 0 and 1")
     edit_path, content = _checked(path, snapshot)
 
     occurrences = content.count(old_text)
@@ -149,12 +154,16 @@ def _edit_text(
 
     best_ratio = 0.0
     best_start = None
+    ambiguous = False
     for start in range(len(lines) - window_size + 1):
         matcher.set_seq1("\n".join(lines[start : start + window_size]))
         ratio = matcher.ratio()
         if ratio > best_ratio:
             best_ratio = ratio
             best_start = start
+            ambiguous = False
+        elif ratio == best_ratio:
+            ambiguous = True
 
     if best_start is None or best_ratio < min_similarity:
         closest = f"{best_ratio:.0%}" if best_start is not None else "none"
@@ -163,13 +172,19 @@ def _edit_text(
             f"{closest} similar (threshold {min_similarity:.0%})."
         )
 
+    if ambiguous:
+        raise ValueError(
+            f"{path}: multiple equally similar matches; pass more surrounding context."
+        )
+
     # Preserve the matched window's indentation on the replacement.
     first_line = lines[best_start]
     stripped = first_line.lstrip(" \t")
     indent = first_line[: len(first_line) - len(stripped)] if stripped else ""
 
     lines[best_start : best_start + window_size] = [
-        indent + line if line.strip() else line for line in new_text.splitlines()
+        indent + line if line.strip() else line
+        for line in textwrap.dedent(new_text).splitlines()
     ]
     new_content = "\n".join(lines)
     if content.endswith("\n"):
@@ -231,12 +246,20 @@ def _edit_block(
         new_text += "\n"
 
     data = content.encode()
+    start = node.start_byte
+    line_start = data.rfind(b"\n", 0, start) + 1
+    prefix = data[line_start:start]
+    if not prefix.strip():
+        # Tree-sitter starts at the definition token, after its indentation.
+        # Replace from the line start and apply that indentation exactly once.
+        start = line_start
+        new_text = textwrap.indent(textwrap.dedent(new_text), prefix.decode())
     end = node.end_byte
     if data[end : end + 1] == b"\n" and new_text.endswith("\n"):
         # The node span excludes its trailing newline; the replacement
         # brings its own, so consume the original to avoid a blank line.
         end += 1
-    new_data = data[: node.start_byte] + new_text.encode() + data[end:]
+    new_data = data[:start] + new_text.encode() + data[end:]
     new_content = new_data.decode()
     edit_path.write_text(new_content)
 

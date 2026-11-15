@@ -53,8 +53,14 @@ def write_file(path: str, content: str, snapshot: str | None = None) -> str:
     """
     write_path = Path(path)
 
-    if snapshot is not None and write_path.exists():
-        current = write_path.read_text()
+    if snapshot is not None:
+        try:
+            current = write_path.read_text()
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"{path} changed since it was read (file is missing). "
+                "Read the file again before writing."
+            ) from exc
 
         if _hash(current) != snapshot:
             raise RuntimeError(
