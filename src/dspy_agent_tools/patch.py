@@ -1,10 +1,10 @@
 """Add tools and tool guidance to an agent that was already built.
 
-``patch`` is the generic form of ``Skills(...).patch(agent)``. It takes any
-number of tool sources — tool lists such as ``MCP(...)``, ``CLI(...)``,
-``Browser()``, ``Skills(...)``, ``Toolbox(...)``, or bare ``dspy.Tool``
-objects and functions — appends them to an existing agent, and appends a
-short policy section per tool family to the agent's instructions.
+``patch`` takes any number of tool sources — tool lists such as ``MCP(...)``,
+``CLI(...)``, ``Browser()``, ``Skills(...)``, ``Toolbox(...)``, or bare
+``dspy.Tool`` objects and functions — appends them to an existing agent, and
+recomputes a short policy section per tool family in the agent's
+instructions.
 
 ```python
 import dspy
@@ -28,16 +28,27 @@ the agent's full tool list and its output replaces the template.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
+from .guide import present_keys as _present_keys
 from .guide import sections as _sections
 
 if TYPE_CHECKING:
     from dspy import Tool
 
+logger = logging.getLogger(__name__)
+
 #: Module bookkeeping that belongs to the instance, not to the rebuilt predictor.
 _MODULE_STATE = frozenset({"callbacks", "history", "_compiled"})
+
+#: Where the agent keeps the guide from its last ``patch`` call.
+_GUIDE_ATTR = "_dspy_agent_tools_guide"
+
+#: Delimit the managed region so a later call replaces it instead of appending.
+_BEGIN = "<!-- dspy-agent-tools:begin -->"
+_END = "<!-- dspy-agent-tools:end -->"
 
 _REPL_NOTE = (
     "Your Python code runs in a REPL that cannot spawn processes or open "
@@ -111,11 +122,31 @@ def _same(a: Any, b: Any) -> bool:
     return func is not None and func is getattr(b, "func", None)
 
 
+def _without_region(instructions: str) -> str:
+    """``instructions`` with the region this module manages removed."""
+    start = instructions.find(_BEGIN)
+    if start < 0:
+        return instructions
+    end = instructions.find(_END, start)
+    tail = instructions[end + len(_END) :] if end >= 0 else ""
+    return (instructions[:start] + tail).strip("\n")
+
+
+def _with_region(instructions: str, blocks: Sequence[str]) -> str:
+    """``instructions`` with one managed region holding ``blocks``."""
+    base = _without_region(instructions)
+    if not blocks:
+        return base
+    region = "\n\n".join([_BEGIN, *blocks, _END])
+    return f"{base}\n\n{region}" if base else region
+
+
 def _blocks(
     sources: Sequence[Any],
     tools: Sequence[Any],
     kind: str,
     guide: str | None,
+    skip: frozenset[str],
 ) -> list[str]:
     """Guidance sections for the sources and the tools the agent holds."""
     blocks: list[str] = [guide] if guide else []
@@ -128,8 +159,15 @@ def _blocks(
             covered.add(family)
     if kind == "RLM":
         blocks.append(_REPL_NOTE)
-    blocks.extend(_sections(tools, frozenset(covered)))
+    blocks.extend(_sections(tools, skip | frozenset(covered)))
     return blocks
+
+
+def _demos(agent: Any) -> int:
+    """Few-shot demos on the predictors the rebuild is about to replace."""
+    return sum(
+        len(getattr(value, "demos", None) or []) for value in vars(agent).values()
+    )
 
 
 def _copy_module_state(agent: Any, rebuilt: Any) -> None:
@@ -181,7 +219,9 @@ def patch(
             ``Skills(...)``, or ``Toolbox(...)``.
         guide: Your own text for the block, placed before the family sections.
             Use it for policy the tool families cannot know, such as a
-            project's conventions or a forbidden action.
+            project's conventions or a forbidden action. The agent keeps the
+            last guide it was given, so a later call that omits ``guide``
+            keeps it; pass ``guide=""`` to clear it.
         describe: Add the family sections. ``False`` appends only the tools and
             ``guide``.
 
@@ -195,8 +235,16 @@ def patch(
             incoming names; pass ``name_prefix=...`` to the factory that built
             it.
 
-    Calling ``patch`` again with the same tools and guidance changes nothing;
-    the agent's instructions keep one copy of each section.
+    The injected block lives in one delimited region of the instructions and
+    is recomputed on every call from the tools the agent holds, the sources
+    passed now, and the guide, so patching repeatedly converges instead of
+    growing: edited guidance replaces the old copy, and a family whose heading
+    you already wrote yourself (``## Shell``) is left to you. Calling ``patch``
+    again with the same arguments changes nothing.
+
+    Rebuilding replaces the agent's inner predictor, so few-shot demos an
+    optimizer left on it are dropped and a warning says how many; patch before
+    compiling, or recompile afterwards.
 
     Examples:
         >>> import dspy
@@ -225,17 +273,27 @@ def patch(
     additions = [tool for tool in incoming if tool.name not in existing]
     tools = [*existing.values(), *additions]
 
-    note = guide.strip() if guide else None
-    blocks = _blocks(sources, tools, kind, note) if describe else []
-    if not describe and note:
-        blocks = [note]
-    instructions = agent.signature.instructions
-    fresh = [block for block in blocks if block not in instructions]
-    if not additions and not fresh:
+    if guide is None:
+        note = getattr(agent, _GUIDE_ATTR, None)
+    else:
+        note = guide.strip() or None
+    base = _without_region(agent.signature.instructions)
+    if describe:
+        blocks = _blocks(sources, tools, kind, note, _present_keys(base))
+    else:
+        blocks = [note] if note else []
+    instructions = _with_region(base, blocks)
+    setattr(agent, _GUIDE_ATTR, note)
+    if not additions and instructions == agent.signature.instructions:
         return agent
-    if fresh:
-        instructions = (
-            "\n\n".join([instructions, *fresh]) if instructions else "\n\n".join(fresh)
+
+    dropped = _demos(agent)
+    if dropped:
+        logger.warning(
+            "patch() rebuilds %s and drops %d few-shot demo(s) on its inner "
+            "predictor; patch before compiling, or recompile afterwards.",
+            kind,
+            dropped,
         )
 
     rebuilt = _rebuild(
