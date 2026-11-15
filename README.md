@@ -47,7 +47,7 @@ Core tools, optional bridges, and progressive discovery:
 - **Search** — web and news search with engine failover and explicit status
 - **CLI** — shell-free typed facade over any executable; discovery or explicit `Command` tools. See [docs/cli.md](docs/cli.md).
 - **MCP** (optional) — local stdio or remote HTTP/SSE servers as `dspy.Tool`s. See [docs/mcp.md](docs/mcp.md).
-- **Skills** — Agent Skills folders as progressive-disclosure tools, with `patch(agent)`. See [docs/skills.md](docs/skills.md).
+- **Skills** — Agent Skills folders as progressive-disclosure tools. See [docs/skills.md](docs/skills.md).
 - **Patch** — add tools to a built agent and inject one guidance section per tool family. See [docs/patch.md](docs/patch.md).
 - **Browser** (optional) — headless Chrome as one `dspy.Tool` list, with optional recording and search. See [docs/browser.md](docs/browser.md).
 - **Toolbox** — mix MCP servers, tools, and functions; optional progressive discovery.
@@ -321,7 +321,7 @@ agent = dspy.ReAct("question -> answer", tools=skills + [bash_exec])
 worker = dspy.RLM("task -> report", tools=Skills("./skills", mode="code"))
 ```
 
-`patch(agent, Skills("./skills"))` appends the `<available_skills>` catalog
+`patch(agent, tools=Skills("./skills"))` appends the `<available_skills>` catalog
 and the skill tools to an agent that was already built. It rebuilds the inner
 predictor, so it works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`, is
 idempotent, and returns the agent:
@@ -330,7 +330,7 @@ idempotent, and returns the agent:
 from dspy_agent_tools import Skills, bash_exec, patch, read_file
 
 agent = dspy.ReAct("question -> answer", tools=[bash_exec, read_file])
-patch(agent, Skills("./skills"))
+patch(agent, tools=Skills("./skills"))
 ```
 
 The injected block names the host-command and URL-reading tools the agent
@@ -341,9 +341,9 @@ constructor option.
 
 ### Adding tools to an existing agent
 
-`patch(agent, *tools, guide=None)` extends an agent that was already built: it
-appends the tools to the agent and one short policy section per tool family
-already present to its instructions. Any source works — `Skills(...)`,
+`patch(agent, tools=..., guide=None, drop=...)` extends an agent that was
+already built: it appends the tools and one short policy section per tool
+family present to its instructions. Any source works — `Skills(...)`,
 `MCP(...)`, `CLI(...)`, `Browser()`, `Toolbox(...)`, `dspy.Tool` objects, or
 plain functions:
 
@@ -351,7 +351,7 @@ plain functions:
 from dspy_agent_tools import CLI, Skills, bash_exec, patch, read_file
 
 agent = dspy.ReAct("question -> answer", tools=[bash_exec])
-patch(agent, read_file, Skills("./skills"), CLI("gh"), guide="Never commit.")
+patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")], guide="Never commit.")
 ```
 
 The agent is rebuilt in place and returned, so it keeps working and chains.
@@ -596,14 +596,14 @@ See [docs/mcp.md](docs/mcp.md).
 | **`run_skill_script`** | One file from `scripts/` with an argv list, run in the sandbox; omitted when `scripts=False`. |
 | **`SkillTools`** | `list` subclass with `.skills`, `.errors`, `.catalog()`, and `.section(tools=())`. |
 
-`patch(agent, skills)` appends the catalog and tools to an existing
+`patch(agent, tools=skills)` appends the catalog and tools to an existing
 `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`. See [docs/skills.md](docs/skills.md).
 
 ### Patch (`dspy_agent_tools.patch`)
 
 | Tool | Use it for |
 | --- | --- |
-| **`patch`** | Append tools to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM` and inject one guidance section per tool family the agent holds. `guide=` adds your own policy before those sections; `describe=False` appends tools without them. |
+| **`patch`** | Add `tools=` to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`, remove `drop=`, and inject one guidance section per tool family the agent holds. `guide=` adds your own policy before those sections; `describe=False` appends tools without them. |
 
 Tools are accepted as `dspy.Tool` objects, plain functions, or lists of them.
 The sections live in `dspy_agent_tools.guide`, one per family. See
