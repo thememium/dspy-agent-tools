@@ -251,9 +251,8 @@ dspy-agent-tools/                        # Repository root
 ├── src/
 │   └── dspy_agent_tools/
 │       ├── __init__.py                  # Public API - re-exports all tools
-│       ├── guide.py                     # Per-family policy sections injected into agent instructions
-│       ├── patch.py                     # Add tools and guidance to an already-built agent
-│       ├── search.py                    # Web and news search with bounded engine failover
+│       ├── patch/                       # Patch built agents; guide.py holds the family sections
+│       ├── search/                      # Web and news search with bounded engine failover
 │       ├── bash/                        # Shell execution, content/path search, listing, URL fetching
 │       ├── browser/                     # Headless Chrome tools backed by pydoll (extra)
 │       ├── cli/                         # Lazy discovery of any executable's commands via its help output
@@ -274,11 +273,11 @@ dspy-agent-tools/                        # Repository root
 │   ├── cli/                             # Mirrors src/dspy_agent_tools/cli/ (helpers.py)
 │   ├── files/                           # Mirrors src/dspy_agent_tools/files/
 │   ├── mcp/                             # Mirrors src/dspy_agent_tools/mcp/ (helpers.py, conftest.py, remote tests)
+│   ├── patch/                           # Mirrors src/dspy_agent_tools/patch/ (helpers.py)
+│   ├── search/                          # Mirrors src/dspy_agent_tools/search/ (fakes.py, conftest.py)
 │   ├── skills/                          # Mirrors src/dspy_agent_tools/skills/ (helpers.py)
 │   ├── toolbox/                         # Mirrors src/dspy_agent_tools/toolbox/ (helpers.py)
 │   ├── utils/                           # Mirrors src/dspy_agent_tools/utils/
-│   ├── test_patch.py                    # Tests for src/dspy_agent_tools/patch.py and guide.py
-│   ├── test_search.py                   # Tests for src/dspy_agent_tools/search.py
 │   └── test_smoke.py                    # Smoke tests run by .github/workflows/publish.yml against dist/ artifacts
 ├── .gitignore                           # Ignore rules for builds, caches, and virtualenvs
 ├── .python-version                      # Python version pinned for uv

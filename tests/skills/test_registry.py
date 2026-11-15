@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from dspy_agent_tools import Patch, Skills
-from dspy_agent_tools.patch import _agent_tools
+from dspy_agent_tools.patch.patch import _agent_tools
 from dspy_agent_tools.skills.registry import _argv, _Registry
 
 from .helpers import SKILLS, by_name

@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from ..guide import names_in
+from ..patch.guide import names_in
 from ..utils.dspy import load_tool
 from .registry import _Registry
 from .sandbox import (
@@ -207,7 +207,7 @@ class SkillTools(list):
     :meth:`section` renders the guidance that replaces the family template.
     """
 
-    #: Tool family used by :func:`dspy_agent_tools.Patch` (see guide.py).
+    #: Tool family used by :func:`dspy_agent_tools.Patch` (see patch/guide.py).
     family = "skills"
 
     def __init__(

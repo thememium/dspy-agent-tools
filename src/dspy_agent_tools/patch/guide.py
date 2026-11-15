@@ -145,8 +145,6 @@ _FAMILIES: tuple[Family, ...] = (
     ),
 )
 
-_BY_KEY = {family.key: family for family in _FAMILIES}
-
 
 def _name(tool: Any) -> str:
     func = getattr(tool, "func", None)

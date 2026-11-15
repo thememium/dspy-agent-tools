@@ -74,7 +74,7 @@ instead of overwriting a newer change. Never claim a file change you did not
 make.
 ```
 
-Families come from `dspy_agent_tools.guide`, and a tool joins a family by its
+Families come from `dspy_agent_tools.patch.guide`, and a tool joins a family by its
 module (`dspy_agent_tools.bash`, `.files`, `.search`, `.browser`, `.cli`,
 `.mcp`, `.skills`, `.toolbox`) or by a name a foreign tool is likely to use,
 such as `shell`, `run_command`, or `web_search`. The headings list the tools
@@ -151,7 +151,7 @@ Never commit.
 
 ## Adding a family
 
-Add a `Family` to `dspy_agent_tools/guide.py` with its heading, modules, and
+Add a `Family` to `src/dspy_agent_tools/patch/guide.py` with its heading, modules, and
 names, plus the policy text. A source can replace its family template by
 exposing `family` and `section(tools)`, which receives the agent's full tool
 list — that is how `Skills` injects the `<available_skills>` catalog and names

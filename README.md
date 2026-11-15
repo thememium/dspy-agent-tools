@@ -606,7 +606,7 @@ See [docs/mcp.md](docs/mcp.md).
 | **`Patch`** | Add `tools=` to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`, remove `drop=`, and inject one guidance section per tool family the agent holds. `guide=` adds your own policy before those sections; `describe=False` appends tools without them. |
 
 Tools are accepted as `dspy.Tool` objects, plain functions, or lists of them.
-The sections live in `dspy_agent_tools.guide`, one per family. See
+The sections live in `dspy_agent_tools.patch.guide`, one per family. See
 [docs/patch.md](docs/patch.md).
 
 ### Browser (`dspy_agent_tools.browser`)

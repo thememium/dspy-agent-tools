@@ -1,30 +1,4 @@
-"""Add tools and tool guidance to an agent that was already built.
-
-``Patch`` adds tool sources to a built agent — tool lists such as ``MCP(...)``,
-``CLI(...)``, ``Browser()``, ``Skills(...)``, ``Toolbox(...)``, or bare
-``dspy.Tool`` objects and functions — appends them to an existing agent, and
-recomputes a short policy section per tool family in the agent's
-instructions.
-
-```python
-import dspy
-from dspy_agent_tools import CLI, Skills, bash_exec, Patch, read_file
-
-agent = dspy.ReAct("question -> answer", tools=[bash_exec])
-Patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")])
-```
-
-The guidance goes into the signature's instructions, which DSPy sends as the
-system message — never into new input fields, which would change what every
-caller has to pass (``dspy.RLM`` refuses a call whose inputs were not
-supplied, and ``dspy.ReAct`` copies them into the predictor it builds).
-
-Sections come from the tool families present on the agent, so the block names
-what the agent can actually do. A source that knows more than its family
-template — ``Skills``, which carries the ``<available_skills>`` catalog — can
-define ``family`` and a ``section(tools)`` method; that method is called with
-the agent's full tool list and its output replaces the template.
-"""
+"""Apply tools and guide sections to a built DSPy agent."""
 
 from __future__ import annotations
 
@@ -34,21 +8,18 @@ from typing import TYPE_CHECKING, Any
 
 from .guide import present_keys as _present_keys
 from .guide import sections as _sections
+from .region import _with_region, _without_region
 
 if TYPE_CHECKING:
     from dspy import Tool
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("dspy_agent_tools.patch")
 
 #: Module bookkeeping that belongs to the instance, not to the rebuilt predictor.
 _MODULE_STATE = frozenset({"callbacks", "history", "_compiled"})
 
 #: Where the agent keeps the guide from its last ``Patch`` call.
 _GUIDE_ATTR = "_dspy_agent_tools_guide"
-
-#: Delimit the managed region so a later call replaces it instead of appending.
-_BEGIN = "<!-- dspy-agent-tools:begin -->"
-_END = "<!-- dspy-agent-tools:end -->"
 
 _REPL_NOTE = (
     "Your Python code runs in a REPL that cannot spawn processes or open "
@@ -120,25 +91,6 @@ def _same(a: Any, b: Any) -> bool:
         return True
     func = getattr(a, "func", None)
     return func is not None and func is getattr(b, "func", None)
-
-
-def _without_region(instructions: str) -> str:
-    """``instructions`` with the region this module manages removed."""
-    start = instructions.find(_BEGIN)
-    if start < 0:
-        return instructions
-    end = instructions.find(_END, start)
-    tail = instructions[end + len(_END) :] if end >= 0 else ""
-    return (instructions[:start] + tail).strip("\n")
-
-
-def _with_region(instructions: str, blocks: Sequence[str]) -> str:
-    """``instructions`` with one managed region holding ``blocks``."""
-    base = _without_region(instructions)
-    if not blocks:
-        return base
-    region = "\n\n".join([_BEGIN, *blocks, _END])
-    return f"{base}\n\n{region}" if base else region
 
 
 def _blocks(
@@ -239,7 +191,7 @@ def Patch(
 
     The agent is rebuilt in place from its own signature and settings, so the
     same instance keeps working: its instructions gain one section per tool
-    family it holds (see :mod:`dspy_agent_tools.guide`), and its tool list
+    family it holds (see :mod:`dspy_agent_tools.patch.guide`), and its tool list
     gains ``tools`` and loses ``drop``. Works for ``dspy.ReAct``,
     ``dspy.ReActV2``, and ``dspy.RLM``.
 
