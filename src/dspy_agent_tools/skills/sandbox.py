@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .bash import _render
+from ..utils.process import render
 
 logger = logging.getLogger(__name__)
 
@@ -407,7 +407,7 @@ class ScriptSandbox:
         elif exit_code not in (0, None):
             notices.append(f"[exit code {exit_code}]")
         return ScriptResult(
-            output=_render(rendered, notices, elapsed),
+            output=render(rendered, notices, elapsed),
             exit_code=exit_code,
             elapsed=elapsed,
             timed_out=timed_out,

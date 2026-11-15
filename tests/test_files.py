@@ -1,22 +1,24 @@
 """Tests for dspy_agent_tools.files."""
 
 import pytest
+from tree_sitter_language_pack import get_parser
 
-from dspy_agent_tools import files as files_mod
 from dspy_agent_tools.files import (
-    _edit_block,
-    _edit_lines,
-    _edit_text,
-    _find_block_node,
-    _hash,
-    _node_body,
-    _node_name,
-    _unnumber,
     delete_file,
     edit_file,
     read_file,
     write_file,
 )
+from dspy_agent_tools.files.edit import (
+    _edit_block,
+    _edit_lines,
+    _edit_text,
+    _find_block_node,
+    _node_body,
+    _node_name,
+    _unnumber,
+)
+from dspy_agent_tools.files.io import _hash
 
 SAMPLE = """\
 def alpha():
@@ -456,18 +458,18 @@ class TestBlockEdgeCases:
 
 class TestNodeHelpers:
     def test_node_name_none_without_name_field(self):
-        tree = files_mod.get_parser("python").parse(b"pass")
+        tree = get_parser("python").parse(b"pass")
         assert _node_name(tree.root_node) is None
 
     def test_node_name_of_function(self):
         src = b"def alpha():\n    pass\n"
-        tree = files_mod.get_parser("python").parse(src)
+        tree = get_parser("python").parse(src)
         fn = _find_block_node(tree.root_node, ["alpha"])
         assert _node_name(fn) == "alpha"
 
     def test_node_body_prefers_body_field(self):
         src = b"def alpha():\n    pass\n"
-        tree = files_mod.get_parser("python").parse(src)
+        tree = get_parser("python").parse(src)
         fn = _find_block_node(tree.root_node, ["alpha"])
         body = _node_body(fn)
         assert body is not None
@@ -477,13 +479,13 @@ class TestNodeHelpers:
         # A decorated definition has no 'body' field; the fallback picks
         # its largest named child (the function definition).
         src = b"@decorator\ndef alpha():\n    pass\n"
-        tree = files_mod.get_parser("python").parse(src)
+        tree = get_parser("python").parse(src)
         decorated = tree.root_node.named_children[0]
         body = _node_body(decorated)
         assert body.type == "function_definition"
 
     def test_node_body_none_without_children(self):
-        tree = files_mod.get_parser("python").parse(b"x = 1\n")
+        tree = get_parser("python").parse(b"x = 1\n")
         # The module node itself always has children; use an assignment's
         # identifier child which has no named children.
         assign = tree.root_node.named_children[0]
@@ -491,12 +493,12 @@ class TestNodeHelpers:
         assert _node_body(ident) is None
 
     def test_find_block_node_misses_unknown_name(self):
-        tree = files_mod.get_parser("python").parse(b"def alpha():\n    pass\n")
+        tree = get_parser("python").parse(b"def alpha():\n    pass\n")
         assert _find_block_node(tree.root_node, ["missing"]) is None
 
     def test_find_block_node_recurses_into_children(self):
         src = b"class Outer:\n    def method(self):\n        pass\n"
-        tree = files_mod.get_parser("python").parse(src)
+        tree = get_parser("python").parse(src)
         node = _find_block_node(tree.root_node, ["Outer", "method"])
         assert node is not None
         assert _node_name(node) == "method"
@@ -505,7 +507,7 @@ class TestNodeHelpers:
         # A decorated function: the target lives under a node with no
         # matching name, exercising the else-branch recursion.
         src = b"@deco\ndef alpha():\n    pass\n"
-        tree = files_mod.get_parser("python").parse(src)
+        tree = get_parser("python").parse(src)
         node = _find_block_node(tree.root_node, ["alpha"])
         assert node is not None
         assert _node_name(node) == "alpha"

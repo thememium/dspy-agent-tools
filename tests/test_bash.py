@@ -10,22 +10,6 @@ from pathlib import Path
 import pytest
 
 from dspy_agent_tools.bash import (
-    _fd_argv,
-    _fd_kwargs,
-    _find_argv,
-    _found_paths,
-    _glob_matches,
-    _grep_argv,
-    _has_hidden_component,
-    _is_junk,
-    _resolve_cwd,
-    _resolve_existing,
-    _rg_argv,
-    _rg_kwargs,
-    _run_search,
-    _search_text,
-    _sum_counts,
-    _timeout_seconds,
     bash_curl,
     bash_exec,
     bash_fetch,
@@ -36,6 +20,32 @@ from dspy_agent_tools.bash import (
     bash_ls,
     bash_ripgrep,
     bash_ripgrep_batch,
+)
+from dspy_agent_tools.bash.engine import (
+    _fd_argv,
+    _fd_kwargs,
+    _find_argv,
+    _grep_argv,
+    _rg_argv,
+    _rg_kwargs,
+    _timeout_seconds,
+)
+from dspy_agent_tools.bash.fetch import _is_junk
+from dspy_agent_tools.bash.output import (
+    _found_paths,
+    _glob_matches,
+    _has_hidden_component,
+    _sum_counts,
+)
+from dspy_agent_tools.bash.search import (
+    _run_search,
+    _search_text,
+)
+from dspy_agent_tools.utils.process import (
+    resolve_cwd as _resolve_cwd,
+)
+from dspy_agent_tools.utils.process import (
+    resolve_existing as _resolve_existing,
 )
 
 # --- helpers -------------------------------------------------------------

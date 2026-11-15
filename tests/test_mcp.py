@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import weakref
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -20,18 +21,24 @@ from dspy.utils.dummies import DummyLM
 from mcp.types import Tool as MCPTool
 
 from dspy_agent_tools import MCP, MCPTools
-from dspy_agent_tools.mcp import (
+from dspy_agent_tools.mcp.adapter import (
     _accepted_kwargs,
+    _error_payload,
+    _read_only,
+)
+from dspy_agent_tools.mcp.connection import (
     _close_all,
     _Connection,
-    _error_payload,
-    _http_transport,
-    _read_only,
     _read_write,
+    _serve,
+    _ServeState,
     _SessionProxy,
 )
+from dspy_agent_tools.mcp.retry import _HTTPFailures
+from dspy_agent_tools.mcp.tools import _http_transport, _sse_transport
 
-mcp_module = importlib.import_module("dspy_agent_tools.mcp")
+adapter_module = importlib.import_module("dspy_agent_tools.mcp.adapter")
+tools_module = importlib.import_module("dspy_agent_tools.mcp.tools")
 
 SERVER = Path(__file__).parent / "fixtures" / "mcp_server.py"
 RETRY_SERVER = Path(__file__).parent / "fixtures" / "retry_server.py"
@@ -449,7 +456,7 @@ class TestInternals:
             def close(self):
                 closed.append(True)
 
-        monkeypatch.setattr(mcp_module, "_Connection", NoSessionConnection)
+        monkeypatch.setattr(tools_module, "_Connection", NoSessionConnection)
 
         with pytest.raises(RuntimeError, match="failed to initialize"):
             MCP(command="irrelevant")
@@ -480,9 +487,9 @@ class TestInternals:
         )
         session = Session()
         base = dspy.Tool.from_mcp_tool(session, advertised)
-        tool = mcp_module._as_sync_capable(
+        tool = adapter_module._as_sync_capable(
             base,
-            mcp_module._mcp_signature(
+            adapter_module._mcp_signature(
                 advertised, base.args or {}, base.arg_types or {}
             ),
         )
@@ -499,7 +506,7 @@ class TestInternals:
         assert session.arguments == {"query": "rlm"}
 
     def test_mcp_signature_tolerates_alternate_schemas(self):
-        signature = mcp_module._mcp_signature(
+        signature = adapter_module._mcp_signature(
             SimpleNamespace(inputSchema={}),
             {"query": {"type": "string"}},
             {"query": str},
@@ -507,13 +514,13 @@ class TestInternals:
         assert list(signature.parameters) == ["query"]
 
         assert (
-            mcp_module._mcp_signature(
+            adapter_module._mcp_signature(
                 SimpleNamespace(input_schema="not a schema"), {}, {}
             )
             == inspect.Signature()
         )
 
-        flagged = mcp_module._mcp_signature(
+        flagged = adapter_module._mcp_signature(
             SimpleNamespace(input_schema={"properties": {"flag": True}}),
             {"flag": {"type": "boolean"}},
             {"flag": bool},
@@ -536,9 +543,9 @@ class TestTransportSelection:
                 calls.append(_kind)
                 return lambda: None
 
-            monkeypatch.setattr(mcp_module, name, factory)
+            monkeypatch.setattr(tools_module, name, factory)
         monkeypatch.setattr(
-            mcp_module, "_build_tools", lambda factory, **kwargs: factory
+            tools_module, "_build_tools", lambda factory, **kwargs: factory
         )
         return calls
 
@@ -594,6 +601,16 @@ class TestTransportSelection:
         with pytest.raises(ValueError, match="not both"):
             MCP(transport=lambda: None, command="npx")
 
+    def test_custom_transport_is_used_directly(self, monkeypatch):
+        def custom():
+            return None
+
+        monkeypatch.setattr(
+            tools_module, "_build_tools", lambda factory, **kwargs: factory
+        )
+
+        assert MCP(transport=custom) is custom
+
 
 class TestHttpTransport:
     def _fake_import(self, monkeypatch, module):
@@ -605,7 +622,7 @@ class TestHttpTransport:
             return real_import(name, package)
 
         monkeypatch.setattr(
-            mcp_module, "importlib", SimpleNamespace(import_module=fake_import)
+            tools_module, "importlib", SimpleNamespace(import_module=fake_import)
         )
 
     def test_missing_client_raises(self, monkeypatch):
@@ -626,3 +643,151 @@ class TestHttpTransport:
 
         with pytest.raises(ImportError, match="Streamable HTTP client"):
             asyncio.run(run())
+
+    def test_builds_sdk_http_client_and_yields_streams(self, monkeypatch):
+        self._fake_import(monkeypatch, _fake_streamable_sdk())
+        failures = _HTTPFailures()
+        transport = _http_transport(
+            "http://example/mcp",
+            headers=None,
+            timeout=1.0,
+            sse_read_timeout=2.0,
+            auth=None,
+            http_client_factory=None,
+            terminate_on_close=True,
+            failures=failures,
+        )
+
+        async def run():
+            async with transport() as streams:
+                return streams
+
+        assert asyncio.run(run()) == ("read", "write")
+
+    def test_uses_supplied_httpclient_factory(self, monkeypatch):
+        self._fake_import(monkeypatch, _fake_streamable_sdk())
+        transport = _http_transport(
+            "http://example/mcp",
+            headers=None,
+            timeout=1.0,
+            sse_read_timeout=2.0,
+            auth=None,
+            http_client_factory=_FakeHttpClient,
+            terminate_on_close=True,
+        )
+
+        async def run():
+            async with transport() as streams:
+                return streams
+
+        assert asyncio.run(run()) == ("read", "write")
+
+    def test_sse_transport_wraps_client_factory(self, monkeypatch):
+        import mcp.client.sse as sse_module
+
+        seen = {}
+        built = []
+
+        @asynccontextmanager
+        async def sse_client(**kwargs):
+            seen.update(kwargs)
+            yield ("read", "write")
+
+        monkeypatch.setattr(sse_module, "sse_client", sse_client)
+
+        def factory():
+            built.append(True)
+            return object()
+
+        transport = _sse_transport(
+            "http://example/sse",
+            headers={"X-Test": "1"},
+            timeout=5.0,
+            sse_read_timeout=2.0,
+            auth=None,
+            httpx_client_factory=factory,
+        )
+
+        async def run():
+            async with transport() as streams:
+                return streams
+
+        assert asyncio.run(run()) == ("read", "write")
+        assert seen["url"] == "http://example/sse"
+        assert callable(seen["httpx_client_factory"])
+        assert seen["httpx_client_factory"](url="ignored") is not None
+        assert built == [True]
+
+
+class _FakeHttpClient:
+    def __init__(self):
+        self.event_hooks = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+def _fake_streamable_sdk():
+    @asynccontextmanager
+    async def streamable_http_client(url, *, http_client=None, terminate_on_close=True):
+        yield ("read", "write")
+
+    def create_mcp_http_client(**kwargs):
+        return _FakeHttpClient()
+
+    return SimpleNamespace(
+        streamable_http_client=streamable_http_client,
+        create_mcp_http_client=create_mcp_http_client,
+    )
+
+
+class TestHttpFailures:
+    def _response(self, status, url="http://example/mcp"):
+        return SimpleNamespace(status_code=status, request=SimpleNamespace(url=url))
+
+    def test_describes_auth_failures(self):
+        failures = _HTTPFailures()
+        asyncio.run(failures.record(self._response(401)))
+        assert failures.describe() == (
+            "MCP server answered HTTP 401 from http://example/mcp; pass "
+            "headers={'Authorization': 'Bearer <token>'} or an auth= handler to MCP()"
+        )
+
+    def test_describes_not_found(self):
+        failures = _HTTPFailures()
+        asyncio.run(failures.record(self._response(404)))
+        assert failures.describe() == (
+            "MCP server answered HTTP 404 from http://example/mcp; "
+            "the MCP endpoint was not found, check the URL"
+        )
+
+    def test_describes_other_statuses_without_hint(self):
+        failures = _HTTPFailures()
+        assert failures.describe() is None
+        asyncio.run(failures.record(self._response(200)))
+        assert failures.describe() is None
+        asyncio.run(failures.record(self._response(500, url="")))
+        assert failures.describe() == "MCP server answered HTTP 500"
+
+
+class TestServeFailure:
+    def test_adds_http_failure_note_and_fails_ready(self):
+        failures = _HTTPFailures()
+        failures.status = 401
+        failures.url = "http://example/mcp"
+        ready = concurrent.futures.Future()
+
+        def transport():
+            raise RuntimeError("boom")
+
+        state = _ServeState(transport, cast(Any, object), ready, failures)
+
+        with pytest.raises(RuntimeError, match="boom") as info:
+            asyncio.run(_serve(state))
+
+        assert any("HTTP 401" in note for note in info.value.__notes__)
+        assert isinstance(ready.exception(), RuntimeError)
+        assert state.session is None

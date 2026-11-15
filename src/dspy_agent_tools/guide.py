@@ -160,7 +160,11 @@ def family_of(tool: Any) -> Family | None:
     module = getattr(func, "__module__", "") or ""
     name = _name(tool)
     for family in _FAMILIES:
-        if module in family.modules:
+        # A family is a package now: `dspy_agent_tools.bash.exec` belongs to
+        # `dspy_agent_tools.bash`.
+        if any(
+            module == root or module.startswith(f"{root}.") for root in family.modules
+        ):
             return family
         if name and (name in family.names or name.endswith(family.suffixes)):
             return family

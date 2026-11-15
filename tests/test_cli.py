@@ -10,23 +10,22 @@ import dspy
 import pytest
 from plumbum import CommandNotFound
 
-import dspy_agent_tools.cli as cli_module
+import dspy_agent_tools.cli.discovery as discovery_module
+import dspy_agent_tools.cli.runner as runner_module
 from dspy_agent_tools import CLI, Argument, CLITools, Command, Option, Toolbox
-from dspy_agent_tools.cli import (
-    Arg,
-    _argv_hint,
-    _default_prefix,
+from dspy_agent_tools.cli.argv import _normalize_args
+from dspy_agent_tools.cli.help import (
     _description,
     _Flag,
-    _flag_was_rejected,
-    _json_document,
-    _normalize_args,
     _parse_commands,
     _parse_flag_head,
     _parse_flags,
     _parse_help,
     _usage,
 )
+from dspy_agent_tools.cli.runner import _argv_hint, _flag_was_rejected, _json_document
+from dspy_agent_tools.cli.tools import _default_prefix
+from dspy_agent_tools.cli.types import Arg
 
 SCRIPT = r'''
 import os
@@ -307,7 +306,7 @@ class TestRun:
     def test_usage_error_includes_command_help(self, monkeypatch, tmp_path):
         tools = by_name(make(tmp_path))
         monkeypatch.setattr(
-            cli_module,
+            discovery_module,
             "_run_argv",
             lambda *args, **kwargs: "usage: nope\n[exit code 2]\n(0.1s)",
         )
@@ -555,7 +554,7 @@ class TestParsingEdges:
 class TestDiscoveryEdges:
     @staticmethod
     def discovery(json_flag=None, help_tokens=("--help",)):
-        return cli_module._Discovery(
+        return discovery_module._Discovery(
             sys.executable,
             base_args=[],
             cwd=None,
@@ -572,7 +571,7 @@ class TestDiscoveryEdges:
         def boom(*args, **kwargs):
             raise RuntimeError("no help")
 
-        monkeypatch.setattr(cli_module, "_execute", boom)
+        monkeypatch.setattr(runner_module, "execute", boom)
         text, code, json_help = self.discovery()._help_text(())
         assert text == "no help"
         assert code == 1
@@ -582,7 +581,7 @@ class TestDiscoveryEdges:
         def boom(*args, **kwargs):
             raise RuntimeError("no help")
 
-        monkeypatch.setattr(cli_module, "_execute", boom)
+        monkeypatch.setattr(runner_module, "execute", boom)
         text, code, json_help = self.discovery(json_flag="--json")._help_text(())
         assert text == "no help"
         assert code == 1
@@ -598,9 +597,9 @@ class TestDiscoveryEdges:
             self.discovery().expand(("nope",))
 
     def test_score_covers_name_affixes(self):
-        node = cli_module._Node("status", ("status",))
-        assert cli_module._Discovery._score(node, ["sta"], "sta") > 0
-        assert cli_module._Discovery._score(node, ["atu"], "atu") > 0
+        node = discovery_module._Node("status", ("status",))
+        assert discovery_module._Discovery._score(node, ["sta"], "sta") > 0
+        assert discovery_module._Discovery._score(node, ["atu"], "atu") > 0
 
     def test_search_honors_expansion_budget(self, tmp_path):
         tools = by_name(make(tmp_path, max_expands=1, include_search=True))
@@ -613,7 +612,7 @@ class TestDiscoveryEdges:
         def boom(*args, **kwargs):
             raise CommandNotFound("fake", [])
 
-        monkeypatch.setattr(cli_module, "_execute", boom)
+        monkeypatch.setattr(runner_module, "execute", boom)
         result = tools["fake_run_command"](command="", args=[])
         assert result.startswith("[command not found:")
 

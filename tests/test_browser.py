@@ -1,9 +1,13 @@
 """Tests for dspy_agent_tools.browser with a fake pydoll browser."""
 
+import atexit
 import base64
 import builtins
 import importlib
 import json
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -24,9 +28,25 @@ from pydoll.sync import Key, PageEvent
 
 from dspy_agent_tools.browser import (
     BrowserSession,
-    _render_nodes,
-    _xpath_literal,
+    _pydoll,
+    actions,
+    coerce,
+    config,
+    cookies,
+    dom,
+    errors,
+    screenshot,
+    tabs,
+    watch,
 )
+from dspy_agent_tools.browser import (
+    session as browser_session,
+)
+from dspy_agent_tools.browser import (
+    tools as tools_module,
+)
+from dspy_agent_tools.browser.dom import _xpath_literal
+from dspy_agent_tools.browser.snapshot import _render_nodes
 
 browser_module = importlib.import_module("dspy_agent_tools.browser")
 
@@ -356,10 +376,10 @@ class FakeChrome:
 
 @pytest.fixture
 def fake_chrome(monkeypatch):
-    browser_module._require_pydoll()
+    _pydoll.require()
     FakeChrome.instances = []
     FakeChrome.start_error = None
-    monkeypatch.setattr(browser_module, "Chrome", FakeChrome)
+    monkeypatch.setattr(_pydoll, "Chrome", FakeChrome)
     return FakeChrome
 
 
@@ -373,7 +393,7 @@ def session(fake_chrome):
 @pytest.fixture
 def default_session(monkeypatch, fake_chrome):
     session = BrowserSession()
-    monkeypatch.setattr(browser_module, "_default_session", session)
+    monkeypatch.setattr(tools_module, "_default_session", session)
     yield session
     BrowserSession.close(session)
 
@@ -394,12 +414,10 @@ def fake_ffmpeg(monkeypatch):
         assert isinstance(returncode, int)
         assert isinstance(stdout, str)
         assert isinstance(stderr, str)
-        return browser_module.subprocess.CompletedProcess(
-            command, returncode, stdout, stderr
-        )
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
 
-    monkeypatch.setattr(browser_module, "_ffmpeg_binary", lambda: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(browser_module.subprocess, "run", run)
+    monkeypatch.setattr(coerce, "_ffmpeg_binary", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(subprocess, "run", run)
     return state, calls
 
 
@@ -462,14 +480,14 @@ class TestSessionLifecycle:
 
     def test_exit_hook_registered_after_start(self, session, monkeypatch):
         registered = []
-        monkeypatch.setattr(browser_module, "_register_exit_hook", registered.append)
+        monkeypatch.setattr(browser_session, "_register_exit_hook", registered.append)
         session.browser("navigate", value="https://example.com")
         assert len(registered) == 1
         assert registered[0].__self__ is session
 
     def test_exit_hook_registered_once_across_restarts(self, session, monkeypatch):
         registered = []
-        monkeypatch.setattr(browser_module, "_register_exit_hook", registered.append)
+        monkeypatch.setattr(browser_session, "_register_exit_hook", registered.append)
         session.browser("navigate", value="https://example.com")
         session.close()
         session.browser("navigate", value="https://example.com")
@@ -481,21 +499,19 @@ class TestSessionLifecycle:
         def callback():
             return None
 
-        monkeypatch.setattr(
-            browser_module.threading, "_register_atexit", registered.append
-        )
-        browser_module._register_exit_hook(callback)
+        monkeypatch.setattr(threading, "_register_atexit", registered.append)
+        browser_session._register_exit_hook(callback)
         assert registered == [callback]
 
     def test_exit_hook_falls_back_to_atexit(self, monkeypatch):
-        monkeypatch.delattr(browser_module.threading, "_register_atexit")
+        monkeypatch.delattr(threading, "_register_atexit")
         registered = []
 
         def callback():
             return None
 
-        monkeypatch.setattr(browser_module.atexit, "register", registered.append)
-        browser_module._register_exit_hook(callback)
+        monkeypatch.setattr(atexit, "register", registered.append)
+        browser_session._register_exit_hook(callback)
         assert registered == [callback]
 
     def test_close_is_idempotent(self, session, fake_chrome):
@@ -851,15 +867,13 @@ class TestActions:
         session._get_tab()
         session._tab.wait_error = RuntimeError("timed out")
         assert (
-            browser_module._settle(
-                session._tab, 15, previous_url="https://example.com/old"
-            )
+            actions._settle(session._tab, 15, previous_url="https://example.com/old")
             is False
         )
 
     def test_wait(self, session, monkeypatch):
         slept = []
-        monkeypatch.setattr(browser_module.time, "sleep", slept.append)
+        monkeypatch.setattr(time, "sleep", slept.append)
         result = session.browser("wait", value="2.5")
         assert result["status"] == "ok"
         assert result["seconds"] == 2.5
@@ -867,7 +881,7 @@ class TestActions:
 
     def test_wait_defaults(self, session, monkeypatch):
         slept = []
-        monkeypatch.setattr(browser_module.time, "sleep", slept.append)
+        monkeypatch.setattr(time, "sleep", slept.append)
         result = session.browser("wait")
         assert result["seconds"] == 1.0
         assert slept == [1.0]
@@ -1119,9 +1133,7 @@ class TestScreenshot:
         assert result["path"] == str(target.with_suffix(".png"))
 
     def test_default_temp_path(self, session, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            browser_module.tempfile, "gettempdir", lambda: str(tmp_path)
-        )
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
         result = session.screenshot()
         path = Path(result["path"])
         assert path.parent == tmp_path / "dspy-agent-tools"
@@ -1227,7 +1239,7 @@ class TestRecording:
         assert "dspy-agent-tools" in result["path"]
 
     def test_video_path_adds_mp4_suffix(self, tmp_path):
-        assert browser_module._video_path(str(tmp_path / "clip")).name == "clip.mp4"
+        assert coerce._video_path(str(tmp_path / "clip")).name == "clip.mp4"
 
     @pytest.mark.parametrize(
         ("kwargs", "message"),
@@ -1260,8 +1272,8 @@ class TestRecording:
         def missing(_name):
             raise ImportError("no imageio")
 
-        monkeypatch.setattr(browser_module.shutil, "which", lambda _name: None)
-        monkeypatch.setattr(browser_module.importlib, "import_module", missing)
+        monkeypatch.setattr(shutil, "which", lambda _name: None)
+        monkeypatch.setattr(importlib, "import_module", missing)
         result = session.record_start()
         assert result["status"] == "error"
         assert "ffmpeg" in result["error"]
@@ -1507,7 +1519,7 @@ class TestBrowserBundle:
             dialog_policy="accept",
         )
         try:
-            assert tools.session is not browser_module._default_session
+            assert tools.session is not tools_module._default_session
             assert tools.session.user_data_dir == (tmp_path / "profile").resolve()
             assert tools.session.dialog_policy == "accept"
             assert [tool.name for tool in tools] == self.DEFAULT_NAMES
@@ -1537,7 +1549,7 @@ class TestBrowserBundle:
         assert browser_module.Browser().session is default_session
 
     def test_browser_requires_pydoll(self, monkeypatch):
-        monkeypatch.setattr(browser_module, "_pydoll_loaded", False)
+        monkeypatch.setattr(_pydoll, "_loaded", False)
         real_import = builtins.__import__
 
         def fake_import(name, *args, **kwargs):
@@ -1627,35 +1639,29 @@ class TestHelpers:
         assert _render_nodes([]) == ""
 
     def test_screenshot_format(self):
-        assert browser_module._screenshot_format(None) == "png"
-        assert browser_module._screenshot_format("shot.JPG") == "jpeg"
-        assert browser_module._screenshot_format("shot.webp") == "webp"
+        assert screenshot._screenshot_format(None) == "png"
+        assert screenshot._screenshot_format("shot.JPG") == "jpeg"
+        assert screenshot._screenshot_format("shot.webp") == "webp"
 
     def test_ffmpeg_binary(self, monkeypatch):
-        monkeypatch.setattr(
-            browser_module.shutil, "which", lambda _name: "/usr/bin/ffmpeg"
-        )
-        assert browser_module._ffmpeg_binary() == "/usr/bin/ffmpeg"
+        monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+        assert coerce._ffmpeg_binary() == "/usr/bin/ffmpeg"
 
     def test_ffmpeg_binary_falls_back_to_imageio(self, monkeypatch):
         module = SimpleNamespace(get_ffmpeg_exe=lambda: "/bundle/ffmpeg")
-        monkeypatch.setattr(browser_module.shutil, "which", lambda _name: None)
-        monkeypatch.setattr(
-            browser_module.importlib, "import_module", lambda _name: module
-        )
-        assert browser_module._ffmpeg_binary() == "/bundle/ffmpeg"
+        monkeypatch.setattr(shutil, "which", lambda _name: None)
+        monkeypatch.setattr(importlib, "import_module", lambda _name: module)
+        assert coerce._ffmpeg_binary() == "/bundle/ffmpeg"
 
     def test_ffmpeg_binary_reports_bundled_binary_error(self, monkeypatch):
         def unavailable():
             raise RuntimeError("no bundled binary")
 
         module = SimpleNamespace(get_ffmpeg_exe=unavailable)
-        monkeypatch.setattr(browser_module.shutil, "which", lambda _name: None)
-        monkeypatch.setattr(
-            browser_module.importlib, "import_module", lambda _name: module
-        )
-        with pytest.raises(browser_module._ToolError, match="no bundled binary"):
-            browser_module._ffmpeg_binary()
+        monkeypatch.setattr(shutil, "which", lambda _name: None)
+        monkeypatch.setattr(importlib, "import_module", lambda _name: module)
+        with pytest.raises(errors._ToolError, match="no bundled binary"):
+            coerce._ffmpeg_binary()
 
     @pytest.mark.parametrize(
         ("text", "expected"),
@@ -1766,8 +1772,8 @@ class TestActionability:
 
     def test_probe_bool_accepts_properties(self):
         element = SimpleNamespace(is_enabled=True)
-        assert browser_module._probe_bool(element, "is_enabled") is True
-        assert browser_module._probe_bool(element, "is_visible") is True
+        assert dom._probe_bool(element, "is_enabled") is True
+        assert dom._probe_bool(element, "is_visible") is True
 
 
 class TestEffect:
@@ -2134,7 +2140,7 @@ class TestDiagnostics:
         assert session._tab.runtime_events == 1  # installed on the new tab
 
     def test_console_text_variants(self):
-        text = browser_module._console_text
+        text = watch._console_text
         assert text([{"value": "hi"}]) == "hi"
         assert text([{"value": None}]) == "null"
         assert text([{"value": {"a": 1}}]) == '{"a": 1}'
@@ -2147,8 +2153,8 @@ class TestDiagnostics:
 
     def test_compress_keeps_the_tail(self):
         entries = [{"text": f"line {index}"} for index in range(12)]
-        compressed = browser_module._compress(entries)
-        assert len(compressed) == browser_module._MAX_CONSOLE_ITEMS
+        compressed = watch._compress(entries)
+        assert len(compressed) == config._MAX_CONSOLE_ITEMS
         assert compressed[-1]["text"] == "line 11"
         assert "count" not in compressed[-1]
 
@@ -2284,10 +2290,10 @@ class TestNetwork:
 
     def test_entries_are_evicted(self, session):
         tab = session._get_tab()
-        for index in range(browser_module._MAX_NETWORK_ENTRIES + 5):
+        for index in range(config._MAX_NETWORK_ENTRIES + 5):
             fire_request(tab, request_id=str(index), url=f"https://e.com/{index}")
         requests = session.network(limit=1000)["requests"]
-        assert len(requests) == browser_module._MAX_NETWORK_ITEMS
+        assert len(requests) == config._MAX_NETWORK_ITEMS
 
     def test_clear(self, session):
         tab = session._get_tab()
@@ -2300,7 +2306,7 @@ class TestNetwork:
         tab.network_body = "x" * 5000
         result = session.network("body", "1")
         assert result["truncated"] is True
-        assert len(result["body"]) == browser_module._MAX_NETWORK_BODY
+        assert len(result["body"]) == config._MAX_NETWORK_BODY
         assert tab.requested_body == "1"
 
     def test_body_requires_an_id(self, session):
@@ -2337,12 +2343,12 @@ class TestNetwork:
         assert session.network()["requests"] == []
 
     def test_limit_is_coerced(self):
-        limit = browser_module._coerce_limit
+        limit = tabs._coerce_limit
         assert limit(None) == 20
         assert limit("5") == 5
         assert limit(0) == 1
-        assert limit(1000) == browser_module._MAX_NETWORK_ITEMS
-        with pytest.raises(browser_module._ToolError, match="limit must be"):
+        assert limit(1000) == config._MAX_NETWORK_ITEMS
+        with pytest.raises(errors._ToolError, match="limit must be"):
             limit("many")
 
     def test_module_tool_uses_default_session(self, default_session):
@@ -2429,15 +2435,15 @@ class TestTabs:
         assert "list, new, switch, or close" in result["error"]
 
     def test_resolving_against_no_tabs_is_an_error(self, session):
-        with pytest.raises(browser_module._ToolError, match="no tabs are open"):
-            browser_module._resolve_tab(session, [], None)
+        with pytest.raises(errors._ToolError, match="no tabs are open"):
+            tabs._resolve_tab(session, [], None)
 
     def test_tab_text_survives_a_dead_tab(self):
         dead = SimpleNamespace(
             current_url=lambda: (_ for _ in ()).throw(RuntimeError("gone")),
             title=lambda: "Fallback",
         )
-        assert browser_module._tab_text(dead) == "fallback"
+        assert tabs._tab_text(dead) == "fallback"
 
     def test_module_tool_uses_default_session(self, default_session):
         assert browser_module.browser_tabs()["count"] == 1
@@ -2541,8 +2547,8 @@ class TestCookies:
         assert "get, set, clear, save, or load" in result["error"]
 
     def test_cookie_records_ignore_junk(self):
-        assert browser_module._cookie_records("nope") == []
-        assert browser_module._cookie_records([{"name": "a"}, 5]) == [{"name": "a"}]
+        assert cookies._cookie_records("nope") == []
+        assert cookies._cookie_records([{"name": "a"}, 5]) == [{"name": "a"}]
 
     def test_module_tool_uses_default_session(self, default_session):
         assert browser_module.browser_cookies()["count"] == 1
@@ -2683,31 +2689,31 @@ class TestPersistentProfile:
         self, fake_chrome, tmp_path, monkeypatch
     ):
         slept = []
-        monkeypatch.setattr(browser_module.time, "sleep", slept.append)
+        monkeypatch.setattr(time, "sleep", slept.append)
         session = BrowserSession(user_data_dir=str(tmp_path / "profile"))
         session._get_tab()
         assert session.close() is True
         chrome = FakeChrome.instances[0]
         assert chrome.commands[0]["method"] == "Browser.close"
-        assert slept == [browser_module._PROFILE_FLUSH_S]
+        assert slept == [config._PROFILE_FLUSH_S]
 
     def test_reset_flushes_a_persistent_profile(
         self, fake_chrome, tmp_path, monkeypatch
     ):
         slept = []
-        monkeypatch.setattr(browser_module.time, "sleep", slept.append)
+        monkeypatch.setattr(time, "sleep", slept.append)
         session = BrowserSession(user_data_dir=str(tmp_path / "profile"))
         session._get_tab()
         session._reset()
         chrome = FakeChrome.instances[0]
         assert chrome.commands[0]["method"] == "Browser.close"
-        assert slept == [browser_module._PROFILE_FLUSH_S]
+        assert slept == [config._PROFILE_FLUSH_S]
 
     def test_close_skips_the_flush_without_a_profile(
         self, session, fake_chrome, monkeypatch
     ):
         slept = []
-        monkeypatch.setattr(browser_module.time, "sleep", slept.append)
+        monkeypatch.setattr(time, "sleep", slept.append)
         session._get_tab()
         assert session.close() is True
         assert not getattr(FakeChrome.instances[0], "commands", [])
@@ -2715,7 +2721,7 @@ class TestPersistentProfile:
 
     def test_flush_ignores_a_close_error(self, fake_chrome, tmp_path, monkeypatch):
         slept = []
-        monkeypatch.setattr(browser_module.time, "sleep", slept.append)
+        monkeypatch.setattr(time, "sleep", slept.append)
         FakeChrome.command_error = RuntimeError("already gone")
         session = BrowserSession(user_data_dir=str(tmp_path / "profile"))
         session._get_tab()

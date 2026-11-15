@@ -12,11 +12,12 @@ import dspy
 import pytest
 from dspy.utils.dummies import DummyLM
 
-import dspy_agent_tools.sandbox as sandbox_module
-import dspy_agent_tools.skills as skills_module
+import dspy_agent_tools.skills.sandbox as sandbox_module
+import dspy_agent_tools.skills.skill as skill_module
 from dspy_agent_tools import Patch, Skill, Skills, SkillTools, bash_exec, web_search
 from dspy_agent_tools.patch import _agent_tools
-from dspy_agent_tools.sandbox import (
+from dspy_agent_tools.skills.registry import _argv, _Registry
+from dspy_agent_tools.skills.sandbox import (
     ScriptSandbox,
     _family,
     bwrap_argv,
@@ -24,11 +25,9 @@ from dspy_agent_tools.sandbox import (
     resolve_backend,
     sandbox_exec_profile,
 )
-from dspy_agent_tools.skills import (
-    _argv,
+from dspy_agent_tools.skills.skill import (
     _discover,
     _load_skill,
-    _Registry,
     _validate,
     _validate_name,
 )
@@ -831,7 +830,7 @@ class TestDiscoveryEdgeCases:
         def boom(root: Path) -> list[Path]:
             raise OSError("boom")
 
-        monkeypatch.setattr(skills_module, "_skill_dirs", boom)
+        monkeypatch.setattr(skill_module, "_skill_dirs", boom)
 
         skills, errors = _discover([tmp_path], strict=False)
 
