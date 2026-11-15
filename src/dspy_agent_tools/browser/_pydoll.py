@@ -53,44 +53,22 @@ def require() -> None:
     if _loaded:
         return
     try:
-        from pydoll.commands import (
-            BrowserCommands as _BrowserCommands,
-        )
-        from pydoll.commands import (
-            PageCommands as _PageCommands,
-        )
+        from pydoll.commands import BrowserCommands as _BrowserCommands
+        from pydoll.commands import PageCommands as _PageCommands
         from pydoll.constants import ScrollPosition as _ScrollPosition
-        from pydoll.exceptions import (
-            BrowserException as _BrowserException,
-        )
-        from pydoll.exceptions import (
-            ConnectionException as _ConnectionException,
-        )
-        from pydoll.exceptions import (
-            TargetCrashed as _TargetCrashed,
-        )
-        from pydoll.exceptions import (
-            TimeoutException as _TimeoutException,
-        )
+        from pydoll.exceptions import BrowserException as _BrowserException
+        from pydoll.exceptions import ConnectionException as _ConnectionException
+        from pydoll.exceptions import TargetCrashed as _TargetCrashed
+        from pydoll.exceptions import TimeoutException as _TimeoutException
         from pydoll.protocol.network.events import NetworkEvent as _NetworkEvent
         from pydoll.protocol.page.types import ScreencastFormat as _ScreencastFormat
         from pydoll.protocol.runtime.events import RuntimeEvent as _RuntimeEvent
         from pydoll.protocol.runtime.types import CallArgument as _CallArgument
-        from pydoll.sync import (
-            Chrome as _Chrome,
-        )
-        from pydoll.sync import (
-            ChromiumOptions as _ChromiumOptions,
-        )
-        from pydoll.sync import (
-            Key as _Key,
-        )
-        from pydoll.sync import (
-            PageEvent as _PageEvent,
-        )
-        from pydoll.sync import (
-            SyncError as _SyncError,
-        )
+        from pydoll.sync import Chrome as _Chrome
+        from pydoll.sync import ChromiumOptions as _ChromiumOptions
+        from pydoll.sync import Key as _Key
+        from pydoll.sync import PageEvent as _PageEvent
+        from pydoll.sync import SyncError as _SyncError
     except ImportError as exc:
         raise ImportError(_IMPORT_HINT) from exc
     for name, value in {

@@ -8,12 +8,8 @@ from dspy_agent_tools.utils.process import (
     execute,
     render,
 )
-from dspy_agent_tools.utils.process import (
-    resolve_cwd as _resolve_cwd,
-)
-from dspy_agent_tools.utils.process import (
-    resolve_existing as _resolve_existing,
-)
+from dspy_agent_tools.utils.process import resolve_cwd as _resolve_cwd
+from dspy_agent_tools.utils.process import resolve_existing as _resolve_existing
 
 
 class TestResolveExisting:

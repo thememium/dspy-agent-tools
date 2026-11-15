@@ -14,9 +14,7 @@ from . import (
     errors,
     recording,
 )
-from . import (
-    session as session_module,
-)
+from . import session as session_module
 
 _default_session = session_module.BrowserSession()
 
