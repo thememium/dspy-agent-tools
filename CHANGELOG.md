@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.1.13 (2026-11-15)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.12...v0.1.13)
+
+### 🚀 Enhancements
+
+- agent patch (#15) ([2f1692c](https://github.com/thememium/dspy-agent-tools/commit/2f1692c4e2e31cc74de2291ff516a2bc380be46c))
+
+### 💅 Refactors
+
+- agent tools (#16) ([9a97a17](https://github.com/thememium/dspy-agent-tools/commit/9a97a17863ebc8ec8887cd4b5a18dee7a9486355))
+
+### 📖 Documentation
+
+- **README**: reorganize patching agent documentation to clarify usage ([f2d0396](https://github.com/thememium/dspy-agent-tools/commit/f2d03965eedef765ab7b31ac7ba753616d78e02b))
+- **README**: add “With a coding agent” section ([e249afb](https://github.com/thememium/dspy-agent-tools/commit/e249afb92f099337d0db807b814f8fc2e79ea554))
+
+### 🏡 Chore
+
+- **pyproject.toml**: bump usechange to 0.1.49 ([c38ba5c](https://github.com/thememium/dspy-agent-tools/commit/c38ba5cd525b9d488bd347a203a05978fc25480d))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.12 (2026-11-15)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.11...v0.1.12)
