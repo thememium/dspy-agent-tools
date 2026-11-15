@@ -672,7 +672,7 @@ uv run pytest
 uv run poe test-cov
 
 # Run specific test
-uv run pytest path/to/test.py::test_name
+uv run pytest tests/files/test_edit.py::TestEditLines::test_replace_range
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

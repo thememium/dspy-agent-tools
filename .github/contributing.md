@@ -131,10 +131,10 @@ This runs pytest with verbose output. You can also run specific tests:
 
 ```bash
 # Run a specific test file
-$ uv run pytest tests/test_files.py -v
+$ uv run pytest tests/files/test_edit.py -v
 
 # Run a specific test
-$ uv run pytest tests/test_files.py::TestEditLines::test_replace_range -v
+$ uv run pytest tests/files/test_edit.py::TestEditLines::test_replace_range -v
 ```
 
 ### `uv run poe test-cov`
@@ -251,24 +251,33 @@ dspy-agent-tools/                        # Repository root
 ├── src/
 │   └── dspy_agent_tools/
 │       ├── __init__.py                  # Public API - re-exports all tools
-│       ├── bash.py                      # Shell execution, content/path search, listing, URL fetching
-│       ├── cli.py                       # Lazy discovery of any executable's commands via its help output
-│       ├── files.py                     # File read/write/edit with snapshot guard and tree-sitter blocks
-│       ├── mcp.py                       # MCP server lifecycle and tool conversion (optional `mcp` extra)
+│       ├── guide.py                     # Per-family policy sections injected into agent instructions
+│       ├── patch.py                     # Add tools and guidance to an already-built agent
 │       ├── search.py                    # Web and news search with bounded engine failover
-│       └── toolbox.py                   # Eager and progressive-discovery views over any tool catalog
+│       ├── bash/                        # Shell execution, content/path search, listing, URL fetching
+│       ├── browser/                     # Headless Chrome tools backed by pydoll (extra)
+│       ├── cli/                         # Lazy discovery of any executable's commands via its help output
+│       ├── files/                       # File read/write/edit with snapshot guard and tree-sitter blocks
+│       ├── mcp/                         # MCP server lifecycle and tool conversion (extra)
+│       ├── skills/                      # Agent Skills discovery, tools, and script sandbox
+│       ├── toolbox/                     # Eager and progressive-discovery views over any tool catalog
+│       └── utils/                       # Shared internals: process execution and DSPy integration
 ├── tests/
 │   ├── fixtures/
 │   │   ├── broken_server.py             # Server that exits before completing the MCP handshake
-│   │   ├── mcp_server.py                # Minimal stdio MCP server used by tests/test_mcp.py
-│   │   ├── remote_server.py             # Streamable HTTP / SSE MCP server used by tests/test_mcp_remote.py
+│   │   ├── mcp_server.py                # Minimal stdio MCP server used by the mcp tests
+│   │   ├── remote_server.py             # Streamable HTTP / SSE MCP server used by the remote tests
 │   │   └── slow_server.py               # MCP server that never handshakes, for timeout tests
-│   ├── test_bash.py                     # Tests for src/dspy_agent_tools/bash.py
-│   ├── test_catalog.py                  # Tests for src/dspy_agent_tools/toolbox.py and MCP tool catalogs
-│   ├── test_cli.py                      # Tests for src/dspy_agent_tools/cli.py
-│   ├── test_files.py                    # Tests for src/dspy_agent_tools/files.py
-│   ├── test_mcp.py                      # Tests for stdio sessions in src/dspy_agent_tools/mcp.py
-│   ├── test_mcp_remote.py               # Tests for remote MCP transports in src/dspy_agent_tools/mcp.py
+│   ├── __init__.py                      # Test package root
+│   ├── bash/                            # Mirrors src/dspy_agent_tools/bash/
+│   ├── browser/                         # Mirrors src/dspy_agent_tools/browser/ (fakes.py + conftest.py)
+│   ├── cli/                             # Mirrors src/dspy_agent_tools/cli/ (helpers.py)
+│   ├── files/                           # Mirrors src/dspy_agent_tools/files/
+│   ├── mcp/                             # Mirrors src/dspy_agent_tools/mcp/ (helpers.py, conftest.py, remote tests)
+│   ├── skills/                          # Mirrors src/dspy_agent_tools/skills/ (helpers.py)
+│   ├── toolbox/                         # Mirrors src/dspy_agent_tools/toolbox/ (helpers.py)
+│   ├── utils/                           # Mirrors src/dspy_agent_tools/utils/
+│   ├── test_patch.py                    # Tests for src/dspy_agent_tools/patch.py and guide.py
 │   ├── test_search.py                   # Tests for src/dspy_agent_tools/search.py
 │   └── test_smoke.py                    # Smoke tests run by .github/workflows/publish.yml against dist/ artifacts
 ├── .gitignore                           # Ignore rules for builds, caches, and virtualenvs
@@ -283,7 +292,7 @@ dspy-agent-tools/                        # Repository root
 
 `uv build` writes wheels and sdists to the git-ignored `dist/` directory.
 
-Add a test file at `tests/test_<module>.py` when you add `src/dspy_agent_tools/<module>.py`, and re-export every public tool from `src/dspy_agent_tools/__init__.py`.
+Add a test module at `tests/<package>/test_<submodule>.py` when you add `src/dspy_agent_tools/<package>/<submodule>.py` (or `tests/test_<module>.py` for a top-level module), and re-export every public tool from `src/dspy_agent_tools/__init__.py`.
 
 ## Tool Docstring Conventions
 

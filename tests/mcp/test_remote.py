@@ -18,7 +18,7 @@ from mcp.client.streamable_http import create_mcp_http_client
 
 from dspy_agent_tools import MCP
 
-SERVER = Path(__file__).parent / "fixtures" / "remote_server.py"
+SERVER = Path(__file__).parents[1] / "fixtures" / "remote_server.py"
 
 
 def _free_port() -> int:

@@ -2,7 +2,6 @@
 
 import asyncio
 import sys
-from pathlib import Path
 from typing import Any, cast
 
 import dspy
@@ -11,46 +10,15 @@ from dspy.utils.dummies import DummyLM
 
 from dspy_agent_tools import MCP, MCPTools, Toolbox
 
-SERVER = Path(__file__).parent / "fixtures" / "mcp_server.py"
-
-
-def add(a: int, b: int) -> int:
-    """Add two integers."""
-    return a + b
-
-
-async def greet(name: str = "world") -> str:
-    """Greet someone."""
-    return f"hello {name}"
-
-
-def local_echo(text: str) -> str:
-    """Echo text locally."""
-    return f"local:{text}"
-
-
-def verbose(value: int) -> int:
-    """Return a value unchanged.
-
-    This is a deliberately verbose description used to exercise description
-    truncation. This is a deliberately verbose description used to exercise
-    description truncation. This is a deliberately verbose description used to
-    exercise description truncation. This is a deliberately verbose description
-    used to exercise description truncation.
-    """
-    return value
-
-
-def by_name(tools):
-    return {tool.name: tool for tool in tools}
-
-
-class _Closer:
-    def __init__(self) -> None:
-        self.closed = False
-
-    def close(self) -> None:
-        self.closed = True
+from .helpers import (
+    SERVER,
+    _Closer,
+    add,
+    by_name,
+    greet,
+    local_echo,
+    verbose,
+)
 
 
 class TestSearchMode:
