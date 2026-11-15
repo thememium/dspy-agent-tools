@@ -124,7 +124,7 @@ bad `mode`, an invalid `name_prefix`, a forced sandbox that is missing — raise
 - `max_resource_chars` caps one `read_skill_resource` result (default 50,000;
   `0` keeps everything).
 - `max_catalog_chars` caps the `<available_skills>` block injected by
-  `patch()` (default 8,000; `0` keeps every skill). Skills that do not fit are
+  `Patch()` (default 8,000; `0` keeps every skill). Skills that do not fit are
   omitted with a note.
 
 Binary files and non-UTF-8 files are refused with a message pointing at a file
@@ -132,16 +132,20 @@ tool, rather than decoded into garbage.
 
 ## Patching an existing agent
 
-`tools=skills` is enough on its own. `Skills(...).patch(agent)` appends the
-catalog and tools to an agent that was already built:
+`tools=skills` is enough on its own. `Patch(agent, tools=Skills("./skills"))`
+appends the catalog and tools to an agent that was already built:
 
 ```python
+from dspy_agent_tools import Patch, Skills, bash_exec, read_file
+
 agent = dspy.ReAct("question -> answer", tools=[bash_exec, read_file])
-Skills("./skills").patch(agent)
+Patch(agent, tools=Skills("./skills"))
 ```
 
-`patch` rebuilds the inner predictor, so it works for `dspy.ReAct`,
-`dspy.ReActV2`, and `dspy.RLM`:
+There is no `Skills.patch` method: [Patch](patch.md) is the one way to extend a
+built agent, and a skill list is just another tool source. `Patch` rebuilds
+the inner predictor so it works for `dspy.ReAct`, `dspy.ReActV2`, and
+`dspy.RLM`:
 
 - The agent's signature gets the skill guidance, the execution rules, and the
   `<available_skills>` catalog appended to its instructions.
@@ -151,17 +155,22 @@ Skills("./skills").patch(agent)
   its iteration, output, verbosity, sub-LM, and interpreter settings.
 - Module state such as callbacks, history, and the compiled flag is copied
   onto the patched instance.
-- It returns the agent for chaining: `agent = Skills(...).patch(agent)`.
+- It returns the agent for chaining: `agent = Patch(agent, tools=skills)`.
+
+Add other tools in the same call —
+`Patch(agent, tools=[Skills("./skills"), read_file])` — or add policy of your own with
+`guide=`.
 
 The injected block carries execution rules, not just the catalog. Only
 `run_skill_script` can start a bundled file, and a skill's prose may call for
 host commands (`npx skills find ...`, `gh skill search ...`) or a page to
-read. `patch` names whichever it finds on the agent:
+read. `Patch` names whichever it finds on the agent:
 
-- Host-command tools: tools from `dspy_agent_tools.bash` or
-  `dspy_agent_tools.cli`, plus common shell names such as `bash_exec`,
-  `shell`, and `run_command`.
-- URL-reading tools: tools from `dspy_agent_tools.search`, such as
+- Host-command tools: tools from the shell family —
+  `dspy_agent_tools.bash`, `dspy_agent_tools.cli`, and foreign tools named
+  like a shell (`shell`, `run_command`).
+- URL-reading tools: tools from the web or browser family —
+  `dspy_agent_tools.search`, `dspy_agent_tools.browser`, such as
   `web_search`.
 
 When the agent holds neither, the model is told to report the exact command
@@ -171,26 +180,28 @@ install counts:
 ```python
 # No shell tool: the model reports `npx skills find "git review"` for you to run.
 agent = dspy.RLM("question -> answer")
-Skills("./skills", mode="code").patch(agent)
+Patch(agent, tools=Skills("./skills", mode="code"))
 
 # With a CLI tool: the model runs the command for real and quotes the output.
 from dspy_agent_tools import CLI
 
 agent = dspy.ReAct("question -> answer", tools=list(CLI("gh")))
-Skills("./skills").patch(agent)
+Patch(agent, tools=Skills("./skills"))
 ```
 
 Rules:
 
-- `patch` is idempotent: patching twice with the same `Skills` instance
-  changes nothing.
+- `Patch` is idempotent: patching twice with the same `Skills` instance
+  changes nothing, and the catalog appears once in the instructions.
 - Patching an agent that already received these tools through `tools=` only
   adds the catalog.
 - It raises `ValueError` when the agent already has a *different* tool with one
   of the skill tool names; pass `name_prefix="skill_"` to resolve the
-  collision.
-- It raises `ValueError` when the agent was patched with a different
-  `Skills()` catalog. Build one `Skills(...)` call with every folder.
+  collision. A second `Skills()` instance collides exactly this way, so put
+  every folder into one `Skills(...)` call.
+- A skill whose instructions call for a shell command is followed with the
+  shell or command tools on the agent; without one, the model names the
+  command for the user to run.
 - It raises `TypeError` for module types other than `dspy.ReAct`,
   `dspy.ReActV2`, and `dspy.RLM`.
 - An agent accepts one catalog, so put every folder into one `Skills(...)`
@@ -200,7 +211,7 @@ The public helpers behind the injected block are also available:
 
 ```python
 skills.catalog()  # the <available_skills> XML block
-skills.instructions(tools=())  # guidance + execution rules + catalog
+skills.section(tools=())  # guidance + execution rules + catalog
 skills.skills  # parsed Skill objects
 skills.errors  # skipped directories
 ```
@@ -289,5 +300,5 @@ Skills(
 - `activate_skill` and `read_skill_resource` only read text from the skill
   folder; `../` and absolute paths are rejected after resolution.
 - The catalog is data, not authority: a skill can describe commands the agent
-  cannot run. `patch` tells the model to report those commands instead of
+  cannot run. `Patch` tells the model to report those commands instead of
   inventing output.

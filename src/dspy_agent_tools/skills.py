@@ -29,10 +29,11 @@ The list holds four progressive-disclosure tools:
 - ``run_skill_script`` — one script from ``scripts/``, run in the sandbox
   described in :mod:`dspy_agent_tools.sandbox`.
 
-Call :meth:`SkillTools.patch` on an already-built agent to append the tools
-and inject the skill catalog into its instructions; the agent class decides
-how the inner predictor is rebuilt, so it works for ``dspy.ReAct``,
-``dspy.ReActV2``, and ``dspy.RLM``.
+Pass the list to :func:`dspy_agent_tools.Patch` on an already-built agent to
+append the tools and inject the skill catalog into its instructions, together
+with any other tool family in the same call; the agent class decides how the
+inner predictor is rebuilt, so it works for ``dspy.ReAct``, ``dspy.ReActV2``,
+and ``dspy.RLM``.
 
 ``mode="search"`` (default) returns text for ReAct-style agents;
 ``mode="code"`` returns dictionaries for ``dspy.RLM``.
@@ -49,6 +50,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 
+from .guide import names_in
 from .sandbox import (
     DEFAULT_INTERPRETERS,
     DEFAULT_SCRIPT_TIMEOUT,
@@ -127,35 +129,15 @@ _EXECUTION_NOTE_NO_SCRIPTS = (
     "a skill that needs a script can only be followed by hand. " + _HOST_RULES
 )
 
-_REPL_NOTE = (
-    "Your code runs in a REPL that cannot spawn processes or open network "
-    "connections, so shell commands fail from code. Tool calls, including "
-    "`{run_skill_script}`, run on the machine instead."
-)
-
 _HOST_TOOLS_NOTE = "Host command tools available to you: {names}."
 _NETWORK_TOOLS_NOTE = (
     "Tools available to read a URL a skill points at (no shell needed): {names}."
 )
 
-#: Tools from this package that execute host commands; used to tell the model
-#: whether it can follow a skill's CLI instructions.
-_HOST_TOOL_MODULES = frozenset({"dspy_agent_tools.bash", "dspy_agent_tools.cli"})
-#: Tools that fetch a URL; a skill may ask for a page rather than a command.
-_NETWORK_TOOL_MODULES = frozenset({"dspy_agent_tools.search"})
-_SHELL_TOOL_NAMES = frozenset(
-    {
-        "bash",
-        "bash_exec",
-        "exec",
-        "execute",
-        "run_shell",
-        "shell",
-        "sh",
-        "terminal",
-    }
-)
-_SHELL_TOOL_SUFFIXES = ("_run_command", "_bash_exec")
+#: Families whose tools can run a command a skill's instructions call for.
+_HOST_FAMILIES = frozenset({"shell", "commands"})
+#: Families whose tools can read a page a skill points at.
+_NETWORK_FAMILIES = frozenset({"web", "browser"})
 
 _LIST_DESC = (
     "List the installed agent skills with their descriptions and bundled "
@@ -806,10 +788,15 @@ class SkillTools(list):
     concatenated with other tools. ``skills`` holds the discovered
     :class:`Skill` objects and ``errors`` the skipped directories.
 
-    :meth:`patch` appends these tools to an existing ``dspy.ReAct``,
-    ``dspy.ReActV2``, or ``dspy.RLM`` agent and injects the skill catalog
-    into the instructions the model sees.
+    Pass it to :func:`dspy_agent_tools.Patch` on an existing ``dspy.ReAct``,
+    ``dspy.ReActV2``, or ``dspy.RLM`` agent to append these tools and inject
+    the skill catalog into the instructions the model sees. It implements that
+    function's ``section`` protocol: ``family`` names the tool family and
+    :meth:`section` renders the guidance that replaces the family template.
     """
+
+    #: Tool family used by :func:`dspy_agent_tools.Patch` (see guide.py).
+    family = "skills"
 
     def __init__(
         self,
@@ -834,7 +821,7 @@ class SkillTools(list):
         self._names = present or names
 
     def catalog(self) -> str:
-        """The ``<available_skills>`` XML block injected by :meth:`patch`."""
+        """The ``<available_skills>`` XML block injected by :meth:`Patch`."""
         return self._catalog
 
     def _guidance(self) -> str:
@@ -844,14 +831,12 @@ class SkillTools(list):
     def _execution_note(self, tools: Sequence[Any]) -> str:
         template = _EXECUTION_NOTE if self.scripts else _EXECUTION_NOTE_NO_SCRIPTS
         parts = [template.format(**self._names)]
-        if self._mode == "code" and self.scripts:
-            parts.append(_REPL_NOTE.format(**self._names))
-        found = _host_command_tools(tools)
+        found = names_in(tools, _HOST_FAMILIES)
         if found:
             parts.append(
                 _HOST_TOOLS_NOTE.format(names=", ".join(f"`{name}`" for name in found))
             )
-        fetchers = _network_tools(tools)
+        fetchers = names_in(tools, _NETWORK_FAMILIES)
         if fetchers:
             parts.append(
                 _NETWORK_TOOLS_NOTE.format(
@@ -860,172 +845,16 @@ class SkillTools(list):
             )
         return "\n\n".join(parts)
 
-    def instructions(self, tools: Sequence[Any] = ()) -> str:
+    def section(self, tools: Sequence[Any] = ()) -> str:
         """Guidance, execution rules, and the catalog for an agent with ``tools``.
 
-        Pass the agent's full tool list so the model is told which host
-        commands it can actually run (see :func:`_host_command_tools`).
+        Pass the agent's full tool list so the model is told which tools it
+        has that can run a command or read a page a skill points at. This is
+        the ``skills`` section :func:`dspy_agent_tools.Patch` injects.
         """
         return "\n\n".join(
             [self._guidance(), self._execution_note(tools), self._catalog]
         )
-
-    def patch(self, agent: Any) -> Any:
-        """Append the skill tools to ``agent`` and inject the catalog.
-
-        The agent is reinitialized in place: its signature gets the skill
-        guidance, the execution rules, and the ``<available_skills>`` catalog
-        appended to its instructions, and its tool list gains the four skill
-        tools. The execution rules name the tools the agent already has that
-        can run host commands, so a skill whose instructions call a CLI is
-        either followed for real or reported as a command the user must run;
-        the model is told never to invent command output.
-
-        Works for ``dspy.ReAct``, ``dspy.ReActV2``, and ``dspy.RLM``; other
-        module types raise ``TypeError``.
-
-        Calling ``patch`` twice on the same agent is a no-op. Patching an
-        agent that already received these tools through ``tools=`` only adds
-        the catalog.
-
-        Returns the agent for chaining: ``agent = Skills(...).patch(agent)``.
-        """
-        import dspy
-
-        if not hasattr(agent, "signature"):
-            raise TypeError(
-                f"patch() needs a dspy module with a signature, got {type(agent).__name__}"
-            )
-
-        marker = "_dspy_agent_tools_skills"
-        already = getattr(agent, marker, None)
-        if already is self:
-            return agent
-        if already is not None:
-            raise ValueError(
-                "This agent is already patched with a different Skills() "
-                "catalog; build one Skills(...) with every skill folder."
-            )
-
-        if isinstance(agent, getattr(dspy, "RLM", ())):
-            kind = "RLM"
-        elif isinstance(agent, getattr(dspy, "ReActV2", ())):
-            kind = "ReActV2"
-        elif isinstance(agent, dspy.ReAct):
-            kind = "ReAct"
-        else:
-            raise TypeError(
-                "patch() supports dspy.ReAct, dspy.ReActV2, and dspy.RLM; "
-                f"got {type(agent).__name__}"
-            )
-        existing = _agent_tools(agent, kind)
-        additions = []
-        for tool in self:
-            found = existing.get(tool.name)
-            if found is None:
-                additions.append(tool)
-            elif found is not tool:
-                raise ValueError(
-                    f"Agent already has a different tool named {tool.name!r}; "
-                    "pass name_prefix=... to Skills() to avoid the collision."
-                )
-
-        instructions = agent.signature.instructions
-        block = self.instructions([*existing.values(), *additions])
-        signature = agent.signature.with_instructions(
-            f"{instructions}\n\n{block}" if instructions else block
-        )
-
-        if kind == "ReAct":
-            tools = [tool for name, tool in existing.items() if name != "finish"]
-            rebuilt = dspy.ReAct(
-                signature, tools=[*tools, *additions], max_iters=agent.max_iters
-            )
-        elif kind == "ReActV2":
-            tools = [tool for name, tool in existing.items() if name != "submit"]
-            rebuilt = dspy.ReActV2(
-                signature, tools=[*tools, *additions], max_iters=agent.max_iters
-            )
-        elif kind == "RLM":
-            rebuilt = dspy.RLM(
-                signature,
-                max_iters=agent.max_iters,
-                max_llm_calls=agent.max_llm_calls,
-                max_output_chars=agent.max_output_chars,
-                verbose=agent.verbose,
-                tools=[*existing.values(), *additions],
-                sub_lm=agent.sub_lm,
-                interpreter_factory=agent._interpreter_factory,
-            )
-        _copy_module_state(agent, rebuilt)
-        setattr(agent, marker, self)
-        return agent
-
-
-_MODULE_STATE = frozenset({"callbacks", "history", "_compiled"})
-
-
-def _copy_module_state(agent: Any, rebuilt: Any) -> None:
-    """Copy a rebuilt module's own state onto ``agent`` in place.
-
-    Module-level bookkeeping (callbacks, history, compile flag) is preserved
-    from the original instance.
-    """
-    for name, value in vars(rebuilt).items():
-        if name not in _MODULE_STATE:
-            setattr(agent, name, value)
-
-
-def _agent_tools(agent: Any, kind: str) -> dict[str, Any]:
-    """Return the agent's tool mapping keyed by name."""
-    if kind == "RLM":
-        return dict(getattr(agent, "_user_tools", {}))
-    tools = getattr(agent, "tools", None)
-    if not isinstance(tools, Mapping):
-        raise TypeError(f"Unsupported {kind} tool container: {type(tools).__name__}")
-    return dict(tools)
-
-
-def _named_tools(
-    tools: Sequence[Any],
-    *,
-    modules: frozenset[str],
-    names: frozenset[str] = frozenset(),
-    suffixes: tuple[str, ...] = (),
-) -> list[str]:
-    """Names of the tools whose function matches one of the given signals."""
-    found = set()
-    for tool in tools:
-        func = getattr(tool, "func", None)
-        name = getattr(tool, "name", None) or getattr(func, "__name__", "")
-        module = getattr(func, "__module__", "") or ""
-        if module in modules or name in names or name.endswith(suffixes):
-            found.add(str(name))
-    return sorted(name for name in found if name)
-
-
-def _host_command_tools(tools: Sequence[Any]) -> list[str]:
-    """Names of the tools that can run a host command.
-
-    A tool counts when it comes from :mod:`dspy_agent_tools.bash` or
-    :mod:`dspy_agent_tools.cli`, or when its name matches a common shell
-    spelling, so the model is told which commands it can actually run.
-    """
-    return _named_tools(
-        tools,
-        modules=_HOST_TOOL_MODULES,
-        names=_SHELL_TOOL_NAMES,
-        suffixes=_SHELL_TOOL_SUFFIXES,
-    )
-
-
-def _network_tools(tools: Sequence[Any]) -> list[str]:
-    """Names of the tools that fetch a URL or search the web.
-
-    Skills routinely ask the agent to read a page (a leaderboard, a changelog);
-    that step needs a fetch tool, not a shell.
-    """
-    return _named_tools(tools, modules=_NETWORK_TOOL_MODULES)
 
 
 # ---------------------------------------------------------------------------
@@ -1087,7 +916,7 @@ def Skills(
         max_resource_chars: Cap one ``read_skill_resource`` result
             (``0`` keeps everything).
         max_catalog_chars: Cap the ``<available_skills>`` block injected by
-            ``patch`` (``0`` keeps every skill).
+            ``Patch`` (``0`` keeps every skill).
 
     Returns:
         A :class:`SkillTools` list with ``list_skills``, ``activate_skill``,
@@ -1100,7 +929,7 @@ def Skills(
         >>> agent = dspy.ReAct("question -> answer", tools=skills)
 
         >>> agent = dspy.ReAct("question -> answer", tools=[bash_exec])
-        >>> Skills("./skills").patch(agent)
+        >>> dspy_agent_tools.Patch(agent, tools=Skills("./skills"))
 
         >>> rlm = dspy.RLM("task -> report", tools=Skills("./skills", mode="code"))
     """

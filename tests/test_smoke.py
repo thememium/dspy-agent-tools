@@ -51,6 +51,7 @@ EXPECTED_EXPORTS = {
     "browser_tabs",
     "delete_file",
     "edit_file",
+    "Patch",
     "read_file",
     "web_news",
     "web_search",
