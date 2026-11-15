@@ -40,16 +40,16 @@ DSPy Agent Tools is a library of **tool functions** for
 function with a tool-optimized docstring, so you can hand them straight to
 `dspy.ReAct` or `dspy.RLM` — no adapters, no wrappers.
 
-Three built-in tool families, plus Agent Skills, a generic Toolbox, a CLI
-bridge, and an optional MCP bridge:
+Core tools, optional bridges, and progressive discovery:
 
-- **Bash** — shell execution, file search (ripgrep/fd-style, no binaries needed), directory listing, and URL fetching
-- **Files** — read, write, and edit files with snapshot-based optimistic concurrency and tree-sitter block addressing
-- **Search** — multi-engine web and news search with failover and explicit outcomes
-- **CLI** — `CLI("gh")` turns any executable into a two-tool discovery facade (`get_command_help`, `run_command`), with optional `search_commands` via `include_search=True`; pass `commands=[Command(...)]` to define typed tools explicitly instead. Both modes are shell-free and scoped to the configured executable.
-- **MCP** (optional) — `MCP()` connects to a local **stdio** or remote **Streamable HTTP** / **HTTP+SSE** MCP server and returns an `MCPTools` list of `dspy.Tool` objects you can mix with the built-ins; `transport=<factory>` takes any custom async transport. Requires the `[mcp]` extra.
-- **Skills** — `Skills("~/.agents/skills")` loads [Agent Skills](https://agentskills.io/specification) folders and returns progressive-disclosure tools for listing, activating, reading, and running them, with sandboxed script execution. `Skills(...).patch(agent)` appends the catalog and tools to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`.
-- **Toolbox** — `Toolbox([...])` groups any mix of MCP servers, `dspy.Tool` objects, and plain Python functions as a full eager list; `mode="search"` or `mode="code"` applies progressive discovery to the same catalog.
+- **Bash** — shell execution, file search, directory listing, and URL fetching
+- **Files** — read, write, and edit with snapshot guards and tree-sitter addressing
+- **Search** — web and news search with engine failover and explicit status
+- **CLI** — shell-free typed facade over any executable; discovery or explicit `Command` tools. See [docs/cli.md](docs/cli.md).
+- **MCP** (optional) — local stdio or remote HTTP/SSE servers as `dspy.Tool`s. See [docs/mcp.md](docs/mcp.md).
+- **Skills** — Agent Skills folders as progressive-disclosure tools, with `patch(agent)`. See [docs/skills.md](docs/skills.md).
+- **Browser** (optional) — headless Chrome as one `dspy.Tool` list, with optional recording and search. See [docs/browser.md](docs/browser.md).
+- **Toolbox** — mix MCP servers, tools, and functions; optional progressive discovery.
 
 Tools are just Python functions, exactly as
 [DSPy's docs describe](https://dspy.ai/current/getting-started/react-and-tools/#tools-are-just-python-functions):
@@ -58,8 +58,8 @@ assemble the instructions it sends to the LM. These docstrings are written for
 that purpose — each one tells the model WHAT the tool does, WHEN to use it
 instead of a sibling tool, and HOW to pass arguments.
 
-Requires **Python 3.13+**; run agents with **DSPy 3.1+** (the `[mcp]` extra
-installs it).
+Requires **Python 3.13+**; run agents with **DSPy 3.1+** (the `[browser]` and
+`[mcp]` extras install it).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -81,58 +81,33 @@ Or with pip:
 pip install dspy-agent-tools
 ```
 
-`bash_curl`, `bash_exec`, and `bash_ls` shell out to real `bash`/`curl`/`ls`
-binaries, which must be on your PATH. The search tools
-(`bash_ripgrep`, `bash_find`, `bash_glob`) run through the `rgapi` library —
-ripgrep's and fd's engines as Python modules — so no `rg`/`fd` binary is
-needed. rgapi ships a compiled extension: when it cannot be imported (no wheel
-for your interpreter and no working local build), the search tools fall back to
-the `rg` and `fd` binaries, then to POSIX `grep` and `find`, and report an
-`[Error]` body only when none of those exist. The `grep`/`find` tier is a last
-resort: it skips hidden paths and VCS directories like the default backends but
-cannot read `.gitignore` rules, so ignored files are still searched.
+### Optional Installs
 
-The MCP bridge is an optional extra (it pulls in DSPy, `httpx2`, and MCP
-SDK 2.x). Importing `MCP` works without it; calling `MCP()` raises an
-`ImportError` with the install hint:
+The browser and MCP bridges are optional extras. Importing `Browser` or `MCP`
+works without them; calling either raises `ImportError` with the install hint.
+
+```bash
+uv add 'dspy-agent-tools[browser]'
+# or: pip install 'dspy-agent-tools[browser]'
+```
+
+`Browser()` drives an installed Chrome headless through pydoll; no separate
+browser download is needed. Recording uses `ffmpeg` from `PATH`; install the
+extra to bundle one, otherwise `browser_record_start` returns an error:
+
+```bash
+uv add 'dspy-agent-tools[ffmpeg]'
+# or: pip install 'dspy-agent-tools[ffmpeg]'
+```
+
+The MCP bridge pulls in DSPy, `httpx2`, and MCP SDK 2.x:
 
 ```bash
 uv add "dspy-agent-tools[mcp]"
 ```
 
-### Basic Usage with dspy.ReAct
-
-Import the tools you need and put them in the `tools` list:
-
-```python
-import dspy
-from dspy_agent_tools import web_search, bash_fetch
-
-haiku_bot = dspy.ReAct(
-    "location -> haiku",
-    tools=[web_search, bash_fetch],
-)
-
-result = haiku_bot(location="Camp Meeker")
-print(result.haiku)
-```
-
-### Basic Usage with dspy.RLM
-
-The same functions go into `dspy.RLM`'s `tools` list, where they are injected
-into the REPL namespace and callable from the model's generated code:
-
-```python
-import dspy
-from dspy_agent_tools import bash_exec, read_file, edit_file
-
-rlm = dspy.RLM(
-    "task -> report",
-    tools=[bash_exec, read_file, edit_file],
-)
-
-result = rlm(task="Add a docstring to every public function in src/utils.py")
-```
+Ready to build an agent? [Usage](#usage) shows complete `dspy.ReAct` and
+`dspy.RLM` examples.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -204,6 +179,42 @@ coder = dspy.RLM(
 result = coder(task="Rename the class SessionManager to Session across the repo")
 ```
 
+### With the headless browser
+
+`Browser()` returns the core browser toolset as one list of `dspy.Tool`
+objects. Nothing is created or cleaned up by hand:
+
+```python
+import dspy
+from dspy_agent_tools import Browser
+
+agent = dspy.ReAct(
+    "task -> result",
+    tools=Browser(),
+    max_iters=12,
+)
+
+result = agent(task="Open https://example.com and summarize the page")
+```
+
+`Browser(include_search=True)` appends `web_search` for research agents, and
+`Browser(include_recording=True)` adds video recording. The individual
+functions remain available when you want a hand-picked list.
+
+For a server that needs one browser per user or session, bind the tool list to
+a session:
+
+```python
+from dspy_agent_tools import Browser, BrowserSession
+
+session = BrowserSession()
+tools = Browser(session=session)  # or session.tools()
+tools.close()  # stops this session only
+```
+
+See [docs/browser.md](docs/browser.md) for actions, snapshots and refs, tabs,
+network capture, cookies and profiles, video recording, and URL policy.
+
 A full coding-agent toolbox, all in one import:
 
 ```python
@@ -229,10 +240,10 @@ from dspy_agent_tools import (
 
 ### With MCP servers
 
-`MCP` is one wrapper for every transport. It starts the server, converts every
-tool it advertises into a `dspy.Tool`, and returns them as an `MCPTools` list.
-The server keeps running while the tools are referenced, so repeated calls
-reuse one session:
+`MCP` starts a server, converts every tool it advertises into a `dspy.Tool`,
+and returns them as an `MCPTools` list. Use `command=` for a local stdio server
+or `url=` for Streamable HTTP; `transport="sse"` selects legacy HTTP+SSE, and
+`transport=<factory>` takes any custom async transport.
 
 ```python
 import dspy
@@ -252,83 +263,27 @@ result = agent(question="List the files inside /tmp")
 print(result.answer)
 ```
 
-Remote servers use the same wrapper. `url=` selects Streamable HTTP, and
-`transport="sse"` selects the legacy HTTP+SSE transport:
+Remote servers use the same wrapper:
 
 ```python
-tools = MCP(
+hosted = MCP(
     url="https://example.com/mcp",
     headers={"Authorization": "Bearer <token>"},
 )
-
-legacy = MCP(url="https://example.com/sse", transport="sse")
 ```
 
-- `MCP(command=..., args=[...])` runs a local **stdio** server; `env=` and
-  `cwd=` configure its environment and working directory.
-- `MCP(url=...)` connects over **Streamable HTTP**, the transport used by most
-  hosted MCP servers.
-- `MCP(url=..., transport="sse")` connects over legacy **HTTP+SSE**.
-- `MCP(transport=factory)` uses a custom async transport: `factory` is a
-  zero-argument callable returning an async context manager that yields a
-  read/write pair.
-- `transport="auto"` (the default) infers the transport from `command=` vs
-  `url=`; pass `"stdio"`, `"http"`, or `"sse"` to be explicit.
-
-Every transport accepts `startup_timeout` (seconds to wait for initialization
-and tool listing, default 60), `name_prefix` (prepended to every tool name),
-and `result_mode`: `"text"` (default) flattens MCP text content to strings,
-`"structured"` returns the server's `structuredContent` when it provides it.
-The stdio transport ignores the HTTP-only options.
-
-MCP servers often finish startup work after the handshake — an index
-reconcile, a cache warm-up — advertising their tools immediately and answering
-calls with an error payload (`{"error": ...}` or `{"ok": false}`) until it
-ends. Read-only tools (`readOnlyHint`) are therefore replayed while they
-answer with such a payload: `retry_timeout` (default 30 s) bounds the replay
-and `0` disables it. The last payload is returned unchanged when the budget
-runs out. Tools without the annotation are never replayed, so a side effect
-cannot be duplicated.
-
-Remote transports (`url=`, `transport="http"` or `"sse"`) additionally accept:
-
-- `headers` — extra HTTP headers such as an `Authorization` bearer token.
-- `timeout` — HTTP timeout; defaults to 30 s for Streamable HTTP and 5 s for
-  legacy SSE.
-- `sse_read_timeout` — how long to wait on the server stream (default 300 s).
-- `auth` — an `httpx`/`httpx2` auth handler, e.g. an MCP OAuth client
-  provider.
-- `http_client_factory` — zero-argument callable returning an async HTTP
-  client, created and closed on the connection's event loop. For Streamable
-  HTTP it replaces the default client, so `headers`, `timeout`, and `auth`
-  are then ignored; for legacy SSE it is passed to the SDK as
-  `httpx_client_factory` alongside the other options.
-- `terminate_on_close` — ask the server to terminate the HTTP session on close
-  (Streamable HTTP only, default `True`).
-
-For legacy SSE, `headers`, `timeout`, `sse_read_timeout`, and `auth` are only
-forwarded when the installed MCP SDK's `sse_client` accepts them.
-
-Both paths work out of the box: `agent(...)` synchronously converts the
-async MCP calls (scoped to those tools, no global DSPy setting), and
-`await agent.acall(...)` runs fully asynchronously in async applications.
-No cleanup is required: the session keeps running while the tools or the
-`MCPTools` list are referenced, then closes when they are garbage-collected,
-with an interpreter-exit fallback. Call `tools.close()` only to stop it
-earlier.
-
-- Call `MCP` once per server and concatenate the results for several servers;
-  use `name_prefix="fs_"` when servers expose identically named tools.
-- The return value, `MCPTools`, is a `list` subclass: passing it as `tools=`,
-  concatenating with `+` on either side, and unpacking all work. It is also a
-  context manager (`with MCP(...) as tools:`) that closes the server on exit.
+`MCPTools` is a `list` subclass, so it composes with other tools; it is also a
+context manager with `.close()`. `agent(...)` works synchronously and
+`await agent.acall(...)` runs fully asynchronously. See
+[docs/mcp.md](docs/mcp.md) for transport selection, result modes, startup
+retries, HTTP options, and lifecycle.
 
 ### With any CLI
 
 `CLI` wraps an executable that has no MCP server. By default it exposes a
 two-tool discovery facade (`get_command_help`, `run_command`) and reads the
-program's own help on demand; add `include_search=True` for name lookup, or
-pass `commands=` to define typed tools explicitly (see below).
+program's own help on demand; `include_search=True` adds `search_commands`,
+and `commands=[Command(...)]` defines typed tools explicitly instead.
 
 ```python
 import dspy
@@ -340,155 +295,24 @@ agent = dspy.ReAct("question -> answer", tools=gh + [bash_exec])
 worker = dspy.RLM("task -> report", tools=CLI("docker", mode="code"))
 ```
 
-| Tool | Purpose |
-| --- | --- |
-| `get_command_help(command="")` | Usage, subcommands, parsed flags, and JSON help for one path. `command=""` returns the root command list. |
-| `run_command(command="", args=[])` | Execute `[executable, *base_args, *command_path, *args]`; no shell. |
-| `search_commands(query, limit=8)` | Optional (`include_search=True`): rank command paths by name/description. Usually unnecessary because root help lists commands. |
-
-Discovery starts on the first tool call, not when `CLI()` is called. Every
-help page is cached; `tools.refresh()` drops the cache. With
-`include_search=True`, a search expands at most `max_expands` pages to depth
-`max_depth`, so searching for `pr list` costs two help calls (root, then
-`pr`); asking for its details then fetches `pr list`. Nothing walks the whole
-tree.
-
-```python
-git = CLI("git")
-tools = {tool.name: tool for tool in git}
-tools["git_get_command_help"](command="")  # root command list
-tools["git_get_command_help"](command="status")  # usage + flags
-tools["git_run_command"](command="status", args=["--short"])
-
-# Optional name lookup over a large command tree:
-CLI("git", include_search=True)
-```
-
-- `base_args=["-m", "mytool"]` handles wrappers such as `python -m mytool`.
-- `name_prefix` defaults to the executable name (`gh_`).
-- `cwd`, `env`, and `timeout` configure execution; `help_timeout` bounds each
-  discovery call; `max_help_chars` caps JSON/raw help in `get_command_help`.
-- `mode="search"` (default) returns text for `dspy.ReAct`; `mode="code"`
-  returns `list[dict]` / `dict` for `dspy.RLM`.
-- `help_flag="--help"` (default) controls the help invocation. Use `"-h"`,
-  `"help"`, or a token sequence such as `("help", "commands")`; `None` skips
-  help entirely. If the help invocation is rejected or returns nothing, the
-  command itself runs so the agent can inspect that output.
-- `json_flag` is disabled by default. Pass `json_flag="--json"` to try it for
-  every command run and help call, inserted after the command path. If the
-  CLI rejects it as an unknown flag, the attempt is retried without it; real
-  failures are not retried. JSON help is kept alongside the text help used
-  for discovery, so `search_commands` (when enabled) keeps working. A
-  `--json` argument you declare in `args` or `fixed` is passed through
-  unchanged.
-- `max_output_chars` caps one command result (default `0`, unlimited). Use it
-  for token-heavy commands; prefer the CLI's own output-limit flags when
-  available. Truncation is head-only and appends a marker, so keep it off
-  when the agent parses JSON.
-- Command paths resolve lazily inside `run_command`; fetching help first is
-  optional. Run a command directly when you know its path, and call
-  `get_command_help` when flags or positional arity are unclear.
-- Help output includes parsed `Arguments:` entries and marks value-taking
-  flags as `(value)`, not boolean.
-- A usage failure appends the exact argv, an argv-list hint, and the command's
-  parsed help. The agent can fix one item and retry without another help call.
-
-The parsed flag table is best-effort. `--help` is the schema, and the raw help
-is authoritative: positional grammars such as kubectl's usage line are
-returned as text rather than turned into a fake JSON schema. Discovery runs
-with pagers disabled; when `--help` opens a man page (git) or fails, it
-retries `-h`.
-
-Only the configured executable is reachable, and every argument is passed as
-an argv item, so metacharacters are not interpreted. The program can still do
-anything its own flags allow; use a container or an MCP server for a real
-security boundary. When a CLI has an MCP server, prefer `MCP` — its schemas
-are exact rather than inferred.
-
-`CLI` is already a discovery facade: pass its tools directly to the agent
-instead of wrapping them in `Toolbox(mode="search")`. Use `Toolbox` when you
-need to combine them with other tools under one catalog.
-
-#### Explicit commands
-
-If you know exactly which commands the agent needs, pass `commands=` and skip
-`--help` discovery entirely. Each `Command` becomes one typed `dspy.Tool`:
-
-```python
-from dspy_agent_tools import Argument, CLI, Command, Option
-
-gh = CLI(
-    "gh",
-    commands=[
-        Command(
-            command="pr list",
-            name="pr_list",
-            description="List pull requests in a repository.",
-            args={
-                "repo": Argument(help="owner/name"),
-                "state": Option(
-                    "--state",
-                    default="open",
-                    choices=("open", "closed", "merged"),
-                ),
-                "limit": Option("--limit", default=30, type=int),
-                "label": Option("--label", repeatable=True),
-                "draft": Option("--draft", is_flag=True),
-            },
-            fixed=("--json",),
-        )
-    ],
-)
-# gh == [gh_pr_list]; no search_commands/get_command_help/run_command.
-```
-
-`commands=` replaces discovery for that CLI group; the `--help` tools are
-not created. Each tool name is `name_prefix + Command.name` (default prefix is
-the executable name).
-
-`Argument` and `Option` are the two public declaration helpers.
-
-- `Argument(...)` is a required positional; `Argument(default=...)` is
-  optional. Positional indices are assigned in `Command.args` order. Indices
-  must be contiguous, required positionals must come before optional ones,
-  and a repeatable positional must be last.
-- `Option("--limit", default=30, type=int)` becomes `--limit VALUE`. The
-  usecli form `Option(30, "--limit", type=int)` works too.
-- `Option("--verbose", is_flag=True)` becomes `--verbose` when true and is
-  omitted when false.
-- `Option("...", "--state")` / `Option(..., "--state")` marks a required
-  option.
-- `type=` is `str`, `int`, `float`, or `bool`.
-- `default=` makes an argument optional. Boolean flags default to `False` and
-  repeatable flags default to empty when no default is given; every other
-  argument is required.
-- `repeatable=True` repeats the flag for each value in a list.
-- `choices=` adds an enum to the schema.
-- `max_output_chars` (or the CLI's own output-limit flags) keeps search-style
-  results from dominating the context.
-- `fixed=` adds always-present argv items, such as `("--json",)`.
-- `ok_codes=` suppresses the `[exit code N]` notice for accepted exits.
-- `Command.command` accepts `"pr list"`, `"db:migrate"` (one token), or
-  `("pr", "list")`.
-
-Arguments are built as
-`[executable, *base_args, *command_tokens, *positionals, *fixed, *flags]` and
-run without a shell. The same `json_flag` probe applies to explicit commands.
-Explicit commands do not probe `--help`, so they also work for hidden
-commands and plugin commands that do not appear in help.
+Discovery starts on the first tool call; help pages are cached, and
+`tools.refresh()` drops them. Only the configured executable is reachable and
+no shell is involved. See [docs/cli.md](docs/cli.md) for the tool set,
+discovery budget, help and JSON probing, execution options, and explicit
+`Command`/`Argument`/`Option` definitions.
 
 ### With Agent Skills
 
 `Skills` loads folders that follow the [Agent Skills
 specification](https://agentskills.io/specification) — the same `SKILL.md`
-folders Claude Code, Codex, and other clients use. Point it at the folder that
-houses the skills; each immediate subdirectory with a `SKILL.md` is discovered
-at startup from its frontmatter, so only the name and description enter the
-model context. The body loads when the agent activates the skill.
+folders Claude Code, Codex, and other clients use. Each immediate subdirectory
+with a `SKILL.md` is discovered at startup, so only its name, description, and
+declared `allowed-tools` enter the model context; the body loads when the agent
+activates the skill.
 
 ```python
 import dspy
-from dspy_agent_tools import CLI, Skills, bash_exec, read_file
+from dspy_agent_tools import Skills, bash_exec
 
 skills = Skills("~/.agents/skills", ".agents/skills")
 
@@ -496,123 +320,31 @@ agent = dspy.ReAct("question -> answer", tools=skills + [bash_exec])
 worker = dspy.RLM("task -> report", tools=Skills("./skills", mode="code"))
 ```
 
-| Tool | Purpose |
-| --- | --- |
-| `list_skills()` | Names, descriptions, declared `allowed-tools`, and bundled scripts for every skill. |
-| `activate_skill(skill)` | The skill's full `SKILL.md` body plus its bundled file list and frontmatter (`allowed-tools`, `license`, `compatibility`, `metadata`). |
-| `read_skill_resource(skill, path)` | One file from `references/` or `assets/`, addressed relative to the skill folder. |
-| `run_skill_script(skill, script, args=[])` | One file from `scripts/`, run in the sandbox below. |
-
-A skill is a directory with a `SKILL.md` (YAML frontmatter carrying `name` and
-`description`) and optional `scripts/`, `references/`, and `assets/` folders:
-
-```
-sqlite-tools/
-├── SKILL.md              # name, description, metadata + instructions
-├── scripts/query.py      # executable code the agent can run
-├── references/schema.md  # documentation loaded on demand
-└── assets/report.html    # templates and data
-```
-
-- `name` must be lowercase, hyphen-separated, at most 64 characters, and match
-  the directory name; `description` is required and at most 1024 characters.
-  Skills that break the spec are skipped and reported on `skills.errors`.
-  Pass `strict=True` to raise instead.
-- A root that is itself a skill (`Skills("./pdf")`) is accepted.
-- `mode="search"` (default) returns text for `dspy.ReAct` / `dspy.ReActV2`;
-  `mode="code"` returns `list[dict]` / `dict` for `dspy.RLM`. Under
-  `mode="code"` the model also runs in a REPL, so the injected guidance says
-  that only tool calls reach the machine.
-- `name_prefix="skill_"` avoids tool-name collisions with other tools. It must
-  form valid Python identifiers (required for `dspy.RLM`, whose tools are
-  called from code), so `"skill_"` is accepted and `"sk-"` raises.
-- `scripts=False` omits `run_skill_script` and never executes skill code.
-
-#### Patching an existing agent
-
-`tools=skills` is enough on its own. `Skills(...).patch(agent)` appends the
-`<available_skills>` catalog to the instructions the model sees and adds the
-four tools to an agent that was already built. It rebuilds the inner
-predictor, so it works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`:
+`Skills(...).patch(agent)` appends the `<available_skills>` catalog and the
+skill tools to an agent that was already built. It rebuilds the inner
+predictor, so it works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`, is
+idempotent, and returns the agent:
 
 ```python
+from dspy_agent_tools import Skills, bash_exec, read_file
+
 agent = dspy.ReAct("question -> answer", tools=[bash_exec, read_file])
 Skills("./skills").patch(agent)
 ```
 
-The injected block carries the execution rules, not just the catalog: only
-`run_skill_script` can start a bundled file, and the skill's prose may call for
-host commands (`npx skills find ...`, `gh skill search ...`) or a page to read.
-`patch` names whichever it finds on the agent — host command tools
-(`bash_exec`, `CLI(...)`), fetch tools (`web_search`, `bash_curl`), or both.
-When the agent holds neither, the model is told to report the exact command
-instead of running it, and never to invent command output, search results, or
-install counts:
-
-```python
-# No shell tool: the model reports `npx skills find "git review"` for you to run.
-agent = dspy.RLM("question -> answer")
-Skills("./skills", mode="code").patch(agent)
-
-# With a CLI tool: the model runs the command for real and quotes the output.
-agent = dspy.ReAct("question -> answer", tools=list(CLI("gh")))
-Skills("./skills").patch(agent)
-```
-
-- `patch` returns the agent and is idempotent: patching twice changes nothing.
-- Patching an agent that already received `tools=skills` only adds the catalog.
-- It raises when the agent has a *different* tool with one of the skill tool
-  names; pass `name_prefix="skill_"` to resolve the collision.
-- Put every folder into one `Skills(...)` call: an agent accepts one catalog.
-
-#### Sandboxed scripts
-
-Scripts are argv-only (no shell), use an allowlisted interpreter
-(`python`, `bash`, `sh`, `node`, `deno`, `ruby`, `perl` by default), must
-resolve inside the skill folder, and run with a *replacement* environment: no
-ambient secrets, and `HOME`/`TMPDIR` point at a throwaway directory. The
-process runs in its own group, so a timeout kills any children it spawned.
-
-Where an OS sandbox is installed, it wraps the run:
-
-| Platform | Backend | Enforcement |
-| --- | --- | --- |
-| Linux | `bwrap` (preferred) | all namespaces unshared, host read-only, tmpfs `/tmp`, network unshared |
-| Linux | `firejail` (fallback) | read-only root, private `/tmp`, `--net=none` |
-| macOS | `sandbox-exec` | writes denied outside the throwaway temp dir, `network*` denied |
-| any | none | process confinement only (allowlist, path guard, env scrub, timeout) |
-
-`allow_network=False` and `allow_write=False` are the defaults, so a script
-can read the skill and the host but cannot reach the network or modify files;
-`allow_write=True` opens the skill folder, and the throwaway temp directory is
-always writable. `sandbox="auto"` uses an installed OS backend and falls back
-to process confinement with a log warning; `sandbox="required"` refuses to
-fall back; a backend name (`"bwrap"`, `"firejail"`, `"sandbox-exec"`) forces
-one and fails at construction if it is missing; `"off"` skips the OS layer.
-Use `sandbox="required"` when skill scripts are not trusted.
-
-```python
-Skills(
-    "./skills",
-    timeout=60,
-    allow_network=True,
-    allow_write=True,
-    sandbox="required",
-    interpreters=("python", "bash"),
-    max_output_chars=20_000,
-)
-```
+The injected block names the host-command and URL-reading tools the agent
+actually has. When it has neither, the model reports the exact command for you
+to run instead of inventing output. See [docs/skills.md](docs/skills.md) for
+the skill layout, validation rules, sandbox for bundled scripts, and every
+constructor option.
 
 ### Tool discovery with Toolbox
 
-`Toolbox` accepts any mix of MCP servers, regular `dspy.Tool` objects, and
-plain sync or async Python functions, and flattens nested lists. With no
-`mode` (the default, `mode=None`), it returns every tool eagerly — the same
-full load you would pass directly. With `mode="search"` or `mode="code"`, it
-keeps the catalog in the Python process and exposes three discovery tools
-instead, which matters for large catalogs: a 46-tool server such as GitHub's
-MCP endpoint costs roughly 14k tokens of function definitions on every turn
-when every tool is passed as its own `dspy.Tool`.
+`Toolbox` accepts any mix of MCP servers, `dspy.Tool` objects, and sync or
+async Python functions, and flattens nested lists. With no `mode`, it returns
+every tool eagerly. With `mode="search"` or `mode="code"`, it keeps the
+catalog in-process and exposes three discovery tools instead — useful when
+every schema would cost tokens on every turn.
 
 ```python
 from dspy_agent_tools import MCP, Toolbox, bash_exec, read_file
@@ -647,11 +379,10 @@ agent = dspy.ReActV2("question -> answer", tools=catalog)
 | `get_tool_details(name)` | Full description and JSON input schema for one tool. |
 | `call_tool(name, arguments)` | Runs that tool; MCP calls stay on the live session. |
 
-The catalog stays in the Python process, so only the tools the agent searches,
-inspects, or calls are sent to the model. `mode="code"` returns the same three
-tools with structured results — `list[dict]` from `search_tools`, `dict` from
-`get_tool_details` — so `dspy.RLM` code can compose calls without parsing
-text:
+The catalog stays in the Python process, so only tools the agent searches,
+inspects, or calls reach the model. `mode="code"` returns structured results
+(`list[dict]` from `search_tools`, `dict` from `get_tool_details`) so
+`dspy.RLM` code can compose calls without parsing text:
 
 ```python
 worker = dspy.RLM(
@@ -671,68 +402,51 @@ through the context.
 
 | | `mode="search"` | `mode="code"` |
 | --- | --- | --- |
-| Agent | `dspy.ReAct` / `dspy.ReActV2` and other tool-calling modules | `dspy.RLM` or another agent that executes Python |
+| Agent | `dspy.ReAct` / `dspy.ReActV2` | `dspy.RLM` or another Python-executing agent |
 | Return shape | text (`str`) | structured (`list[dict]`, `dict`) |
-| Orchestration | The model picks one tool per turn | The model writes code that can call many tools |
-| Intermediate results | Returned to the model as observations | Stay in the interpreter unless printed |
-| Best for | A few lookups with small results | Multi-step workflows, loops, filtering, large payloads |
-| Cost profile | Saves schema tokens; observations still enter context | Saves schema tokens and can keep large results out of context |
+| Orchestration | One tool per turn | Code can call many tools |
+| Intermediate results | Returned as observations | Stay in the REPL unless printed |
+| Best for | A few small lookups | Multi-step workflows, loops, large payloads |
+| Cost profile | Saves schema tokens; observations still enter context | Saves schema tokens; large results can stay out of context |
 | Requirement | None beyond DSPy | A working code interpreter |
 
 Use `mode="search"` when:
 
 - You are building a ReAct-style agent.
-- The task usually needs one to three tool calls with small outputs.
-- You want the safest option: the model never writes or executes code.
+- The task needs a few calls with small outputs.
+- You want the model to never write or execute code.
 - You are unsure which mode to pick — start here.
 
 Use `mode="code"` when:
 
 - You are building an RLM that can write Python.
-- The task needs several calls combined with Python logic (filter, rank,
-  join, aggregate).
-- Tool results are large and only a summary needs to reach the model. In RLM,
-  `search_tools`, `get_tool_details`, and `call_tool` are Python callables;
-  intermediate values stay in the REPL unless you `print()` them or assign
-  them to the final output.
+- The task needs several calls combined with Python logic.
+- Results are large and only a summary needs to reach the model.
 
-Skip both modes when the catalog is small (roughly fewer than ten tools) and
-the task is straightforward. The discovery round trip — search, inspect, then
-call — can cost more than just passing the function definitions directly as
-`tools=`. Omit `mode` (or pass `mode=None`) to get the full load while still
-keeping `Toolbox`'s source ownership, duplicate-name checks, and
-`name_prefix` handling.
+Skip discovery for small catalogs (roughly fewer than ten tools); the
+search/inspect/call round trip can cost more than passing definitions
+directly. Omit `mode` for the full load while keeping `Toolbox`'s source
+ownership, duplicate-name checks, and `name_prefix` handling.
 
-- Plain functions and `dspy.Tool` instances are catalogued from their DSPy
-  metadata: function name, docstring, type hints, and defaults.
-- Names must be unique (case-insensitively); pass `name_prefix="..."` or rename
-  the function. `MCP(..., name_prefix=...)` still works for MCP-side names.
-- `Toolbox` owns its sources, so `catalog.close()` (or a `with` block) stops
-  every MCP server it was given. Addition (`catalog + [other_tool]`) keeps
-  that ownership.
-- `MCP` always returns the eager tool list; pass it to `Toolbox` to get
-  discovery mode.
+- Plain functions and `dspy.Tool` instances use DSPy metadata: name,
+  docstring, type hints, and defaults.
+- Names must be unique case-insensitively; pass `name_prefix="..."` or rename.
+  `MCP(..., name_prefix=...)` still works for MCP-side names.
+- `Toolbox` owns its sources: `catalog.close()` or `with` stops every MCP
+  server; `catalog + [other_tool]` keeps that ownership.
+- `MCP` always returns the eager list; pass it to `Toolbox` for discovery.
 
 ### Batching
 
-Search tools come in single and `_batch` variants. A batch takes
-`list[dict]` — one spec per search, each with `pattern`, `path`, and
-`options` — and returns labeled sections. Use it when several independent
-lookups are needed; it saves round trips and shares one timeout across the
-batch:
+`_batch` variants accept `list[dict]` specs with `pattern`, `path`, and
+`options`, returning labeled sections with one shared timeout. Use them for
+independent lookups to save round trips:
 
 ```python
-bash_ripgrep_batch(
-    [
-        {"pattern": r"def main", "path": "src", "options": "-n"},
-        {"pattern": "TODO|FIXME", "options": "-n -i"},
-    ]
-)
-# == def main in src ==
-# src/cli.py:12:def main(args):
-# ...
-# == TODO|FIXME in . ==
-# ...
+bash_ripgrep_batch([
+    {"pattern": r"def main", "path": "src", "options": "-n"},
+    {"pattern": "TODO|FIXME", "options": "-n -i"},
+])
 ```
 
 `bash_find_batch` and `bash_glob_batch` work the same way for path lookups.
@@ -745,6 +459,10 @@ bash_ripgrep_batch(
   the file's content, and `edit_file`/`write_file`/`delete_file` reject the
   change if the file has changed since it was read, so concurrent edits can't
   be silently overwritten.
+- Browser tools drive a real headless Chrome with the caller's network reach,
+  and `browser_evaluate` runs arbitrary JavaScript in the page. Treat page
+  content as untrusted input, and use one `BrowserSession` per user or session
+  on a shared server so cookies and tabs do not leak between callers.
 - Non-zero exits, timeouts, and failed transfers are reported inline as
   `"[exit code N]"` / `"[command timed out ...]"` notices rather than raised,
   so an agent can read and recover from failures.
@@ -808,40 +526,66 @@ Shared behaviour across the bash tools:
 
 ### CLI (`dspy_agent_tools.cli`)
 
-`CLI(executable, ...)` returns `get_command_help` and `run_command` by
-default. Names are prefixed by the executable (or `name_prefix`).
-`include_search=True` adds `search_commands`. With `commands=[...]`, it
-returns one tool per explicit `Command` instead and skips discovery:
+| Tool | Use it for |
+| --- | --- |
+| **`CLI`** | Return a `CLITools` list for one executable. By default it contains `get_command_help` and `run_command`; `include_search=True` adds `search_commands`; `commands=[...]` returns one typed tool per explicit `Command` and skips discovery. Names are prefixed by `name_prefix` (default: the executable name). |
+| **`get_command_help`** | Read one path's usage, subcommands, parsed arguments and flags, JSON help, and fallback raw help. `command=""` returns the root command list. |
+| **`search_commands`** | Optional (`include_search=True`): rank command paths by name and description. |
+| **`run_command`** | Run one resolved path with raw argv strings. No shell; only the configured executable is reachable. |
+| **`Command`** | Define one explicit command: path, tool name, description, `Argument`/`Option` declarations, `fixed` argv, and `ok_codes`. |
+| **`Argument`** | Declare a required or optional positional for a `Command`. |
+| **`Option`** | Declare a flag or value option for a `Command`, including repeatable flags and choices. |
+| **`CLITools`** | `list` subclass with `.refresh()`, which drops cached help pages in discovery mode. |
+
+`mode="search"` returns text for `dspy.ReAct`; `mode="code"` returns
+`list[dict]` / `dict` for `dspy.RLM`. The parsed flag table is advisory; the
+raw help is authoritative. See [docs/cli.md](docs/cli.md).
+
+### MCP (`dspy_agent_tools.mcp`)
 
 | Tool | Use it for |
 | --- | --- |
-| **`get_command_help`** | Read one path's usage, subcommands, parsed flags, JSON help, and fallback raw help before running it. |
-| **`search_commands`** | Optional (`include_search=True`): find command paths by name or description. |
-| **`run_command`** | Run one resolved path with raw argv strings. No shell; only the configured executable is reachable. |
+| **`MCP`** | Connect to an MCP server and return its tools. `command=` runs a local stdio server; `url=` connects over Streamable HTTP; `transport="sse"` selects legacy HTTP+SSE; `transport=<factory>` takes a custom async transport. |
+| **`MCPTools`** | `list` subclass of `dspy.Tool` objects backed by one live session; supports `+`, unpacking, `with`, `async with`, and `.close()`. |
 
-The parsed flag table supports the common help formats (argparse, click,
-clap, cobra, git short help, kubectl), but it is advisory. The raw help text
-is authoritative, and `mode="code"` returns the same data as dictionaries for
-`dspy.RLM`.
+`name_prefix`, `result_mode`, `startup_timeout`, and `retry_timeout` tune the
+conversion. The server stops when the tools or list are no longer referenced.
+See [docs/mcp.md](docs/mcp.md).
 
 ### Skills (`dspy_agent_tools.skills`)
 
-`Skills(*roots, ...)` scans each root's immediate subdirectories for
-`SKILL.md` (a root that is itself a skill is accepted) and returns the
-progressive-disclosure tools. `scripts=False` omits `run_skill_script`.
+| Tool | Use it for |
+| --- | --- |
+| **`Skills`** | Scan one or more folders for `SKILL.md` skills and return a `SkillTools` list. `mode="search"` returns text; `mode="code"` returns dictionaries for `dspy.RLM`. |
+| **`list_skills`** | Names, descriptions, declared `allowed-tools`, and bundled files for every skill. |
+| **`activate_skill`** | The full `SKILL.md` body, bundled file list, and declared `allowed-tools` (code mode also returns `license`, `compatibility`, and `metadata`). |
+| **`read_skill_resource`** | One file from `references/` or `assets/`, relative to the skill folder; escapes are rejected. |
+| **`run_skill_script`** | One file from `scripts/` with an argv list, run in the sandbox; omitted when `scripts=False`. |
+| **`SkillTools`** | `list` subclass with `.skills`, `.errors`, `.catalog()`, `.instructions()`, and `.patch(agent)`. |
+
+`patch(agent)` appends the catalog and tools to an existing `dspy.ReAct`,
+`dspy.ReActV2`, or `dspy.RLM`. See [docs/skills.md](docs/skills.md).
+
+### Browser (`dspy_agent_tools.browser`)
 
 | Tool | Use it for |
 | --- | --- |
-| **`list_skills`** | Every discovered skill with its description, declared `allowed-tools`, and bundled files. Corrupt or non-conforming skills are listed at the end. |
-| **`activate_skill`** | The full `SKILL.md` body, plus `scripts/`, `references/`, and `assets/` listings, and the rest of the frontmatter (`allowed-tools`, `license`, `compatibility`, `metadata`). |
-| **`read_skill_resource`** | One `references/` or `assets/` file, addressed relative to the skill folder. `../` and absolute paths are rejected; binary files are reported rather than decoded. |
-| **`run_skill_script`** | One `scripts/` file with an argv list. The interpreter is allowlisted, the environment is replaced, and the OS sandbox is applied when available. |
+| **`Browser`** | Return the core browser tools as one `BrowserTools` list of `dspy.Tool` objects. `include_recording=True` adds video recording, `include_search=True` adds `web_search`, and `.close()` stops that list's browser session. Pass `session=BrowserSession(...)` for per-user isolation; `session.tools()` is equivalent. |
+| **`browser_open`** | Navigate to a URL and return its snapshot in one call. `format="nodes"` is the default; `format="text"` returns the compact tree, and `format="both"` returns both. |
+| **`browser`** | Run one action: `navigate`, `click`, `type`, `press`, `hover`, `select`, `scroll`, `back`, `forward`, `reload`, or `wait`. `target` accepts an `@ref`, CSS, XPath, `text=Exact`, or `text*=Partial`; `value` carries the URL, text, key, option value, scroll direction, or seconds. |
+| **`browser_snapshot`** | Return `{url, title, node_count, truncated}` plus `nodes`, `text`, or both selected by `format` (default `nodes`). Nodes carry `ref` (`@e1`), `role`, `name`, `tag`, `depth`, and relevant `value`/`href`/`checked`/`disabled`. Every snapshot clears and reassigns refs. |
+| **`browser_tabs`** | List, open, switch, and close tabs. `switch` takes an index or a URL/title substring; closing the last tab stops the browser. |
+| **`browser_network`** | Inspect recorded requests, return a response body by request id, or clear the record. |
+| **`browser_cookies`** | Read, write, clear, save, and load cookies for the current browser context. |
+| **`browser_screenshot`** | Save a PNG/JPEG/WebP (temp file by default) and return `path`, `format`, `bytes`; `full_page` captures beyond the viewport, `as_base64` returns the image inline. |
+| **`browser_evaluate`** | Run JavaScript with a `return` statement and get the value by value (`return document.title`). `await_promise` waits for promises. |
+| **`browser_record_start`** / **`browser_record_stop`** | Optional (`include_recording=True`): start and stop a CDP screencast recording. MP4 (H.264) by default, WebM/VP9 on `.webm`; uses `ffmpeg` from PATH or the optional `[ffmpeg]` extra. |
+| **`browser_close`** | Stop this tool list's browser session early; the next call starts a fresh one. An active recording is encoded and returned under `recording`. |
+| **`BrowserSession`** | Advanced: one lazily started headless browser per user/session with the same methods, plus `.tools()` for a session-bound `dspy.Tool` list and `allowed_schemes`/`url_policy` for navigation restrictions. |
 
-`Skills(...)` also exposes `skills` (the parsed `Skill` objects), `errors`
-(skipped directories), `catalog()` (the XML block), `instructions(tools=())`
-(the full block `patch` injects for a given tool set), and `patch(agent)`.
-`dspy.RLM` gets the same tools with `mode="code"`, where each returns a
-dictionary instead of text.
+Chrome runs headless by default. Actions return `{"status": "ok" | "error", ...}`;
+on failure `error` carries the reason, and a stale `@ref` asks for a fresh
+snapshot. See [docs/browser.md](docs/browser.md).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
