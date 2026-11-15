@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.1.12 (2026-11-15)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.11...v0.1.12)
+
+### 🚀 Enhancements
+
+- add browser tool (#14) (#14) ([76eb3e0](https://github.com/thememium/dspy-agent-tools/commit/76eb3e0fd88e09d1d6cc98ed153144435df24edc))
+- add skills (#13) (#13) ([d11968d](https://github.com/thememium/dspy-agent-tools/commit/d11968d640c3e887fe26bb0173289e34dde170d0))
+
+### 🎨 Styles
+
+- **readme,docs**: adjust code block formatting and spacing ([e583e8f](https://github.com/thememium/dspy-agent-tools/commit/e583e8f55620dec6890e037a3f60340e7ec1d82f))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.11 (2026-11-13)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.10...v0.1.11)
