@@ -321,16 +321,16 @@ agent = dspy.ReAct("question -> answer", tools=skills + [bash_exec])
 worker = dspy.RLM("task -> report", tools=Skills("./skills", mode="code"))
 ```
 
-`patch(agent, tools=Skills("./skills"))` appends the `<available_skills>` catalog
+`Patch(agent, tools=Skills("./skills"))` appends the `<available_skills>` catalog
 and the skill tools to an agent that was already built. It rebuilds the inner
 predictor, so it works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`, is
 idempotent, and returns the agent:
 
 ```python
-from dspy_agent_tools import Skills, bash_exec, patch, read_file
+from dspy_agent_tools import Patch, Skills, bash_exec, read_file
 
 agent = dspy.ReAct("question -> answer", tools=[bash_exec, read_file])
-patch(agent, tools=Skills("./skills"))
+Patch(agent, tools=Skills("./skills"))
 ```
 
 The injected block names the host-command and URL-reading tools the agent
@@ -341,17 +341,17 @@ constructor option.
 
 ### Adding tools to an existing agent
 
-`patch(agent, tools=..., guide=None, drop=...)` extends an agent that was
+`Patch(agent, tools=..., guide=None, drop=...)` extends an agent that was
 already built: it appends the tools and one short policy section per tool
 family present to its instructions. Any source works — `Skills(...)`,
 `MCP(...)`, `CLI(...)`, `Browser()`, `Toolbox(...)`, `dspy.Tool` objects, or
 plain functions:
 
 ```python
-from dspy_agent_tools import CLI, Skills, bash_exec, patch, read_file
+from dspy_agent_tools import CLI, Patch, Skills, bash_exec, read_file
 
 agent = dspy.ReAct("question -> answer", tools=[bash_exec])
-patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")], guide="Never commit.")
+Patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")], guide="Never commit.")
 ```
 
 The agent is rebuilt in place and returned, so it keeps working and chains.
@@ -596,14 +596,14 @@ See [docs/mcp.md](docs/mcp.md).
 | **`run_skill_script`** | One file from `scripts/` with an argv list, run in the sandbox; omitted when `scripts=False`. |
 | **`SkillTools`** | `list` subclass with `.skills`, `.errors`, `.catalog()`, and `.section(tools=())`. |
 
-`patch(agent, tools=skills)` appends the catalog and tools to an existing
+`Patch(agent, tools=skills)` appends the catalog and tools to an existing
 `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`. See [docs/skills.md](docs/skills.md).
 
 ### Patch (`dspy_agent_tools.patch`)
 
 | Tool | Use it for |
 | --- | --- |
-| **`patch`** | Add `tools=` to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`, remove `drop=`, and inject one guidance section per tool family the agent holds. `guide=` adds your own policy before those sections; `describe=False` appends tools without them. |
+| **`Patch`** | Add `tools=` to an existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`, remove `drop=`, and inject one guidance section per tool family the agent holds. `guide=` adds your own policy before those sections; `describe=False` appends tools without them. |
 
 Tools are accepted as `dspy.Tool` objects, plain functions, or lists of them.
 The sections live in `dspy_agent_tools.guide`, one per family. See
