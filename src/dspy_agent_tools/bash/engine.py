@@ -1,5 +1,6 @@
 """Select the search engine and translate rgapi kwargs to CLI flags."""
 
+import shlex
 import shutil
 from pathlib import Path
 
@@ -62,7 +63,7 @@ _NO_VALUE_FLAGS = frozenset(
 def _expand_options(options: str) -> list[str]:
     """Split an option string, splitting "--flag=value" into two tokens."""
     tokens: list[str] = []
-    for token in options.split():
+    for token in shlex.split(options):
         if token.startswith("--") and "=" in token:
             tokens.extend(token.split("=", 1))
         else:
@@ -194,9 +195,11 @@ class _CliEngine:
                 f"rgapi failed to load ({self.reason}) and neither `rg` nor "
                 "`grep` is on PATH; install ripgrep or fix the rgapi extension"
             )
-        output, _notices, _elapsed, _code = execute(
+        output, notices, _elapsed, code = execute(
             argv, cwd=cwd, timeout=_timeout_seconds(timeout_ms), ok_codes=_SEARCH_OK
         )
+        if code not in _SEARCH_OK:
+            raise ValueError("\n".join([output.strip(), *notices]).strip())
         # rgapi reports paths relative to the root ("a.py"), rg prints "./a.py".
         lines = [line.removeprefix("./") for line in output.splitlines()]
         if self._rg is None:  # grep tier: match rg's output shape
@@ -234,12 +237,14 @@ class _CliEngine:
                 f"rgapi failed to load ({self.reason}) and neither `fd` nor "
                 "`find` is on PATH; install fd or fix the rgapi extension"
             )
-        output, _notices, _elapsed, _code = execute(
+        output, notices, _elapsed, code = execute(
             argv,
             cwd=None if root is None else Path(root),
             timeout=_timeout_seconds(timeout_ms),
             ok_codes=_SEARCH_OK,
         )
+        if code not in _SEARCH_OK:
+            raise ValueError("\n".join([output.strip(), *notices]).strip())
         if self._fd is not None:
             return [Path(line) for line in output.splitlines()]
         return _found_paths(output.splitlines(), root, pattern, kwargs)
@@ -401,7 +406,7 @@ def _rg_kwargs(options: str, pattern: str) -> tuple[str, dict]:
                 kwargs["hidden"] = True
             elif tok in ("--no-ignore", "-u", "-uu", "-uuu"):
                 kwargs["ignore"] = False
-                if tok == "-u":
+                if tok in ("-uu", "-uuu"):
                     kwargs["hidden"] = True
             elif tok in ("-L", "--follow"):
                 kwargs["follow_links"] = True

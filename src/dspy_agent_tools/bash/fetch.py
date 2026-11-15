@@ -1,6 +1,7 @@
 """Fetch URLs and list directories for the curl, fetch, and ls tools."""
 
 import re
+import shlex
 
 from ..utils.process import execute, render, resolve_existing
 
@@ -87,7 +88,7 @@ def bash_curl(url: str, options: str = "-sSL") -> str:
 
     For readable page text instead of raw HTML, use bash_fetch.
     """
-    output, notices, elapsed, _ = execute(["curl", *options.split(), url])
+    output, notices, elapsed, _ = execute(["curl", *shlex.split(options), "--", url])
     return render(output, notices, elapsed)
 
 
@@ -113,7 +114,7 @@ def bash_fetch(url: str, options: str = "-sSL") -> str:
     reported with a "[exit code N]" notice and curl's error instead of the
     markdown.
     """
-    output, notices, elapsed, rc = execute(["curl", *options.split(), url])
+    output, notices, elapsed, rc = execute(["curl", *shlex.split(options), "--", url])
     if rc != 0:
         return render(output, notices, elapsed)
     if not output.strip():
@@ -190,6 +191,6 @@ def bash_ls(path: str = ".", options: str = "-la") -> str:
           "-lt" (newest first), "-1" (one per line).
     """
     output, notices, elapsed, _ = execute(
-        ["ls", *options.split(), str(resolve_existing(path))]
+        ["ls", *shlex.split(options), "--", str(resolve_existing(path))]
     )
     return render(output, notices, elapsed)
