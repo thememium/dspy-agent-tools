@@ -494,7 +494,7 @@ class TestTypeVerification:
         assert result["verified"] is False
         assert "actual" not in result
 
-    def test_contenteditable_matches_on_text(self, session):
+    def test_contenteditable_rejects_partial_text_match(self, session):
         session._get_tab()
         element = session._tab.element
         element.mirror_typing = False
@@ -502,7 +502,8 @@ class TestTypeVerification:
         element.field_state["value"] = None
         element.field_state["text"] = "draft hello world"
         result = session.browser("type", target="#note", value="hello")
-        assert result["verified"] is True
+        assert result["verified"] is False
+        assert result["actual"] == "draft hello world"
 
     def test_unreadable_field_skips_verification(self, session):
         session._get_tab()

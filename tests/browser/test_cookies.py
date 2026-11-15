@@ -8,6 +8,29 @@ from .fakes import FakeChrome, browser_module
 
 
 class TestCookies:
+    def test_set_accepts_literal_cookie_header(self, session):
+        assert session.cookies("set", "Cookie: a=1; b=2")["status"] == "ok"
+        assert [c["name"] for c in session._tab.set_cookie_calls[0]] == ["a", "b"]
+
+    def test_empty_saved_cookie_state_can_be_loaded(self, session, tmp_path):
+        target = tmp_path / "empty.json"
+        assert session.cookies("clear")["status"] == "ok"
+        assert session.cookies("save", str(target))["count"] == 0
+        assert session.cookies("load", str(target))["count"] == 0
+
+    def test_manual_cookie_load_uses_saved_url(self, session, tmp_path):
+        target = tmp_path / "state.json"
+        target.write_text(
+            json.dumps(
+                {
+                    "url": "https://original.example/",
+                    "cookies": [{"name": "sid", "value": "abc"}],
+                }
+            )
+        )
+        assert session.cookies("load", str(target))["status"] == "ok"
+        assert session._tab.set_cookie_calls[0][0]["url"] == "https://original.example/"
+
     def test_get(self, session):
         result = session.cookies()
         assert result["status"] == "ok"

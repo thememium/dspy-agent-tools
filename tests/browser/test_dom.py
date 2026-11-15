@@ -2,7 +2,15 @@
 
 import pytest
 
-from dspy_agent_tools.browser.dom import _xpath_literal
+from dspy_agent_tools.browser.dom import _verify_typed, _xpath_literal
+
+
+def test_contenteditable_verification_requires_exact_text():
+    assert (
+        _verify_typed({"value": None, "text": "prefix hello"}, "hello")["verified"]
+        is False
+    )
+    assert _verify_typed({"value": None, "text": "hello"}, "hello")["verified"] is True
 
 
 class TestXPathLiteral:

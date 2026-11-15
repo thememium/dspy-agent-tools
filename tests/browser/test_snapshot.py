@@ -4,10 +4,19 @@ import pytest
 
 from dspy_agent_tools.browser.snapshot import _render_nodes
 
-from .fakes import snapshot_response
+from .fakes import fire_console, snapshot_response
 
 
 class TestSnapshot:
+    def test_diagnostics_are_returned_once(self, session):
+        tab = session._get_tab()
+        tab.script_response = snapshot_response([])
+        fire_console(tab, "snapshot message")
+        result = session.snapshot()
+        assert result["console"][0]["text"] == "snapshot message"
+        tab.script_response = snapshot_response([])
+        assert "console" not in session.snapshot()
+
     def test_structured_nodes_and_text(self, session):
         session._get_tab()
         session._tab.script_response = snapshot_response(

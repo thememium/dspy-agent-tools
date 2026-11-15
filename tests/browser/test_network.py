@@ -5,10 +5,22 @@ from pydoll.protocol.network.events import NetworkEvent
 
 from dspy_agent_tools.browser import config, errors, tabs
 
-from .fakes import browser_module, fire_request, fire_response, watch_callback
+from .fakes import (
+    browser_module,
+    fire_console,
+    fire_request,
+    fire_response,
+    watch_callback,
+)
 
 
 class TestNetwork:
+    def test_body_includes_pending_diagnostics(self, session):
+        tab = session._get_tab()
+        fire_console(tab, "network message")
+        assert session.network("body", "1")["console"][0]["text"] == "network message"
+        assert "console" not in session.network()
+
     def test_requests_are_recorded(self, session):
         tab = session._get_tab()
         fire_request(tab)

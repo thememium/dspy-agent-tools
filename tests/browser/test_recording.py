@@ -12,6 +12,24 @@ from .fakes import frame_event, screencast_callback, screencast_callback_id
 
 
 class TestRecording:
+    @pytest.mark.parametrize("stop", ["record_stop", "close"])
+    def test_stop_after_switch_targets_recorded_tab(
+        self, session, tmp_path, fake_ffmpeg, stop
+    ):
+        assert session.record_start(path=str(tmp_path / "clip.mp4"))["status"] == "ok"
+        original = session._tab
+        screencast_callback(original)(frame_event())
+        callback_id = screencast_callback_id(original)
+        assert session.tabs("new")["status"] == "ok"
+        other = session._tab
+        assert original is not other
+        getattr(session, stop)()
+        assert original.commands[-1]["method"] == "Page.stopScreencast"
+        assert callback_id in original.removed_callbacks
+        assert not any(
+            command["method"] == "Page.stopScreencast" for command in other.commands
+        )
+
     def test_start_and_stop_encodes_video(self, session, tmp_path, fake_ffmpeg):
         state, calls = fake_ffmpeg
         result = session.record_start(
