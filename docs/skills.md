@@ -132,14 +132,14 @@ tool, rather than decoded into garbage.
 
 ## Patching an existing agent
 
-`tools=skills` is enough on its own. `patch(agent, Skills("./skills"))`
+`tools=skills` is enough on its own. `patch(agent, tools=Skills("./skills"))`
 appends the catalog and tools to an agent that was already built:
 
 ```python
 from dspy_agent_tools import Skills, bash_exec, patch, read_file
 
 agent = dspy.ReAct("question -> answer", tools=[bash_exec, read_file])
-patch(agent, Skills("./skills"))
+patch(agent, tools=Skills("./skills"))
 ```
 
 There is no `Skills.patch` method: [patch](patch.md) is the one way to extend a
@@ -155,10 +155,10 @@ the inner predictor so it works for `dspy.ReAct`, `dspy.ReActV2`, and
   its iteration, output, verbosity, sub-LM, and interpreter settings.
 - Module state such as callbacks, history, and the compiled flag is copied
   onto the patched instance.
-- It returns the agent for chaining: `agent = patch(agent, skills)`.
+- It returns the agent for chaining: `agent = patch(agent, tools=skills)`.
 
 Add other tools in the same call —
-`patch(agent, Skills("./skills"), read_file)` — or add policy of your own with
+`patch(agent, tools=[Skills("./skills"), read_file])` — or add policy of your own with
 `guide=`.
 
 The injected block carries execution rules, not just the catalog. Only
@@ -180,13 +180,13 @@ install counts:
 ```python
 # No shell tool: the model reports `npx skills find "git review"` for you to run.
 agent = dspy.RLM("question -> answer")
-patch(agent, Skills("./skills", mode="code"))
+patch(agent, tools=Skills("./skills", mode="code"))
 
 # With a CLI tool: the model runs the command for real and quotes the output.
 from dspy_agent_tools import CLI
 
 agent = dspy.ReAct("question -> answer", tools=list(CLI("gh")))
-patch(agent, Skills("./skills"))
+patch(agent, tools=Skills("./skills"))
 ```
 
 Rules:
