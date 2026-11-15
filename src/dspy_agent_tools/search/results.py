@@ -10,8 +10,11 @@ from .config import SearchKind
 
 def _clean_url(url: str) -> str:
     """Unwrap DuckDuckGo redirect links to the real target."""
-    if "duckduckgo.com/l/" in url and "uddg=" in url:
-        parsed = urllib.parse.urlparse(url.replace("//", "https://"))
+    parsed = urllib.parse.urlparse("https:" + url if url.startswith("//") else url)
+    if (
+        parsed.hostname in ("duckduckgo.com", "www.duckduckgo.com")
+        and parsed.path == "/l/"
+    ):
         qs = urllib.parse.parse_qs(parsed.query)
         if "uddg" in qs:
             return qs["uddg"][0]
