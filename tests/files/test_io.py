@@ -56,11 +56,13 @@ class TestWriteFile:
         with pytest.raises(RuntimeError, match="changed since it was read"):
             write_file(str(f), "new\n", snapshot=stale)
 
-    def test_snapshot_on_missing_file_skips_check(self, tmp_path):
+    def test_snapshot_on_deleted_file_rejects_write(self, tmp_path):
         f = tmp_path / "f.txt"
-        snap = write_file(str(f), "fresh\n", snapshot=_hash("whatever\n"))
-        assert f.read_text() == "fresh\n"
-        assert snap == _hash("fresh\n")
+        snapshot = write_file(str(f), "original\n")
+        f.unlink()
+        with pytest.raises(RuntimeError, match="changed since it was read"):
+            write_file(str(f), "fresh\n", snapshot=snapshot)
+        assert not f.exists()
 
 
 class TestDeleteFile:

@@ -1,5 +1,7 @@
 """Tests for dspy_agent_tools.files.edit."""
 
+import ast
+
 import pytest
 from tree_sitter_language_pack import get_parser
 
@@ -129,6 +131,50 @@ class TestUnnumber:
 
 
 class TestEditTextFuzzy:
+    def test_ambiguous_fuzzy_matches_leave_file_unchanged(self, tmp_path):
+        f = tmp_path / "f.py"
+        original = "def alpha():\n    return 1\n\ndef beta():\n    return 2\n"
+        f.write_text(original)
+        with pytest.raises(ValueError, match="equally similar"):
+            edit_file(
+                str(f), _hash(original), old_text="    retun 0", new_text="    return 3"
+            )
+        assert f.read_text() == original
+
+    def test_fuzzy_indented_replacement_does_not_double_indent(self, tmp_path):
+        f = tmp_path / "f.py"
+        original = "class A:\n    def method(self):\n        return 1\n"
+        f.write_text(original)
+        edit_file(
+            str(f),
+            _hash(original),
+            old_text="    def method(self):\n        retun 1",
+            new_text="    def method(self):\n        return 2",
+        )
+        assert f.read_text() == original.replace("return 1", "return 2")
+        ast.parse(f.read_text())
+
+    @pytest.mark.parametrize("threshold", [-1, 1.1, float("nan")])
+    def test_invalid_similarity_rejected(self, tmp_path, threshold):
+        f = tmp_path / "f.txt"
+        f.write_text("hello")
+        with pytest.raises(ValueError, match="min_similarity"):
+            edit_file(
+                str(f),
+                _hash("hello"),
+                old_text="hello",
+                new_text="bye",
+                min_similarity=threshold,
+            )
+        assert f.read_text() == "hello"
+
+    def test_empty_old_text_cannot_insert_into_empty_file(self, tmp_path):
+        f = tmp_path / "f.txt"
+        f.write_text("")
+        with pytest.raises(ValueError, match="non-empty"):
+            edit_file(str(f), _hash(""), old_text="", new_text="oops")
+        assert f.read_text() == ""
+
     def test_fuzzy_repairs_drifted_text(self, tmp_path):
         f = tmp_path / "f.txt"
         f.write_text(SAMPLE)
@@ -264,6 +310,20 @@ class TestEditBlock:
             new_text='    def draw(self):\n        return "ink"\n',
         )
         assert 'return "ink"' in f.read_text()
+        assert f.read_text() == SAMPLE.replace('return "drawn"', 'return "ink"')
+        ast.parse(f.read_text())
+
+    def test_nested_method_accepts_unindented_replacement(self, tmp_path):
+        f = tmp_path / "mod.py"
+        f.write_text(SAMPLE)
+        edit_file(
+            str(f),
+            _hash(SAMPLE),
+            block="Canvas.draw",
+            new_text='def draw(self):\n    return "ink"\n',
+        )
+        assert f.read_text() == SAMPLE.replace('return "drawn"', 'return "ink"')
+        ast.parse(f.read_text())
 
     def test_other_blocks_survive(self, tmp_path):
         f = tmp_path / "mod.py"
