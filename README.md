@@ -117,40 +117,6 @@ SDK 2.x). Importing `MCP` works without it; calling `MCP()` raises an
 uv add "dspy-agent-tools[mcp]"
 ```
 
-### Basic Usage with dspy.ReAct
-
-Import the tools you need and put them in the `tools` list:
-
-```python
-import dspy
-from dspy_agent_tools import web_search, bash_fetch
-
-haiku_bot = dspy.ReAct(
-    "location -> haiku",
-    tools=[web_search, bash_fetch],
-)
-
-result = haiku_bot(location="Camp Meeker")
-print(result.haiku)
-```
-
-### Basic Usage with dspy.RLM
-
-The same functions go into `dspy.RLM`'s `tools` list, where they are injected
-into the REPL namespace and callable from the model's generated code:
-
-```python
-import dspy
-from dspy_agent_tools import bash_exec, read_file, edit_file
-
-rlm = dspy.RLM(
-    "task -> report",
-    tools=[bash_exec, read_file, edit_file],
-)
-
-result = rlm(task="Add a docstring to every public function in src/utils.py")
-```
-
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- USAGE -->
