@@ -133,8 +133,30 @@ class TestComposition:
         with pytest.raises(ValueError, match="different tool named 'read_file'"):
             Patch(agent, tools=read_file)
 
+    def test_conflicting_incoming_tool_names_rejected_before_mutation(self):
+        agent = dspy.ReAct(QA, tools=[])
+        first = dspy.Tool(lambda: "first", name="duplicate")
+        second = dspy.Tool(lambda: "second", name="duplicate")
+        before = dict(cast(Any, agent.tools))
+        with pytest.raises(ValueError, match="different tool named 'duplicate'"):
+            Patch(agent, tools=[first, second])
+        assert agent.tools == before
+
 
 class TestBehavior:
+    @pytest.mark.parametrize("module", [dspy.ReAct, dspy.ReActV2, dspy.RLM])
+    def test_patch_preserves_predictor_lms_and_configuration(self, module):
+        agent = module(QA, tools=[])
+        lm = DummyLM([])
+        agent.set_lm(lm)
+        for _, predictor in agent.named_predictors():
+            predictor.config["temperature"] = 0.25
+        Patch(agent, tools=read_file)
+        assert agent.predictors()
+        for predictor in agent.predictors():
+            assert predictor.lm is lm
+            assert predictor.config["temperature"] == 0.25
+
     def test_patched_loop_can_call_the_new_tool(self, tmp_path):
         target = tmp_path / "notes.txt"
         target.write_text("patched in")
