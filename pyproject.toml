@@ -15,6 +15,7 @@ license-files = ["LICEN[CS]E*"]
 dependencies = [
   "beautifulsoup4>=4.15.0",
   "ddgs>=9.16.0",
+  "jsonschema>=4.25.0",
   "markdownify>=1.2.3",
   "plumbum>=2.0.2",
   "pyyaml>=6.0.3",
@@ -25,7 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 browser = ["dspy>=3.1", "pydoll-python>=3.0.1"]
 ffmpeg = ["imageio-ffmpeg>=0.8.1"]
-mcp = ["dspy>=3.1", "httpx2>=2.10", "mcp>=2"]
+mcp = ["dspy>=3.4.1", "httpx2>=2.10", "mcp>=2"]
 
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]
@@ -35,7 +36,7 @@ build-backend = "uv_build"
 dev = [
   "bandit>=1.9.4",
   "deptry>=0.25.1",
-  "dspy>=3.1",
+  "dspy>=3.4.1",
   "httpx2>=2.10",
   "isort>=9.0.2",
   "mcp>=2",

@@ -733,6 +733,7 @@ source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "ddgs" },
+    { name = "jsonschema" },
     { name = "markdownify" },
     { name = "plumbum" },
     { name = "pyyaml" },
@@ -776,9 +777,10 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "ddgs", specifier = ">=9.16.0" },
     { name = "dspy", marker = "extra == 'browser'", specifier = ">=3.1" },
-    { name = "dspy", marker = "extra == 'mcp'", specifier = ">=3.1" },
+    { name = "dspy", marker = "extra == 'mcp'", specifier = ">=3.4.1" },
     { name = "httpx2", marker = "extra == 'mcp'", specifier = ">=2.10" },
     { name = "imageio-ffmpeg", marker = "extra == 'ffmpeg'", specifier = ">=0.8.1" },
+    { name = "jsonschema", specifier = ">=4.25.0" },
     { name = "markdownify", specifier = ">=1.2.3" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2" },
     { name = "plumbum", specifier = ">=2.0.2" },
@@ -793,7 +795,7 @@ provides-extras = ["browser", "ffmpeg", "mcp"]
 dev = [
     { name = "bandit", specifier = ">=1.9.4" },
     { name = "deptry", specifier = ">=0.25.1" },
-    { name = "dspy", specifier = ">=3.1" },
+    { name = "dspy", specifier = ">=3.4.1" },
     { name = "httpx2", specifier = ">=2.10" },
     { name = "isort", specifier = ">=9.0.2" },
     { name = "mcp", specifier = ">=2" },
