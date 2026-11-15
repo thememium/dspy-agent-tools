@@ -929,7 +929,7 @@ def Skills(
         >>> agent = dspy.ReAct("question -> answer", tools=skills)
 
         >>> agent = dspy.ReAct("question -> answer", tools=[bash_exec])
-        >>> dspy_agent_tools.patch(agent, Skills("./skills"))
+        >>> dspy_agent_tools.patch(agent, tools=Skills("./skills"))
 
         >>> rlm = dspy.RLM("task -> report", tools=Skills("./skills", mode="code"))
     """
