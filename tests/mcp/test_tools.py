@@ -5,10 +5,12 @@ import importlib
 import inspect
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import ClassVar
 
 import dspy
 import pytest
 from dspy.utils.dummies import DummyLM
+from mcp.types import Tool as MCPTool
 
 from dspy_agent_tools import MCP, MCPTools
 from dspy_agent_tools.mcp.retry import _HTTPFailures
@@ -58,6 +60,18 @@ class TestToolCalls:
 
 
 class TestComposition:
+    def test_combined_list_closes_both_servers(self):
+        first = start(name_prefix="a_")
+        second = start(name_prefix="b_")
+        try:
+            combined = first + second
+            combined.close()
+            assert first._connections[0].closed
+            assert second._connections[0].closed
+        finally:
+            first.close()
+            second.close()
+
     def test_adds_regular_tools_and_keeps_handle(self, tools):
         def shout(text: str) -> str:
             """Uppercase the text."""
@@ -349,3 +363,81 @@ def _fake_streamable_sdk():
         streamable_http_client=streamable_http_client,
         create_mcp_http_client=create_mcp_http_client,
     )
+
+
+class TestPaginatedDiscovery:
+    @pytest.fixture
+    def connection(self, monkeypatch):
+        class Session:
+            cursors: ClassVar[list] = []
+            pages: ClassVar[dict] = {
+                None: SimpleNamespace(
+                    tools=[MCPTool(name="first", input_schema={"type": "object"})],
+                    next_cursor="page2",
+                ),
+                "page2": SimpleNamespace(
+                    tools=[MCPTool(name="second", input_schema={"type": "object"})],
+                    next_cursor=None,
+                ),
+            }
+
+            async def list_tools(self, *, params=None):
+                cursor = None if params is None else params.cursor
+                self.cursors.append(cursor)
+                return self.pages[cursor]
+
+        class Connection:
+            def __init__(self, *args, **kwargs):
+                self.session = Session()
+                self.closed = False
+                self.timeouts = []
+
+            def run(self, coro, timeout=None):
+                self.timeouts.append(timeout)
+                return asyncio.run(coro)
+
+            def close(self):
+                self.closed = True
+
+        made = []
+
+        def connect(*args, **kwargs):
+            result = Connection()
+            made.append(result)
+            return result
+
+        monkeypatch.setattr(tools_module, "_Connection", connect)
+        return made, Session
+
+    def test_collects_every_page_with_a_deadline(self, connection):
+        made, _ = connection
+        with MCP(command="unused", startup_timeout=2) as tools:
+            assert [tool.name for tool in tools] == ["first", "second"]
+            assert made[0].session.cursors == [None, "page2"]
+            assert all(0 < timeout <= 2 for timeout in made[0].timeouts)
+        assert made[0].closed
+
+    def test_repeated_cursor_closes_connection(self, connection):
+        made, session = connection
+        session.pages["page2"].next_cursor = "page2"
+        with pytest.raises(RuntimeError, match="repeated pagination cursor"):
+            MCP(command="unused")
+        assert made[0].closed
+
+    def test_empty_string_is_an_opaque_cursor(self, connection):
+        made, session = connection
+        session.pages[None].next_cursor = ""
+        session.pages[""] = session.pages.pop("page2")
+        with MCP(command="unused") as tools:
+            assert [tool.name for tool in tools] == ["first", "second"]
+            assert made[0].session.cursors == [None, ""]
+
+    def test_handshake_cannot_use_up_listing_budget(self, connection, monkeypatch):
+        made, _ = connection
+        times = iter([0.0, 2.0])
+        monkeypatch.setattr(
+            tools_module, "time", SimpleNamespace(monotonic=lambda: next(times))
+        )
+        with pytest.raises(TimeoutError, match="tool listing exceeded"):
+            MCP(command="unused", startup_timeout=1)
+        assert made[0].closed

@@ -29,6 +29,35 @@ from .helpers import start, tools_module
 
 
 class TestLifecycle:
+    def test_timed_out_run_cancels_remote_work(self, tools):
+        cancelled = threading.Event()
+
+        async def delayed():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        with pytest.raises(TimeoutError):
+            tools._connections[0].run(delayed(), timeout=0.05)
+        assert cancelled.wait(timeout=1)
+
+    def test_paginated_server_exposes_callable_tools_from_every_page(self):
+        server = Path(__file__).parents[1] / "fixtures" / "paginated_server.py"
+        with MCP(command=sys.executable, args=[str(server)]) as tools:
+            assert [tool.name for tool in tools] == ["first", "second"]
+            assert tools[1]() == "second"
+
+    def test_startup_timeout_also_bounds_tool_listing(self):
+        server = Path(__file__).parents[1] / "fixtures" / "paginated_server.py"
+        with pytest.raises(TimeoutError):
+            MCP(
+                command=sys.executable,
+                args=[str(server), "--slow-list"],
+                startup_timeout=1,
+            )
+
     def test_server_stops_when_tools_are_collected(self):
         tools = start()
         connection = tools._connections[0]

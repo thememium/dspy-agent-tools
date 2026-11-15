@@ -98,11 +98,83 @@ class TestInternals:
         assert signature.parameters["query"].default is inspect.Parameter.empty
         assert signature.parameters["limit"].default == 10
         assert signature.parameters["note"].default is None
+        parameters = tool.format_as_litellm_function_call()["function"]["parameters"]
+        assert parameters["required"] == ["query"]
 
         assert tool(query="dspy", limit=None, note=None) == []
         assert session.arguments == {"query": "dspy"}
         assert asyncio.run(tool.acall(query="rlm", limit=None, note=None)) == []
         assert session.arguments == {"query": "rlm"}
+
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            {"type": ["string", "null"]},
+        ],
+    )
+    def test_nullable_mcp_argument_reaches_server(self, schema):
+        seen = []
+
+        class Session:
+            async def call_tool(self, name, arguments=None):
+                seen.append(arguments)
+                return SimpleNamespace(content=[], is_error=False)
+
+        session = Session()
+        advertised = MCPTool(
+            name="clear",
+            input_schema={
+                "type": "object",
+                "properties": {"value": schema},
+                "required": ["value"],
+            },
+        )
+        base = dspy.Tool.from_mcp_tool(
+            session, adapter_module._dspy_compatible(advertised)
+        )
+        assert advertised.input_schema["properties"]["value"] == schema
+        tool = adapter_module._as_sync_capable(
+            base,
+            adapter_module._mcp_signature(
+                advertised, base.args or {}, base.arg_types or {}
+            ),
+        )
+        assert tool(value=None) == []
+        assert asyncio.run(tool.acall(value=None)) == []
+        assert seen == [{"value": None}, {"value": None}]
+
+    def test_non_python_parameter_names_use_kwargs(self):
+        advertised = MCPTool(
+            name="lookup",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "class": {"type": "string"},
+                    "repo-name": {"type": "string"},
+                    "kwargs": {"type": "integer"},
+                },
+                "required": ["class", "repo-name"],
+            },
+        )
+        signature = adapter_module._mcp_signature(
+            advertised, advertised.input_schema["properties"], {}
+        )
+        bound = signature.bind(**{"class": "A", "repo-name": "org/repo", "kwargs": 1})
+        assert bound.arguments["_kwargs"] == {"class": "A", "repo-name": "org/repo"}
+
+        class Session:
+            async def call_tool(self, name, arguments=None):
+                return SimpleNamespace(content=[], is_error=False)
+
+        base = dspy.Tool.from_mcp_tool(
+            Session(), adapter_module._dspy_compatible(advertised)
+        )
+        tool = adapter_module._as_sync_capable(base, signature)
+        assert tool(**{"class": "A", "repo-name": "org/repo", "kwargs": 1}) == []
+        assert tool.format_as_litellm_function_call()["function"]["parameters"][
+            "required"
+        ] == ["class", "repo-name"]
 
     def test_mcp_signature_tolerates_alternate_schemas(self):
         signature = adapter_module._mcp_signature(
