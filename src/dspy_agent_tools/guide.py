@@ -206,4 +206,15 @@ def sections(tools: Sequence[Any], skip: frozenset[str] = frozenset()) -> list[s
     return blocks
 
 
-__all__ = ["Family", "family_of", "names_in", "sections"]
+def present_keys(text: str) -> frozenset[str]:
+    """Family keys whose section heading already appears in ``text``.
+
+    A caller who wrote their own ``## Shell`` paragraph keeps it: ``patch``
+    skips the template it would otherwise add.
+    """
+    return frozenset(
+        family.key for family in _FAMILIES if f"## {family.heading}" in text
+    )
+
+
+__all__ = ["Family", "family_of", "names_in", "present_keys", "sections"]
