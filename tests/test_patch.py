@@ -297,14 +297,69 @@ class TestBehavior:
         assert "patched in" in content
         assert prediction.answer == "patched in"
 
-    def test_skills_patch_is_the_generic_patch(self):
+    def test_skills_source_injects_the_catalog_once(self):
         agent = dspy.ReAct(QA, tools=[])
         skills = Skills(SKILLS)
 
-        skills.patch(agent)
-        patched_with = react_instructions(agent)
+        patch(agent, skills)
+        patch(agent, skills)
 
-        other = dspy.ReAct(QA, tools=[])
-        patch(other, skills)
+        text = react_instructions(agent)
+        assert text.count("<available_skills>") == 1
+        assert text.count("<!-- dspy-agent-tools:begin -->") == 1
 
-        assert react_instructions(other) == patched_with
+
+class TestManagedRegion:
+    def test_edited_guide_replaces_the_old_copy(self):
+        agent = dspy.ReAct(QA, tools=[])
+
+        patch(agent, read_file, guide="Never commit.")
+        patch(agent, read_file, guide="Never push.")
+
+        text = react_instructions(agent)
+        assert "Never push." in text
+        assert "Never commit." not in text
+        assert text.count("<!-- dspy-agent-tools:begin -->") == 1
+
+    def test_guide_is_kept_when_a_later_call_omits_it(self):
+        agent = dspy.ReAct(QA, tools=[])
+
+        patch(agent, read_file, guide="Never commit.")
+        patch(agent, bash_exec)
+
+        text = react_instructions(agent)
+        assert "Never commit." in text
+        assert "## Files" in text
+        assert "## Shell" in text
+
+    def test_empty_guide_clears_it(self):
+        agent = dspy.ReAct(QA, tools=[])
+
+        patch(agent, read_file, guide="Never commit.")
+        patch(agent, guide="")
+
+        text = react_instructions(agent)
+        assert "Never commit." not in text
+        assert "## Files" in text
+
+    def test_hand_written_section_is_left_alone(self):
+        signature = QA.with_instructions("## Shell\n\nOnly run the shell for tests.")
+        agent = dspy.ReAct(signature, tools=[])
+
+        patch(agent, bash_exec)
+
+        text = react_instructions(agent)
+        assert text.count("## Shell") == 1
+        assert "These run host commands" not in text
+
+    def test_compiled_demos_are_reported_before_they_are_dropped(self, caplog):
+        agent = dspy.ReAct(QA, tools=[])
+        agent.react.demos = [
+            dspy.Example(question="q", answer="a").with_inputs("question")
+        ]
+
+        with caplog.at_level("WARNING", logger="dspy_agent_tools.patch"):
+            patch(agent, read_file)
+
+        assert "drops 1 few-shot demo" in caplog.text
+        assert agent.react.demos == []
