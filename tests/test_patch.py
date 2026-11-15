@@ -10,11 +10,11 @@ import pytest
 from dspy.utils.dummies import DummyLM
 
 from dspy_agent_tools import (
+    Patch,
     Skills,
     Toolbox,
     bash_exec,
     delete_file,
-    patch,
     read_file,
     web_search,
     write_file,
@@ -40,7 +40,7 @@ class TestSections:
     def test_one_section_per_family_present(self):
         agent = dspy.ReAct(QA, tools=[bash_exec], max_iters=2)
 
-        patch(agent, tools=[read_file, web_search])
+        Patch(agent, tools=[read_file, web_search])
 
         text = react_instructions(agent)
         assert "## Shell" in text
@@ -52,7 +52,7 @@ class TestSections:
     def test_heading_lists_the_tool_names_it_covers(self):
         agent = dspy.ReAct(QA, tools=[bash_exec])
 
-        patch(agent, tools=[read_file, write_file, delete_file])
+        Patch(agent, tools=[read_file, write_file, delete_file])
 
         assert "## Files — `delete_file`, `read_file`, `write_file`" in (
             react_instructions(agent)
@@ -61,7 +61,7 @@ class TestSections:
     def test_guide_text_comes_first(self):
         agent = dspy.ReAct(QA, tools=[bash_exec])
 
-        patch(agent, tools=read_file, guide="Files under vendor/ are read-only.")
+        Patch(agent, tools=read_file, guide="Files under vendor/ are read-only.")
 
         text = react_instructions(agent)
         assert text.index("Files under vendor/ are read-only.") < text.index("## Shell")
@@ -69,7 +69,7 @@ class TestSections:
     def test_describe_false_adds_tools_without_sections(self):
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=read_file, describe=False)
+        Patch(agent, tools=read_file, describe=False)
 
         assert "read_file" in cast(Any, agent.tools)
         assert "## Files" not in react_instructions(agent)
@@ -81,7 +81,7 @@ class TestSections:
 
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=ping)
+        Patch(agent, tools=ping)
 
         assert "ping" in cast(Any, agent.tools)
         assert "##" not in react_instructions(agent)
@@ -89,7 +89,7 @@ class TestSections:
     def test_toolbox_facade_gets_its_own_section(self):
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=Toolbox([bash_exec, read_file], mode="search"))
+        Patch(agent, tools=Toolbox([bash_exec, read_file], mode="search"))
 
         text = react_instructions(agent)
         assert "## On-demand tools" in text
@@ -102,7 +102,7 @@ class TestSections:
 
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=shell)
+        Patch(agent, tools=shell)
 
         assert "## Shell — `shell`" in react_instructions(agent)
 
@@ -114,7 +114,7 @@ class TestSections:
         call_tool.__module__ = "dspy_agent_tools.mcp"
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=call_tool)
+        Patch(agent, tools=call_tool)
 
         text = react_instructions(agent)
         assert "## MCP\n\n" in text
@@ -132,14 +132,14 @@ class TestSections:
 
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=[make(index) for index in range(10)])
+        Patch(agent, tools=[make(index) for index in range(10)])
 
         assert "+2 more" in react_instructions(agent)
 
     def test_skills_source_replaces_the_template(self):
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=Skills(SKILLS))
+        Patch(agent, tools=Skills(SKILLS))
 
         text = react_instructions(agent)
         assert "<available_skills>" in text
@@ -150,7 +150,7 @@ class TestModules:
     def test_patches_react_in_place(self):
         agent = dspy.ReAct(QA, tools=[], max_iters=3)
 
-        returned = patch(agent, tools=read_file)
+        returned = Patch(agent, tools=read_file)
 
         assert returned is agent
         assert set(cast(Any, agent.tools)) == {"read_file", "finish"}
@@ -163,7 +163,7 @@ class TestModules:
     def test_patches_react_v2(self):
         agent = dspy.ReActV2(QA, tools=[])
 
-        patch(agent, tools=read_file)
+        Patch(agent, tools=read_file)
 
         assert "read_file" in cast(Any, agent.tools)
         assert "## Files" in react_instructions(agent)
@@ -171,7 +171,7 @@ class TestModules:
     def test_patches_rlm(self):
         agent = dspy.RLM(QA, tools=[], max_iters=2)
 
-        patch(agent, tools=read_file)
+        Patch(agent, tools=read_file)
 
         assert "read_file" in cast(Any, agent._user_tools)
         assert "## Files" in rlm_instructions(agent)
@@ -179,14 +179,14 @@ class TestModules:
     def test_rlm_is_told_the_repl_cannot_spawn_processes(self):
         agent = dspy.RLM(QA, tools=[])
 
-        patch(agent, tools=read_file)
+        Patch(agent, tools=read_file)
 
         assert "cannot spawn processes" in rlm_instructions(agent)
 
     def test_react_is_not_told_about_a_repl(self):
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=read_file)
+        Patch(agent, tools=read_file)
 
         assert "REPL" not in react_instructions(agent)
 
@@ -194,35 +194,35 @@ class TestModules:
         agent = dspy.ReAct(QA, tools=[], max_iters=4)
         agent.callbacks = ["marker"]
 
-        patch(agent, tools=read_file)
+        Patch(agent, tools=read_file)
 
         assert agent.callbacks == ["marker"]
         assert agent.max_iters == 4
 
     def test_unsupported_modules_are_rejected(self):
         with pytest.raises(TypeError, match="supports dspy.ReAct"):
-            patch(dspy.Predict(QA), tools=read_file)
+            Patch(dspy.Predict(QA), tools=read_file)
 
     def test_missing_signature_is_rejected(self):
         with pytest.raises(TypeError, match="signature"):
-            patch(object(), tools=read_file)
+            Patch(object(), tools=read_file)
 
     def test_string_sources_are_rejected(self):
         agent = dspy.ReAct(QA, tools=[])
 
         with pytest.raises(TypeError, match="takes tools"):
-            patch(agent, tools="read_file")
+            Patch(agent, tools="read_file")
 
     def test_non_iterable_sources_are_rejected(self):
         agent = dspy.ReAct(QA, tools=[])
 
         with pytest.raises(TypeError, match="takes tools"):
-            patch(agent, tools=object())
+            Patch(agent, tools=object())
 
     def test_describe_false_still_keeps_the_guide(self):
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=read_file, guide="Stay in the repo.", describe=False)
+        Patch(agent, tools=read_file, guide="Stay in the repo.", describe=False)
 
         text = react_instructions(agent)
         assert "Stay in the repo." in text
@@ -233,8 +233,8 @@ class TestComposition:
     def test_patching_twice_keeps_both_families(self):
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=read_file)
-        patch(agent, tools=bash_exec)
+        Patch(agent, tools=read_file)
+        Patch(agent, tools=bash_exec)
 
         text = react_instructions(agent)
         assert "## Files" in text
@@ -243,11 +243,11 @@ class TestComposition:
 
     def test_repeated_patch_is_a_no_op(self):
         agent = dspy.ReAct(QA, tools=[])
-        patch(agent, tools=[read_file, bash_exec], guide="Stay in the repo.")
+        Patch(agent, tools=[read_file, bash_exec], guide="Stay in the repo.")
         before = dict(cast(Any, agent.tools))
         text = react_instructions(agent)
 
-        patch(agent, tools=[read_file, bash_exec], guide="Stay in the repo.")
+        Patch(agent, tools=[read_file, bash_exec], guide="Stay in the repo.")
 
         assert dict(cast(Any, agent.tools)) == before
         assert react_instructions(agent) == text
@@ -255,7 +255,7 @@ class TestComposition:
     def test_patching_an_agent_that_already_has_the_tools_adds_guidance(self):
         agent = dspy.ReAct(QA, tools=[read_file])
 
-        patch(agent, tools=read_file)
+        Patch(agent, tools=read_file)
 
         assert sum(name == "read_file" for name in cast(Any, agent.tools)) == 1
         assert "## Files" in react_instructions(agent)
@@ -264,7 +264,7 @@ class TestComposition:
         agent = dspy.ReAct(QA, tools=[dspy.Tool(lambda: "x", name="read_file")])
 
         with pytest.raises(ValueError, match="different tool named 'read_file'"):
-            patch(agent, tools=read_file)
+            Patch(agent, tools=read_file)
 
 
 class TestBehavior:
@@ -273,7 +273,7 @@ class TestBehavior:
         target.write_text("patched in")
 
         agent = dspy.ReAct(QA, tools=[], max_iters=3)
-        patch(agent, tools=read_file)
+        Patch(agent, tools=read_file)
         lm = DummyLM(
             [
                 {
@@ -301,8 +301,8 @@ class TestBehavior:
         agent = dspy.ReAct(QA, tools=[])
         skills = Skills(SKILLS)
 
-        patch(agent, tools=skills)
-        patch(agent, tools=skills)
+        Patch(agent, tools=skills)
+        Patch(agent, tools=skills)
 
         text = react_instructions(agent)
         assert text.count("<available_skills>") == 1
@@ -313,7 +313,7 @@ class TestDrop:
     def test_drop_revokes_a_tool_and_its_section(self):
         agent = dspy.ReAct(QA, tools=[bash_exec, read_file])
 
-        patch(agent, drop="bash_exec")
+        Patch(agent, drop="bash_exec")
 
         assert set(cast(Any, agent.tools)) == {"read_file", "finish"}
         text = react_instructions(agent)
@@ -323,17 +323,17 @@ class TestDrop:
     def test_drop_takes_a_tool_or_a_list(self):
         agent = dspy.ReAct(QA, tools=[bash_exec, read_file, write_file])
 
-        patch(agent, drop=[read_file, "write_file"])
+        Patch(agent, drop=[read_file, "write_file"])
 
         assert set(cast(Any, agent.tools)) == {"bash_exec", "finish"}
 
     def test_unknown_drop_names_warn_and_change_nothing(self, caplog):
         agent = dspy.ReAct(QA, tools=[bash_exec])
-        patch(agent)
+        Patch(agent)
         before = react_instructions(agent)
 
         with caplog.at_level("WARNING", logger="dspy_agent_tools.patch"):
-            patch(agent, drop="bash_exce")
+            Patch(agent, drop="bash_exce")
 
         assert "no tool named bash_exce" in caplog.text
         assert set(cast(Any, agent.tools)) == {"bash_exec", "finish"}
@@ -342,10 +342,10 @@ class TestDrop:
     def test_dropping_the_same_tool_twice_is_harmless(self, caplog):
         agent = dspy.ReAct(QA, tools=[bash_exec, read_file])
 
-        patch(agent, drop="bash_exec")
+        Patch(agent, drop="bash_exec")
         after_first = react_instructions(agent)
         with caplog.at_level("WARNING", logger="dspy_agent_tools.patch"):
-            patch(agent, drop="bash_exec")
+            Patch(agent, drop="bash_exec")
 
         assert react_instructions(agent) == after_first
 
@@ -353,21 +353,21 @@ class TestDrop:
         agent = dspy.ReAct(QA, tools=[])
 
         with pytest.raises(ValueError, match="in both tools= and drop="):
-            patch(agent, tools=read_file, drop="read_file")
+            Patch(agent, tools=read_file, drop="read_file")
 
     def test_internal_tools_cannot_be_dropped(self):
         agent = dspy.ReAct(QA, tools=[read_file])
 
         with pytest.raises(ValueError, match="cannot be dropped"):
-            patch(agent, drop="finish")
+            Patch(agent, drop="finish")
 
 
 class TestManagedRegion:
     def test_edited_guide_replaces_the_old_copy(self):
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=read_file, guide="Never commit.")
-        patch(agent, tools=read_file, guide="Never push.")
+        Patch(agent, tools=read_file, guide="Never commit.")
+        Patch(agent, tools=read_file, guide="Never push.")
 
         text = react_instructions(agent)
         assert "Never push." in text
@@ -377,8 +377,8 @@ class TestManagedRegion:
     def test_guide_is_kept_when_a_later_call_omits_it(self):
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=read_file, guide="Never commit.")
-        patch(agent, tools=bash_exec)
+        Patch(agent, tools=read_file, guide="Never commit.")
+        Patch(agent, tools=bash_exec)
 
         text = react_instructions(agent)
         assert "Never commit." in text
@@ -388,8 +388,8 @@ class TestManagedRegion:
     def test_empty_guide_clears_it(self):
         agent = dspy.ReAct(QA, tools=[])
 
-        patch(agent, tools=read_file, guide="Never commit.")
-        patch(agent, guide="")
+        Patch(agent, tools=read_file, guide="Never commit.")
+        Patch(agent, guide="")
 
         text = react_instructions(agent)
         assert "Never commit." not in text
@@ -399,7 +399,7 @@ class TestManagedRegion:
         signature = QA.with_instructions("## Shell\n\nOnly run the shell for tests.")
         agent = dspy.ReAct(signature, tools=[])
 
-        patch(agent, tools=bash_exec)
+        Patch(agent, tools=bash_exec)
 
         text = react_instructions(agent)
         assert text.count("## Shell") == 1
@@ -412,7 +412,7 @@ class TestManagedRegion:
         ]
 
         with caplog.at_level("WARNING", logger="dspy_agent_tools.patch"):
-            patch(agent, tools=read_file)
+            Patch(agent, tools=read_file)
 
         assert "drops 1 few-shot demo" in caplog.text
         assert agent.react.demos == []
