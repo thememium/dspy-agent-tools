@@ -10,6 +10,31 @@ from dspy_agent_tools.bash.fetch import _is_junk
 
 
 class TestBashCurl:
+    @pytest.mark.parametrize("fetch", [bash_curl, bash_fetch])
+    def test_quoted_headers_and_json_remain_single_arguments(self, fetch, monkeypatch):
+        calls = []
+
+        def execute(argv):
+            calls.append(argv)
+            return "<p>ok</p>", [], 0.0, 0
+
+        monkeypatch.setattr("dspy_agent_tools.bash.fetch.execute", execute)
+        fetch(
+            "https://example.com",
+            options='-H "Authorization: Bearer token" -d \'{"query": "two words"}\'',
+        )
+        assert calls == [
+            [
+                "curl",
+                "-H",
+                "Authorization: Bearer token",
+                "-d",
+                '{"query": "two words"}',
+                "--",
+                "https://example.com",
+            ]
+        ]
+
     def test_fetches_body(self, tmp_path):
         f = tmp_path / "page.txt"
         f.write_text("plain body")

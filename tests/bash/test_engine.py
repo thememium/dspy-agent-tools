@@ -56,7 +56,21 @@ class TestRgOptionParsing:
 
         result = bash_ripgrep("needle", path=str(tmp_path), options="-n -u")
         assert "ignored_dir/x.py" in result
-        assert ".hidden/h.py" in result
+        assert ".hidden/h.py" not in result
+        for options in ("-n -uu", "-n -uuu"):
+            assert ".hidden/h.py" in bash_ripgrep(
+                "needle", path=str(tmp_path), options=options
+            )
+
+    def test_quoted_globs(self, tmp_path):
+        (tmp_path / "a.py").write_text("needle\n")
+        (tmp_path / "b.txt").write_text("needle\n")
+        result = bash_ripgrep("needle", path=str(tmp_path), options="-g '*.py'")
+        assert "a.py" in result
+        assert "b.txt" not in result
+        excluded = bash_ripgrep("needle", path=str(tmp_path), options="-g '!*.py'")
+        assert "a.py" not in excluded
+        assert "b.txt" in excluded
 
     def test_follow_links_flag(self, tmp_path):
         (tmp_path / "a.py").write_text("needle\n")
@@ -371,6 +385,22 @@ def _fake_binary(directory, name, argv_file, output, exit_code=0):
 
 
 class TestCliFallback:
+    @pytest.mark.parametrize(
+        "binary, search", [("rg", bash_ripgrep), ("fd", bash_find)]
+    )
+    def test_backend_errors_are_not_reported_as_results(
+        self, tmp_path, monkeypatch, binary, search
+    ):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _fake_binary(bin_dir, binary, tmp_path / "argv", "invalid regex", exit_code=2)
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setitem(sys.modules, "rgapi", None)
+        result = search("[", path=str(tmp_path))
+        assert result.startswith("[Error]")
+        assert "invalid regex" in result
+        assert "[exit code 2]" in result
+
     def test_rg_binary_runs_when_rgapi_cannot_load(self, tmp_path, monkeypatch):
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
