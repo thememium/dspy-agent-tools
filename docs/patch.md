@@ -1,15 +1,15 @@
 # Patching an existing agent
 
-`patch` adds tools to a DSPy agent that was already built and tells the model
+`Patch` adds tools to a DSPy agent that was already built and tells the model
 how the new tool families relate to the ones it already had.
 
 ```python
 import dspy
-from dspy_agent_tools import CLI, Skills, bash_exec, patch, read_file
+from dspy_agent_tools import CLI, Patch, Skills, bash_exec, read_file
 
 agent = dspy.ReAct("question -> answer", tools=[bash_exec], max_iters=8)
 
-patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")], guide="Never commit.")
+Patch(agent, tools=[read_file, Skills("./skills"), CLI("gh")], guide="Never commit.")
 ```
 
 It works for `dspy.ReAct`, `dspy.ReActV2`, and `dspy.RLM`, returns the same
@@ -88,7 +88,7 @@ that cannot spawn processes or open network connections, so an install or a
 ## Options
 
 ```python
-patch(
+Patch(
     agent,
     tools=[read_file, bash_exec, Skills("./skills")],  # add
     drop="browser_open",  # revoke
@@ -108,12 +108,12 @@ Removing a tool removes its section too, since the region is recomputed from
 the tools that remain:
 
 ```python
-patch(agent, drop="bash_exec")  # the ## Shell section goes with it
+Patch(agent, drop="bash_exec")  # the ## Shell section goes with it
 ```
 
 ## The managed region
 
-Everything `patch` adds lives between two markers and is recomputed on every
+Everything `Patch` adds lives between two markers and is recomputed on every
 call, so patching repeatedly converges instead of growing the system prompt:
 
 ```markdown
@@ -125,8 +125,8 @@ Never commit.
 ```
 
 - Editing `guide` replaces the old copy; it does not append a second one.
-- The last guide carries over to later calls. `patch(agent, tools=read_file,
-  guide="Never commit.")` then `patch(agent, tools=bash_exec)` keeps the rule
+- The last guide carries over to later calls. `Patch(agent, tools=read_file,
+  guide="Never commit.")` then `Patch(agent, tools=bash_exec)` keeps the rule
   and adds the shell section.
 - A family you already documented — `## Shell` in your own docstring — is
   skipped, so hand-written policy wins. Source sections such as the skill
@@ -135,8 +135,8 @@ Never commit.
 
 ## Rules
 
-- The same function patched twice is one tool: `patch` compares the tool
-  object, or the function behind it, so `patch(agent, tools=read_file)` is
+- The same function patched twice is one tool: `Patch` compares the tool
+  object, or the function behind it, so `Patch(agent, tools=read_file)` is
   idempotent.
 - Patching a second family adds its section and leaves the first alone; the
   region holds one copy of each.
@@ -146,7 +146,7 @@ Never commit.
 - An agent that already has a *different* tool with an incoming name raises
   `ValueError`; pass `name_prefix=...` to the factory that built that tool
   (`Skills(..., name_prefix="skill_")`, `CLI(..., name_prefix="gh_")`).
-- `patch` does not accept a `dspy.Predict` or a wrapper such as `dspy.Retry`
+- `Patch` does not accept a `dspy.Predict` or a wrapper such as `dspy.Retry`
   around an agent; it needs the agent module itself (`TypeError`).
 
 ## Adding a family
