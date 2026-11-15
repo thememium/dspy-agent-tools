@@ -558,31 +558,45 @@ Shared behaviour across the bash tools:
 
 ### CLI (`dspy_agent_tools.cli`)
 
-`CLI(executable, ...)` returns `get_command_help` and `run_command` by default;
-`include_search=True` adds `search_commands`. With `commands=[...]`, it returns
-one typed tool per explicit `Command` and skips discovery. Names are prefixed
-by the executable (or `name_prefix`), and `mode="code"` returns dictionaries
-for `dspy.RLM`. The parsed flag table is advisory; the raw help is
-authoritative. See [docs/cli.md](docs/cli.md).
+| Tool | Use it for |
+| --- | --- |
+| **`CLI`** | Return a `CLITools` list for one executable. By default it contains `get_command_help` and `run_command`; `include_search=True` adds `search_commands`; `commands=[...]` returns one typed tool per explicit `Command` and skips discovery. Names are prefixed by `name_prefix` (default: the executable name). |
+| **`get_command_help`** | Read one path's usage, subcommands, parsed arguments and flags, JSON help, and fallback raw help. `command=""` returns the root command list. |
+| **`search_commands`** | Optional (`include_search=True`): rank command paths by name and description. |
+| **`run_command`** | Run one resolved path with raw argv strings. No shell; only the configured executable is reachable. |
+| **`Command`** | Define one explicit command: path, tool name, description, `Argument`/`Option` declarations, `fixed` argv, and `ok_codes`. |
+| **`Argument`** | Declare a required or optional positional for a `Command`. |
+| **`Option`** | Declare a flag or value option for a `Command`, including repeatable flags and choices. |
+| **`CLITools`** | `list` subclass with `.refresh()`, which drops cached help pages in discovery mode. |
+
+`mode="search"` returns text for `dspy.ReAct`; `mode="code"` returns
+`list[dict]` / `dict` for `dspy.RLM`. The parsed flag table is advisory; the
+raw help is authoritative. See [docs/cli.md](docs/cli.md).
 
 ### MCP (`dspy_agent_tools.mcp`)
 
-`MCP()` returns an `MCPTools` list of `dspy.Tool` objects backed by one live
-session. `command=` runs a local stdio server; `url=` connects over Streamable
-HTTP; `transport="sse"` selects legacy HTTP+SSE; `transport=<factory>` takes a
-custom async transport. `name_prefix`, `result_mode`, `startup_timeout`, and
-`retry_timeout` tune the conversion, and `.close()` stops the session early.
+| Tool | Use it for |
+| --- | --- |
+| **`MCP`** | Connect to an MCP server and return its tools. `command=` runs a local stdio server; `url=` connects over Streamable HTTP; `transport="sse"` selects legacy HTTP+SSE; `transport=<factory>` takes a custom async transport. |
+| **`MCPTools`** | `list` subclass of `dspy.Tool` objects backed by one live session; supports `+`, unpacking, `with`, `async with`, and `.close()`. |
+
+`name_prefix`, `result_mode`, `startup_timeout`, and `retry_timeout` tune the
+conversion. The server stops when the tools or list are no longer referenced.
 See [docs/mcp.md](docs/mcp.md).
 
 ### Skills (`dspy_agent_tools.skills`)
 
-`Skills(*roots, ...)` scans each root's immediate subdirectories for
-`SKILL.md` (a root that is itself a skill is accepted) and returns
-`list_skills`, `activate_skill`, `read_skill_resource`, and
-`run_skill_script` (unless `scripts=False`). `mode="code"` returns
-dictionaries for `dspy.RLM`; `patch(agent)` appends the catalog and tools to an
-existing `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`. See
-[docs/skills.md](docs/skills.md).
+| Tool | Use it for |
+| --- | --- |
+| **`Skills`** | Scan one or more folders for `SKILL.md` skills and return a `SkillTools` list. `mode="search"` returns text; `mode="code"` returns dictionaries for `dspy.RLM`. |
+| **`list_skills`** | Names, descriptions, declared `allowed-tools`, and bundled files for every skill. |
+| **`activate_skill`** | The full `SKILL.md` body, bundled file list, and declared `allowed-tools` (code mode also returns `license`, `compatibility`, and `metadata`). |
+| **`read_skill_resource`** | One file from `references/` or `assets/`, relative to the skill folder; escapes are rejected. |
+| **`run_skill_script`** | One file from `scripts/` with an argv list, run in the sandbox; omitted when `scripts=False`. |
+| **`SkillTools`** | `list` subclass with `.skills`, `.errors`, `.catalog()`, `.instructions()`, and `.patch(agent)`. |
+
+`patch(agent)` appends the catalog and tools to an existing `dspy.ReAct`,
+`dspy.ReActV2`, or `dspy.RLM`. See [docs/skills.md](docs/skills.md).
 
 ### Browser (`dspy_agent_tools.browser`)
 
