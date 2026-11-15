@@ -117,6 +117,9 @@ SDK 2.x). Importing `MCP` works without it; calling `MCP()` raises an
 uv add "dspy-agent-tools[mcp]"
 ```
 
+Ready to build an agent? [Usage](#usage) shows complete `dspy.ReAct` and
+`dspy.RLM` examples.
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- USAGE -->
