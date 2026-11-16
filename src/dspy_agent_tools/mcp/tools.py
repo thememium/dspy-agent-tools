@@ -158,13 +158,13 @@ def _build_tools(
             tool = Tool.from_mcp_tool(
                 proxy, _dspy_compatible(advertised), result_mode=result_mode
             )
-            signature = _mcp_signature(
+            signature, renames = _mcp_signature(
                 advertised, tool.args or {}, tool.arg_types or {}
             )
             func = tool.func
             if _read_only(advertised):
                 func = _retrying(func, timeout=retry_timeout)
-            tool = _as_sync_capable(tool, signature, func=func)
+            tool = _as_sync_capable(tool, signature, func=func, renames=renames)
             if name_prefix:
                 tool.name = f"{name_prefix}{tool.name}"
             schema = getattr(advertised, "input_schema", None) or getattr(
