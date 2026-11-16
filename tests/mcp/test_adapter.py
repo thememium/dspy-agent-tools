@@ -86,12 +86,10 @@ class TestInternals:
         )
         session = Session()
         base = dspy.Tool.from_mcp_tool(session, advertised)
-        tool = adapter_module._as_sync_capable(
-            base,
-            adapter_module._mcp_signature(
-                advertised, base.args or {}, base.arg_types or {}
-            ),
+        signature, renames = adapter_module._mcp_signature(
+            advertised, base.args or {}, base.arg_types or {}
         )
+        tool = adapter_module._as_sync_capable(base, signature, renames=renames)
 
         signature = inspect.signature(tool.func)
         assert list(signature.parameters) == ["query", "limit", "note"]
@@ -134,17 +132,15 @@ class TestInternals:
             session, adapter_module._dspy_compatible(advertised)
         )
         assert advertised.input_schema["properties"]["value"] == schema
-        tool = adapter_module._as_sync_capable(
-            base,
-            adapter_module._mcp_signature(
-                advertised, base.args or {}, base.arg_types or {}
-            ),
+        signature, renames = adapter_module._mcp_signature(
+            advertised, base.args or {}, base.arg_types or {}
         )
+        tool = adapter_module._as_sync_capable(base, signature, renames=renames)
         assert tool(value=None) == []
         assert asyncio.run(tool.acall(value=None)) == []
         assert seen == [{"value": None}, {"value": None}]
 
-    def test_non_python_parameter_names_use_kwargs(self):
+    def test_non_python_parameter_names_are_renamed(self):
         advertised = MCPTool(
             name="lookup",
             input_schema={
@@ -157,43 +153,95 @@ class TestInternals:
                 "required": ["class", "repo-name"],
             },
         )
-        signature = adapter_module._mcp_signature(
+        signature, renames = adapter_module._mcp_signature(
             advertised, advertised.input_schema["properties"], {}
         )
-        bound = signature.bind(**{"class": "A", "repo-name": "org/repo", "kwargs": 1})
-        assert bound.arguments["_kwargs"] == {"class": "A", "repo-name": "org/repo"}
+        assert list(signature.parameters) == ["class_", "repo_name", "kwargs"]
+        assert renames == {"class_": "class", "repo_name": "repo-name"}
+        assert not any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+
+        seen = []
 
         class Session:
             async def call_tool(self, name, arguments=None):
+                seen.append(arguments)
                 return SimpleNamespace(content=[], is_error=False)
 
         base = dspy.Tool.from_mcp_tool(
             Session(), adapter_module._dspy_compatible(advertised)
         )
-        tool = adapter_module._as_sync_capable(base, signature)
-        assert tool(**{"class": "A", "repo-name": "org/repo", "kwargs": 1}) == []
+        tool = adapter_module._as_sync_capable(base, signature, renames=renames)
+        assert tool(class_="A", repo_name="org/repo", kwargs=1) == []
+        assert asyncio.run(tool.acall(class_="A", repo_name="org/repo", kwargs=1)) == []
+        assert seen == [
+            {"class": "A", "repo-name": "org/repo", "kwargs": 1},
+            {"class": "A", "repo-name": "org/repo", "kwargs": 1},
+        ]
         assert tool.format_as_litellm_function_call()["function"]["parameters"][
             "required"
-        ] == ["class", "repo-name"]
+        ] == ["class_", "repo_name"]
+
+    def test_renames_cover_invalid_names_and_collisions(self):
+        properties = {
+            "class": {"type": "string"},
+            "class_": {"type": "string"},
+            "1st": {"type": "string"},
+            "": {"type": "string"},
+        }
+        signature, renames = adapter_module._mcp_signature(
+            SimpleNamespace(
+                input_schema={
+                    "type": "object",
+                    "properties": properties,
+                    "required": list(properties),
+                }
+            ),
+            properties,
+            {},
+        )
+        assert list(signature.parameters) == ["class_", "class__", "_1st", "_"]
+        assert renames == {
+            "class_": "class",
+            "class__": "class_",
+            "_1st": "1st",
+            "_": "",
+        }
+
+    def test_renamed_forwards_sync_calls(self):
+        seen = {}
+
+        def call(**kwargs):
+            seen.update(kwargs)
+            return kwargs
+
+        renamed = adapter_module._renamed(call, {"from_": "from"})
+        assert renamed(name="a", from_="x", to="b") == {
+            "name": "a",
+            "from": "x",
+            "to": "b",
+        }
+        assert seen == {"name": "a", "from": "x", "to": "b"}
 
     def test_mcp_signature_tolerates_alternate_schemas(self):
-        signature = adapter_module._mcp_signature(
+        signature, renames = adapter_module._mcp_signature(
             SimpleNamespace(inputSchema={}),
             {"query": {"type": "string"}},
             {"query": str},
         )
         assert list(signature.parameters) == ["query"]
+        assert renames == {}
 
-        assert (
-            adapter_module._mcp_signature(
-                SimpleNamespace(input_schema="not a schema"), {}, {}
-            )
-            == inspect.Signature()
-        )
+        assert adapter_module._mcp_signature(
+            SimpleNamespace(input_schema="not a schema"), {}, {}
+        ) == (inspect.Signature(), {})
 
-        flagged = adapter_module._mcp_signature(
+        flagged, renames = adapter_module._mcp_signature(
             SimpleNamespace(input_schema={"properties": {"flag": True}}),
             {"flag": {"type": "boolean"}},
             {"flag": bool},
         )
         assert flagged.parameters["flag"].default is None
+        assert renames == {}
