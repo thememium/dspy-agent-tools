@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import keyword
+import re
 from collections.abc import Callable
 from copy import copy
 from typing import TYPE_CHECKING, Any, cast
@@ -69,17 +71,36 @@ def _zero_arg_factory(factory: Any) -> Any:
     return lambda **_kwargs: factory()
 
 
+def _python_parameter(name: str, taken: set[str]) -> str:
+    """A legal Python parameter name for ``name``, unique within ``taken``."""
+    safe = re.sub(r"\W", "_", name)
+    if not safe or safe[0].isdigit():
+        safe = f"_{safe}"
+    if keyword.iskeyword(safe):
+        safe = f"{safe}_"
+    while safe in taken or keyword.iskeyword(safe):
+        safe = f"{safe}_"
+    taken.add(safe)
+    return safe
+
+
 def _mcp_signature(
     tool: Any,
     args: dict[str, Any],
     arg_types: dict[str, Any],
-) -> inspect.Signature:
+) -> tuple[inspect.Signature, dict[str, str]]:
     """Build a real Python signature for an MCP tool's arguments.
 
     ``Tool.from_mcp_tool`` wraps every tool in ``async def func(*args,
     **kwargs)``, so anything introspecting the callable (``dspy.RLM``'s
     interpreter registers sandbox tools from ``inspect.signature``) sees a
     generic ``(args, kwargs)`` wrapper instead of the tool's parameters.
+
+    Names that Python cannot accept as parameters, such as ``from`` or
+    ``repo-name``, are renamed rather than hidden behind ``**kwargs``: dspy's
+    sandbox renders a variadic catch-all as a positional parameter and fails to
+    compile the tool. The returned mapping renames each exposed name back to
+    the server's argument name, so the callable can still forward it.
     """
     schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None)
     if not isinstance(schema, dict):
@@ -93,13 +114,14 @@ def _mcp_signature(
     ordered += [name for name in args if name not in required]
 
     parameters = []
-    extra_names = False
+    renames: dict[str, str] = {}
+    taken: set[str] = set()
     for name in ordered:
-        if not name.isidentifier() or keyword.iskeyword(name):
-            extra_names = True
-            continue
+        exposed = _python_parameter(name, taken)
+        if exposed != name:
+            renames[exposed] = name
         parameter = inspect.Parameter(
-            name,
+            exposed,
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             annotation=arg_types.get(name, Any),
         )
@@ -109,12 +131,29 @@ def _mcp_signature(
                 default=prop.get("default") if isinstance(prop, dict) else None
             )
         parameters.append(parameter)
-    if extra_names:
-        rest = "kwargs"
-        while rest in args:
-            rest = "_" + rest
-        parameters.append(inspect.Parameter(rest, inspect.Parameter.VAR_KEYWORD))
-    return inspect.Signature(parameters)
+    return inspect.Signature(parameters), renames
+
+
+def _renamed(func: Callable[..., Any], renames: dict[str, str]) -> Callable[..., Any]:
+    """``func`` taking the signature's names and forwarding the server's names."""
+    if inspect.iscoroutinefunction(func):
+
+        @functools.wraps(func)
+        async def async_call(*args: Any, **kwargs: Any) -> Any:
+            return await func(
+                *args,
+                **{renames.get(name, name): value for name, value in kwargs.items()},
+            )
+
+        return async_call
+
+    @functools.wraps(func)
+    def call(*args: Any, **kwargs: Any) -> Any:
+        return func(
+            *args, **{renames.get(name, name): value for name, value in kwargs.items()}
+        )
+
+    return call
 
 
 def _as_sync_capable(
@@ -122,28 +161,48 @@ def _as_sync_capable(
     signature: inspect.Signature | None = None,
     *,
     func: Callable[..., Any] | None = None,
+    renames: dict[str, str] | None = None,
 ) -> Tool:
     """Rebuild an MCP tool so its synchronous path also works."""
     cls = sync_tool_class(drop_nulls=True)
     call = tool.func if func is None else func
+    renames = renames or {}
+    if renames:
+        call = _renamed(call, renames)
     if signature is not None:
         cast(Any, call).__signature__ = signature
-    args = {name: dict(spec) for name, spec in (tool.args or {}).items()}
+
+    reverse = {original: exposed for exposed, original in renames.items()}
+    args = {
+        reverse.get(name, name): dict(spec) for name, spec in (tool.args or {}).items()
+    }
     if signature is not None:
-        for name, parameter in signature.parameters.items():
-            if name not in args:
-                continue
+        for name in args.keys() & signature.parameters.keys():
+            parameter = signature.parameters[name]
             if parameter.default is inspect.Parameter.empty:
                 args[name].pop("default", None)
             else:
                 args[name].setdefault("default", parameter.default)
+    arg_types = (
+        {
+            reverse.get(name, name): value
+            for name, value in (tool.arg_types or {}).items()
+        }
+        if renames
+        else tool.arg_types
+    )
+    arg_desc = (
+        {reverse.get(name, name): desc for name, desc in tool.arg_desc.items()}
+        if renames and tool.arg_desc
+        else tool.arg_desc
+    )
     return cls(
         func=call,
         name=tool.name,
         desc=tool.desc,
         args=args,
-        arg_types=tool.arg_types,
-        arg_desc=tool.arg_desc,
+        arg_types=arg_types,
+        arg_desc=arg_desc,
     )
 
 
