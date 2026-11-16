@@ -71,7 +71,39 @@ def _selector(target: str | None) -> str:
 
 def _element(tab: Any, target: str | None, timeout: float) -> Any:
     selector = _selector(target)
-    element = tab.query(selector, timeout=max(1, int(timeout)), raise_exc=False)
+    is_ref = bool(target and target.startswith(("@", "ref=")))
+    element = tab.query(
+        selector, timeout=0 if is_ref else max(1, int(timeout)), raise_exc=False
+    )
+    if element is None and is_ref:
+        # Pydoll can query shadow roots and iframe documents that a tab query
+        # cannot cross. Refs are unique per snapshot, so old refs cannot alias.
+        try:
+            roots = tab.find_shadow_roots(deep=True)
+        except (AttributeError, NotImplementedError):
+            roots = []
+        for root in roots:
+            element = root.query(selector, raise_exc=False)
+            if element is not None:
+                break
+        if element is None:
+
+            def find_in_frames(parent: Any, depth: int = 0) -> Any:
+                if depth >= 12:
+                    return None
+                frames = parent.query("iframe", find_all=True, raise_exc=False)
+                if not isinstance(frames, list):
+                    return None
+                for frame in frames:
+                    found = frame.query(selector, raise_exc=False)
+                    if found is not None:
+                        return found
+                    found = find_in_frames(frame, depth + 1)
+                    if found is not None:
+                        return found
+                return None
+
+            element = find_in_frames(tab)
     if element is None:
         raise errors._ToolError(
             f"No element matched {target!r}. Call browser_snapshot for fresh @refs, "
@@ -110,7 +142,7 @@ def _require_actionable(element: Any, action: str) -> None:
         element.scroll_into_view()
     except Exception:  # noqa: BLE001, S110 - pydoll scrolls again inside click
         pass
-    if not _probe_bool(element, "is_on_top"):
+    if not _probe_bool(element, "is_on_top") and not _shadow_on_top(element):
         raise errors._ToolError(
             "target is covered by another element at its centre point; dismiss "
             "the overlay (cookie banner, modal, sticky header) or target the "
@@ -118,10 +150,33 @@ def _require_actionable(element: Any, action: str) -> None:
         )
 
 
-def _click(element: Any) -> tuple[str, str | None]:
+def _shadow_on_top(element: Any) -> bool:
+    """Check hit testing through shadow boundaries when pydoll retargets to a host."""
+    script = """const root = this.getRootNode();
+if (!(root instanceof ShadowRoot)) return false;
+const rect = this.getBoundingClientRect();
+const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+let node = this, scope = root;
+while (scope instanceof ShadowRoot) {
+  const hit = scope.elementFromPoint(x, y);
+  if (!hit || (hit !== node && !node.contains(hit))) return false;
+  node = scope.host; scope = node.getRootNode();
+}
+const hit = scope.elementFromPoint(x, y);
+return !!hit && (hit === node || node.contains(hit));"""
+    try:
+        return (
+            actions._remote_value(element.execute_script(script, return_by_value=True))
+            is True
+        )
+    except Exception:  # noqa: BLE001 - preserve the actionability check
+        return False
+
+
+def _click(element: Any, *, humanize: bool = False) -> tuple[str, str | None]:
     """Click natively, falling back to a JavaScript click that is reported."""
     try:
-        element.click()
+        element.click(humanize=True) if humanize else element.click()
         return "native", None
     except Exception as native_error:  # noqa: BLE001 - fall back to a JS click
         try:
