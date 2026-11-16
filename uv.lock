@@ -742,6 +742,13 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "dspy" },
+    { name = "httpx2" },
+    { name = "imageio-ffmpeg" },
+    { name = "mcp" },
+    { name = "pydoll-python" },
+]
 browser = [
     { name = "dspy" },
     { name = "pydoll-python" },
@@ -776,20 +783,25 @@ dev = [
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "ddgs", specifier = ">=9.16.0" },
+    { name = "dspy", marker = "extra == 'all'", specifier = ">=3.4.1" },
     { name = "dspy", marker = "extra == 'browser'", specifier = ">=3.1" },
     { name = "dspy", marker = "extra == 'mcp'", specifier = ">=3.4.1" },
+    { name = "httpx2", marker = "extra == 'all'", specifier = ">=2.10" },
     { name = "httpx2", marker = "extra == 'mcp'", specifier = ">=2.10" },
+    { name = "imageio-ffmpeg", marker = "extra == 'all'", specifier = ">=0.8.1" },
     { name = "imageio-ffmpeg", marker = "extra == 'ffmpeg'", specifier = ">=0.8.1" },
     { name = "jsonschema", specifier = ">=4.25.0" },
     { name = "markdownify", specifier = ">=1.2.3" },
+    { name = "mcp", marker = "extra == 'all'", specifier = ">=2" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2" },
     { name = "plumbum", specifier = ">=2.0.2" },
+    { name = "pydoll-python", marker = "extra == 'all'", specifier = ">=3.0.1" },
     { name = "pydoll-python", marker = "extra == 'browser'", specifier = ">=3.0.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rgapi", specifier = ">=0.2.3" },
     { name = "tree-sitter-language-pack", specifier = ">=1.22.1" },
 ]
-provides-extras = ["browser", "ffmpeg", "mcp"]
+provides-extras = ["browser", "ffmpeg", "mcp", "all"]
 
 [package.metadata.requires-dev]
 dev = [

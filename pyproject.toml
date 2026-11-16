@@ -27,6 +27,15 @@ dependencies = [
 browser = ["dspy>=3.1", "pydoll-python>=3.0.1"]
 ffmpeg = ["imageio-ffmpeg>=0.8.1"]
 mcp = ["dspy>=3.4.1", "httpx2>=2.10", "mcp>=2"]
+# Every optional bridge in one install. Extras cannot reference each other,
+# so the dependencies are the union of browser, ffmpeg, and mcp.
+all = [
+  "dspy>=3.4.1",
+  "httpx2>=2.10",
+  "imageio-ffmpeg>=0.8.1",
+  "mcp>=2",
+  "pydoll-python>=3.0.1",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]
