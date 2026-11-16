@@ -72,10 +72,22 @@ when you want a hand-picked list. They share a module-level session; each
 `Browser()` call instead creates its own isolated session. To share deliberately,
 pass the same `BrowserSession` to each bundle.
 
+## Browser lifecycle
+
 The browser starts on the first tool call, not when `Browser()` is called.
-Later calls reuse the same tab until you call `browser_close` or the process
-exits. `BrowserTools` is a `list` subclass with a `close()` method and a
-context manager:
+Later calls reuse the same tab until the session is closed. These options apply
+to both headless and visible (`headless=False`) browsers:
+
+- Call `browser_tools.close()` after the agent finishes, as in the README.
+  If the agent raises an exception, that call will be skipped unless it is in
+  a `finally` block.
+- Use `with Browser() as browser_tools:` to close the session when the block
+  exits, including when an exception occurs.
+- Rely on automatic cleanup at normal interpreter exit. The browser stays open
+  after the agent finishes until the process exits; abrupt termination may
+  prevent cleanup.
+
+For example, use a context manager:
 
 ```python
 from dspy_agent_tools import Browser
@@ -85,6 +97,20 @@ with Browser() as tools:
     result = agent(task="Open https://example.com and summarize the page")
 # the session was closed on exit
 ```
+
+Or use `finally` without a context manager:
+
+```python
+browser_tools = Browser(headless=False)
+try:
+    agent = dspy.ReAct("task -> result", tools=browser_tools)
+    result = agent(task="Open https://example.com and summarize the page")
+finally:
+    browser_tools.close()
+```
+
+The `browser_close` tool and `BrowserSession.close()` also close their session.
+After closing, a later browser tool call starts a fresh session.
 
 ## Sessions and isolation
 
