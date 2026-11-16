@@ -61,3 +61,88 @@ def test_password_refs_iframe_and_shadow(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_advanced_browser_operations(tmp_path):
+    from urllib.parse import quote
+
+    file = tmp_path / "upload.txt"
+    file.write_text("hello")
+    session = BrowserSession()
+    try:
+        page = "data:text/html," + quote('<input id="file" type="file"><h1>Report</h1>')
+        assert session.browser("navigate", value=page)["status"] == "ok"
+        assert (
+            session.browser("upload", target="#file", value=str(file))["status"] == "ok"
+        )
+        assert (
+            session.evaluate("return document.querySelector('#file').files[0].name")[
+                "result"
+            ]
+            == "upload.txt"
+        )
+        pdf = tmp_path / "report.pdf"
+        assert session.pdf(str(pdf))["status"] == "ok"
+        assert pdf.read_bytes().startswith(b"%PDF")
+        state = tmp_path / "tabs.json"
+        assert session.save_tabs(str(state))["status"] == "ok"
+        assert session.restore_tabs(str(state))["status"] == "ok"
+        assert session.tabs()["count"] == 2
+        assert "result" in session.cdp("Page.getNavigationHistory")
+    finally:
+        session.close()
+
+
+def test_response_wait_and_attach_detach(tmp_path):
+    import json
+    import subprocess
+    import time
+    import urllib.request
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    if not os.path.exists(chrome_path):
+        pytest.skip("Chrome executable path is macOS-specific")
+    process = subprocess.Popen(
+        [
+            chrome_path,
+            "--headless=new",
+            "--remote-debugging-port=0",
+            f"--user-data-dir={tmp_path / 'profile'}",
+            "about:blank",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    session = None
+    try:
+        port_file = tmp_path / "profile" / "DevToolsActivePort"
+        deadline = time.monotonic() + 15
+        while not port_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        port, browser_path = port_file.read_text().splitlines()[:2]
+        session = BrowserSession(ws_address=f"ws://127.0.0.1:{port}{browser_path}")
+        assert (
+            session.browser(
+                "navigate", value=f"http://127.0.0.1:{server.server_port}/"
+            )["status"]
+            == "ok"
+        )
+        response = session.wait_response(f"127.0.0.1:{server.server_port}", 2)
+        assert response["status"] == "ok" and response["response"]["status"] == 200
+        assert session.close()
+        assert process.poll() is None
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version", timeout=2
+        ) as result:
+            assert json.load(result)["Browser"]
+    finally:
+        if session:
+            session.close()
+        process.terminate()
+        process.wait(timeout=10)
+        server.shutdown()
+        server.server_close()
+        thread.join()
