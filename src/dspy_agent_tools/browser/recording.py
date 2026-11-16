@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from . import (
     _pydoll,
@@ -31,6 +33,7 @@ class _VideoRecorder:
         quality: int,
         max_width: int | None,
         max_height: int | None,
+        show_cursor: bool = False,
     ) -> None:
         self.path = path
         self.ffmpeg = ffmpeg
@@ -38,6 +41,9 @@ class _VideoRecorder:
         self.quality = quality
         self.max_width = max_width
         self.max_height = max_height
+        self.show_cursor = show_cursor
+        self.cursor_script_id: str | None = None
+        self.cursor_token = uuid4().hex
         self.frames_dir = Path(tempfile.mkdtemp(prefix="dspy-agent-tools-video-"))
         self.frames: list[tuple[float, Path]] = []
         self.lock = threading.Lock()
@@ -95,6 +101,18 @@ def _start_screencast(tab: Any, recorder: _VideoRecorder) -> None:
     recorder.tab = tab
     recorder.callback_id = tab.on(_pydoll.PageEvent.SCREENCAST_FRAME, recorder.on_frame)
     try:
+        if recorder.show_cursor:
+            response = tab.execute_command(
+                {
+                    "method": "Page.addScriptToEvaluateOnNewDocument",
+                    "params": {
+                        "source": _cursor_script(recorder.cursor_token),
+                        "worldName": "dspy-recording-cursor",
+                        "runImmediately": True,
+                    },
+                }
+            )
+            recorder.cursor_script_id = response["result"]["identifier"]
         tab.execute_command(
             _pydoll.PageCommands.start_screencast(
                 _pydoll.ScreencastFormat.JPEG,
@@ -105,6 +123,7 @@ def _start_screencast(tab: Any, recorder: _VideoRecorder) -> None:
             )
         )
     except Exception:
+        _remove_cursor(tab, recorder)
         recorder.callback_id = _remove_callback(tab, recorder.callback_id)
         raise
 
@@ -117,7 +136,82 @@ def _stop_screencast(tab: Any, recorder: _VideoRecorder) -> None:
             "Could not stop the screencast: %s", errors._format_error(exc)
         )
     finally:
+        _remove_cursor(tab, recorder)
         recorder.callback_id = _remove_callback(tab, recorder.callback_id)
+
+
+def _cursor_script(token: str) -> str:
+    """Draw the pointer in each document without affecting hit testing."""
+    return r"""
+(() => {
+  const token = TOKEN;
+  let cursor, timer;
+  const mount = () => {
+    if (cursor || !document.documentElement) return;
+    cursor = document.createElement('div');
+    cursor.setAttribute('data-dspy-recording-cursor', '');
+    cursor.style.cssText = 'position:fixed;left:0;top:0;width:18px;height:18px;z-index:2147483647;pointer-events:none;display:none;background:#fff;border:2px solid #111;border-radius:50%;box-sizing:border-box;box-shadow:0 1px 4px #0009';
+    document.documentElement.appendChild(cursor);
+  };
+  const move = e => {
+    mount();
+    if (!cursor) return;
+    cursor.style.display = 'block';
+    cursor.style.transform = `translate(${e.clientX - 9}px, ${e.clientY - 9}px)`;
+  };
+  const down = e => {
+    move(e);
+    if (!cursor) return;
+    cursor.style.background = '#ff5252';
+    clearTimeout(timer);
+    timer = setTimeout(() => { if (cursor) cursor.style.background = '#fff'; }, 350);
+  };
+  const leave = () => { if (cursor) cursor.style.display = 'none'; };
+  const cleanup = e => {
+    if (e.data !== token) return;
+    for (const frame of document.querySelectorAll('iframe,frame')) {
+      try { frame.contentWindow.postMessage(token, '*'); } catch (_) {}
+    }
+    removeEventListener('mousemove', move, true);
+    removeEventListener('mousedown', down, true);
+    removeEventListener('mouseout', out, true);
+    removeEventListener('message', cleanup, true);
+    clearTimeout(timer);
+    if (cursor) cursor.remove();
+  };
+  const out = e => { if (!e.relatedTarget) leave(); };
+  addEventListener('mousemove', move, true);
+  addEventListener('mousedown', down, true);
+  addEventListener('mouseout', out, true);
+  addEventListener('message', cleanup, true);
+})();
+""".replace("TOKEN", json.dumps(token))
+
+
+def _remove_cursor(tab: Any, recorder: _VideoRecorder) -> None:
+    if recorder.cursor_script_id is None:
+        return
+    try:
+        tab.execute_command(
+            {
+                "method": "Page.removeScriptToEvaluateOnNewDocument",
+                "params": {"identifier": recorder.cursor_script_id},
+            }
+        )
+        tab.execute_command(
+            {
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": f"window.postMessage({json.dumps(recorder.cursor_token)}, '*')"
+                },
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+        config.logger.warning(
+            "Could not remove recording cursor: %s", errors._format_error(exc)
+        )
+    finally:
+        recorder.cursor_script_id = None
 
 
 def _remove_callback(tab: Any, callback_id: int | None) -> None:
@@ -133,6 +227,7 @@ def _remove_callback(tab: Any, callback_id: int | None) -> None:
 
 def _discard_recording(recorder: _VideoRecorder) -> None:
     if recorder.tab is not None:
+        _remove_cursor(recorder.tab, recorder)
         _remove_callback(recorder.tab, recorder.callback_id)
     recorder.callback_id = None
     shutil.rmtree(recorder.frames_dir, ignore_errors=True)
@@ -247,8 +342,11 @@ def _record_start(
     quality: int | str,
     max_width: int | str | None,
     max_height: int | str | None,
+    show_cursor: bool = False,
 ) -> dict:
     try:
+        if not isinstance(show_cursor, bool):
+            raise errors._ToolError("show_cursor must be a boolean")
         fps_value = coerce._coerce_fps(fps)
         quality_value = coerce._coerce_quality(quality)
         width = coerce._optional_dimension(max_width, "max_width")
@@ -260,6 +358,7 @@ def _record_start(
             quality_value,
             width,
             height,
+            show_cursor,
         )
     except Exception as exc:  # noqa: BLE001 - returned as tool status
         return errors._error("record_start", exc)
@@ -276,6 +375,7 @@ def _record_start(
         "quality": quality_value,
         "max_width": width,
         "max_height": height,
+        "show_cursor": show_cursor,
     }
 
 
