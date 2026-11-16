@@ -2,9 +2,9 @@
 
 import pytest
 
-from dspy_agent_tools.browser.snapshot import _render_nodes
+from dspy_agent_tools.browser.snapshot import _render_nodes, _snapshot_with_frames
 
-from .fakes import fire_console, snapshot_response
+from .fakes import FakeFrameDocument, fire_console, snapshot_response
 
 
 class TestSnapshot:
@@ -218,3 +218,69 @@ class TestEvaluate:
 class TestRenderNodes:
     def test_render_empty_nodes(self):
         assert _render_nodes([]) == ""
+
+
+class TestFrames:
+    def test_frame_nodes_are_merged_with_depth_and_url(self):
+        leaf = FakeFrameDocument(
+            [{"ref": "@e1", "role": "button", "name": "Frame button", "depth": 0}],
+            url="https://frame.example/",
+            truncated=True,
+        )
+        tab = FakeFrameDocument(
+            [{"ref": "@e2", "role": "heading", "name": "Top", "depth": 0}],
+            frames=[FakeFrameDocument(frames=[], body=leaf)],
+            url="https://page.example/",
+        )
+        data = _snapshot_with_frames(tab, 10)
+        assert [node["ref"] for node in data["nodes"]] == ["@e2", "@e1"]
+        assert data["nodes"][1]["frame_url"] == "https://frame.example/"
+        assert data["nodes"][1]["depth"] == 1
+        assert data["frames"] == 1
+        assert data["truncated"] is True
+        assert "frames_unavailable" not in data
+
+    def test_node_budget_truncates_remaining_frames(self):
+        tab = FakeFrameDocument(
+            [{"ref": "@e0", "role": "heading", "name": "Top", "depth": 0}],
+            frames=[FakeFrameDocument(body=FakeFrameDocument())],
+        )
+        data = _snapshot_with_frames(tab, 1)
+        assert data["truncated"] is True
+        assert data["frames"] == 1
+
+    def test_unqueryable_frames_are_reported(self):
+        tab = FakeFrameDocument(query_error=RuntimeError("detached"))
+        data = _snapshot_with_frames(tab, 10)
+        assert data["frames_unavailable"] == 1
+        assert "frames" not in data
+
+    def test_non_list_frame_result_is_ignored(self):
+        data = _snapshot_with_frames(FakeFrameDocument(frames=None), 10)
+        assert "frames" not in data
+        assert "frames_unavailable" not in data
+
+    def test_frame_without_a_body_is_reported(self):
+        tab = FakeFrameDocument(frames=[FakeFrameDocument(body=None)])
+        data = _snapshot_with_frames(tab, 10)
+        assert data["frames"] == 1
+        assert data["frames_unavailable"] == 1
+
+    def test_failing_frame_snapshot_is_reported(self):
+        tab = FakeFrameDocument(
+            frames=[
+                FakeFrameDocument(
+                    body=FakeFrameDocument(script_error=RuntimeError("gone"))
+                )
+            ]
+        )
+        data = _snapshot_with_frames(tab, 10)
+        assert data["frames_unavailable"] == 1
+
+    def test_nesting_stops_at_the_depth_limit(self):
+        level = FakeFrameDocument(frames=[])
+        for _ in range(12):
+            level = FakeFrameDocument(frames=[level], body=FakeFrameDocument())
+        data = _snapshot_with_frames(FakeFrameDocument(frames=[level]), 100)
+        assert data["truncated"] is True
+        assert data["frames"] == 12

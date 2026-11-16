@@ -95,8 +95,9 @@ class BrowserSession:
 
     Navigation defaults to ``http``, ``https``, ``about``, and ``data`` URLs.
     Pass ``allowed_schemes`` to extend or restrict that set, or ``url_policy``
-    to reject individual normalized URLs. For example, a server can block
-    private hosts with a callback while keeping the default scheme policy.
+    to reject explicit normalized navigation URLs. These checks do not cover
+    redirects, clicks, scripts, popups, or subresources and are not a security
+    boundary. Use network-level isolation for untrusted browsing.
 
     ``dialog_policy`` decides what happens to ``alert``, ``confirm``,
     ``beforeunload``, and ``prompt`` dialogs: ``dismiss`` (default) cancels
@@ -128,9 +129,21 @@ class BrowserSession:
         dialog_policy: config.DialogPolicy = config._DEFAULT_DIALOG_POLICY,
         user_data_dir: str | Path | None = None,
         cookie_state: str | Path | None = None,
+        humanize: bool = False,
+        stealth: bool = False,
+        fingerprint: dict[str, Any] | None = None,
+        ws_address: str | None = None,
     ) -> None:
         if dialog_policy not in ("dismiss", "accept"):
             raise ValueError("dialog_policy must be dismiss or accept")
+        if ws_address and (user_data_dir or cookie_state or fingerprint):
+            raise ValueError(
+                "ws_address cannot be combined with profile, cookie state, or fingerprint"
+            )
+        self.ws_address = ws_address
+        self.humanize = humanize or stealth
+        self.stealth = stealth
+        self.fingerprint = fingerprint
         self.headless = headless
         self.timeout = timeout
         self.window_size = window_size
@@ -156,6 +169,7 @@ class BrowserSession:
         self._tab: Any | None = None
         self._watch = watch._PageWatch()
         self._watched: set[str] = set()
+        self._snapshot_refs: dict[str, set[str]] = {}
         self._recorder: recording._VideoRecorder | None = None
         self.last_recording: dict[str, Any] | None = None
         self._exit_hook_registered = False
@@ -188,7 +202,7 @@ class BrowserSession:
             self.user_data_dir.mkdir(parents=True, exist_ok=True)
             options.add_argument(f"--user-data-dir={self.user_data_dir}")
         browser = _pydoll.Chrome(options=options)
-        tab = browser.start()
+        tab = browser.connect(self.ws_address) if self.ws_address else browser.start()
         self._browser = browser
         self._tab = tab
         self._install_watch(tab)
@@ -208,9 +222,12 @@ class BrowserSession:
         """Subscribe *tab* to console, error, dialog, and network events."""
         watch = self._watch
         target = getattr(tab, "target_id", None)
+        if target is not None and target in self._watched:
+            return
+
+        if self.fingerprint is not None:
+            tab.apply_fingerprint(self.fingerprint)
         if target is not None:
-            if target in self._watched:
-                return
             self._watched.add(target)
 
         def responder(dialog: dict[str, Any]) -> str:
@@ -300,11 +317,15 @@ class BrowserSession:
         browser, self._browser, self._tab = self._browser, None, None
         self._watch = watch._PageWatch()
         self._watched = set()
+        self._snapshot_refs = {}
         if browser is not None:
             if self.user_data_dir is not None:
                 _close_browser_gracefully(browser)
             try:
-                browser.stop()
+                if self.ws_address:
+                    browser._run(browser._impl._release_browser())
+                else:
+                    browser.stop()
             except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
                 config.logger.warning(
                     "Could not stop the browser: %s", errors._format_error(exc)
@@ -349,12 +370,16 @@ class BrowserSession:
             browser, self._browser, self._tab = self._browser, None, None
             self._watch = watch._PageWatch()
             self._watched = set()
+            self._snapshot_refs = {}
             if browser is None:
                 return False
             if self.user_data_dir is not None:
                 _close_browser_gracefully(browser)
             try:
-                browser.stop()
+                if self.ws_address:
+                    browser._run(browser._impl._release_browser())
+                else:
+                    browser.stop()
             except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
                 config.logger.warning(
                     "Could not stop the browser: %s", errors._format_error(exc)
@@ -474,6 +499,124 @@ class BrowserSession:
     ) -> dict:
         """Inspect recorded requests; see ``browser_network``."""
         return network._network_action(self, action, value, limit)
+
+    def wait_response(self, url: str, timeout: float = 15) -> dict:
+        """Wait for a retained or upcoming matching response or failure."""
+        try:
+            if not url:
+                raise ValueError("url substring or request id is required")
+            budget = max(0.0, min(float(timeout), config._MAX_TIMEOUT_S))
+            self._run(lambda tab: None)
+            entry = self._watch.wait_response(url, budget)
+            return {"status": "ok", "action": "wait_response", "response": entry}
+        except Exception as exc:  # noqa: BLE001 - returned as tool status
+            return errors._error("wait_response", exc)
+
+    def cdp(self, method: str, params: dict[str, Any] | None = None) -> dict:
+        """Send a raw CDP command to the active page (advanced, trusted callers)."""
+        if not method or "." not in method:
+            raise ValueError("method must be a CDP Domain.method")
+        with self._lock:
+            return self._get_tab().execute_command(
+                {"method": method, "params": params or {}}
+            )
+
+    def pdf(self, path: str, width: float = 8.5, height: float = 11.0) -> dict:
+        """Print the active page to PDF with paper dimensions in inches."""
+        import base64
+
+        try:
+            if width <= 0 or height <= 0:
+                raise ValueError("paper dimensions must be positive")
+            output = Path(path).expanduser().resolve()
+            if output.suffix.lower() != ".pdf":
+                raise ValueError("PDF path must end in .pdf")
+            response = self.cdp(
+                "Page.printToPDF",
+                {
+                    "paperWidth": width,
+                    "paperHeight": height,
+                    "marginTop": 0,
+                    "marginBottom": 0,
+                    "marginLeft": 0,
+                    "marginRight": 0,
+                    "printBackground": True,
+                },
+            )
+            data = base64.b64decode(response["result"]["data"], validate=True)
+            output.write_bytes(data)
+            return {
+                "status": "ok",
+                "action": "pdf",
+                "path": str(output),
+                "bytes": len(data),
+            }
+        except Exception as exc:  # noqa: BLE001 - returned as tool status
+            return errors._error("pdf", exc)
+
+    def save_tabs(self, path: str) -> dict:
+        """Save tab URLs and active tab to a JSON file (not credentials)."""
+        import json
+
+        try:
+            with self._lock:
+                tab_list = self._tab_list()
+                entries = [self._tab_entry(i, tab) for i, tab in enumerate(tab_list)]
+                urls = [entry.get("url") for entry in entries]
+                if not all(isinstance(url, str) for url in urls):
+                    raise ValueError("could not read every tab URL")
+                active = next(
+                    (i for i, entry in enumerate(entries) if entry["active"]), 0
+                )
+                output = Path(path).expanduser().resolve()
+                output.write_text(
+                    json.dumps({"version": 1, "urls": urls, "active": active}),
+                    encoding="utf-8",
+                )
+            return {
+                "status": "ok",
+                "action": "save_tabs",
+                "path": str(output),
+                "count": len(urls),
+            }
+        except Exception as exc:  # noqa: BLE001 - returned as tool status
+            return errors._error("save_tabs", exc)
+
+    def restore_tabs(self, path: str) -> dict:
+        """Open saved tabs in addition to existing tabs after validating all URLs."""
+        import json
+
+        try:
+            data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+            urls, active = data["urls"], data["active"]
+            if (
+                data.get("version") != 1
+                or not isinstance(urls, list)
+                or not urls
+                or not all(isinstance(url, str) for url in urls)
+                or type(active) is not int
+                or not 0 <= active < len(urls)
+            ):
+                raise ValueError("invalid tab state")
+            for url in urls:
+                self._check_url(url)
+            with self._lock:
+                browser = self._browser
+                if browser is None:
+                    self._get_tab()
+                    browser = self._browser
+                if browser is None:
+                    raise RuntimeError("browser failed to start")
+                opened = []
+                for url in urls:
+                    tab = browser.new_tab()
+                    self._install_watch(tab)
+                    opened.append(tab)
+                    tab.go_to(url, timeout=max(1, int(self.timeout)))
+                self._tab = opened[active]
+            return {"status": "ok", "action": "restore_tabs", "count": len(opened)}
+        except Exception as exc:  # noqa: BLE001 - returned as tool status
+            return errors._error("restore_tabs", exc)
 
     def tools(
         self,

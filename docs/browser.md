@@ -52,6 +52,9 @@ result = agent(task="Open https://example.com and summarize the page")
 | `browser_snapshot` | Read the current page as structured nodes or a text tree. |
 | `browser_tabs` | List, open, switch, and close tabs. |
 | `browser_network` | Inspect the requests the page made and fetch a response body. |
+| `browser_wait_response` | Wait for a matching response or failed request. |
+| `browser_pdf` | Print the current page to a PDF file. |
+| `browser_save_tabs` / `browser_restore_tabs` | Save and reopen tab URLs. |
 | `browser_cookies` | Read, write, clear, save, and load cookies. |
 | `browser_screenshot` | Capture a PNG, JPEG, or WebP. |
 | `browser_evaluate` | Run JavaScript in the page and return its value. |
@@ -65,8 +68,9 @@ Browser(include_search=True)  # appends web_search
 ```
 
 The individual functions (`browser`, `browser_snapshot`, …) remain available
-when you want a hand-picked list. They use the shared module-level session,
-the same one `Browser()` uses by default.
+when you want a hand-picked list. They share a module-level session; each
+`Browser()` call instead creates its own isolated session. To share deliberately,
+pass the same `BrowserSession` to each bundle.
 
 The browser starts on the first tool call, not when `Browser()` is called.
 Later calls reuse the same tab until you call `browser_close` or the process
@@ -110,7 +114,10 @@ tools.close()  # stops this session only
 | `user_data_dir` | `None` | Persistent Chrome profile directory. |
 | `cookie_state` | `None` | JSON cookie file loaded at startup and rewritten on cookie changes and close. |
 | `allowed_schemes` | `http`, `https`, `about`, `data` | URL schemes the browser may open. |
-| `url_policy` | `None` | Callable that receives each normalized URL and returns whether it is allowed. |
+| `url_policy` | `None` | Filters URLs passed to explicit navigate and new-tab calls. |
+| `humanize` | `False` | Use pydoll humanized click, type, hover, and scroll. |
+| `stealth` | `False` | Enable humanized input; optionally provide a fingerprint. Pydoll already uses CDP without WebDriver. |
+| `fingerprint` | `None` | Pydoll fingerprint profile applied before navigation on each installed tab. |
 
 Passing any of them together with `session=` raises `ValueError`, because the
 session would be built twice. `BrowserSession` also accepts `window_size`
@@ -127,6 +134,16 @@ session = BrowserSession(
 tools = Browser(session=session)
 ```
 
+**These URL checks are not a security boundary.** They do not prevent redirects,
+links, JavaScript, popups, or subresource requests from reaching other URLs.
+Use an egress proxy or network isolation to enforce destination restrictions.
+
+Pydoll does not provide a single stealth switch or bundled fingerprint profiles.
+`stealth=True` enables humanized input, and `fingerprint` accepts a profile for
+pydoll’s `apply_fingerprint`. A profile must match the host and browser; neither
+setting guarantees a site will accept the browser. Fingerprints on popups are
+applied when the tab is discovered, which may be after its first navigation.
+
 Navigation fills in a missing scheme: `example.com` becomes
 `https://example.com`, while `localhost` and loopback addresses use `http`.
 
@@ -138,6 +155,7 @@ Navigation fills in a missing scheme: `example.com` becomes
 | --- | --- | --- |
 | `navigate` | — | URL. |
 | `click` | Element to click. | — |
+| `upload` | File input. | Path to an existing local file. |
 | `type` | Input, textarea, or contenteditable element. | Text to type. The field is cleared first. |
 | `press` | — | Key name or combination: `Enter`, `Tab`, `Escape`, `ArrowDown`, `Control+A`. |
 | `hover` | Element to move over. | — |
@@ -197,13 +215,25 @@ password. `select` verifies the same way and reports the selected option.
     "node_count": 42,
     "truncated": False,
     "nodes": [
-        {"ref": "@e1", "role": "heading", "name": "Example", "tag": "h1", "depth": 0},
-        {"ref": "@e3", "role": "textbox", "name": "Email", "tag": "input", "depth": 2},
+        {
+            "ref": "@e0123456789abcdef0123456789abcdef_1",
+            "role": "heading",
+            "name": "Example",
+            "tag": "h1",
+            "depth": 0,
+        },
+        {
+            "ref": "@e0123456789abcdef0123456789abcdef_3",
+            "role": "textbox",
+            "name": "Email",
+            "tag": "input",
+            "depth": 2,
+        },
     ],
 }
 ```
 
-Each node carries `ref` (`@e1`), `role`, `name` (accessible name), `tag`, and
+Each node carries an opaque `ref` (such as `@e..._1`), `role`, `name` (estimated accessible name), `tag`, and
 `depth`; form controls and links add `value`, `href`, `checked`, `disabled`,
 `placeholder`, or `expanded` when relevant. The same `ref` works as the
 `target` of the next action:
@@ -226,7 +256,11 @@ browser("press", value="Enter")
 
 `max_nodes` defaults to 400 and is capped at 1000. Interactive elements and
 landmarks are kept first when a long page is truncated; `truncated` says
-whether anything was cut. Every snapshot clears and reassigns refs, so take a
+whether anything was cut. Password input values are omitted. The snapshot walks
+open shadow roots and discovers iframe documents, including cross-origin frames
+when pydoll can access them. `frames_unavailable` reports frames that could not
+be read. Closed shadow roots and frames nested in shadow roots are not included.
+Every snapshot clears and reassigns refs, so take a
 fresh one after navigation or DOM changes. A stale `@ref` fails with a message
 asking for a new snapshot.
 
@@ -458,6 +492,55 @@ recording was active, `recording`.
   navigate elsewhere, or reveal data it can read.
 - Use one `BrowserSession` per user or session on a shared server so cookies
   and tabs do not leak between callers.
-- Restrict destinations with `allowed_schemes` and `url_policy` when the
-  browser must not reach internal hosts or local files.
+- `allowed_schemes` and `url_policy` filter explicit navigations only. Use
+  network and operating-system isolation to enforce access restrictions.
 - `dialog_policy="accept"` confirms every dialog, including destructive ones.
+
+## Response waits and file uploads
+
+```python
+browser_network("clear")  # discard old matches before triggering an action
+browser("click", target="text=Load orders")
+response = browser_wait_response("/orders", timeout=15)
+browser("upload", target='input[type="file"]', value="./invoice.pdf")
+```
+
+A response wait searches the bounded request history first, then waits for
+an event; it also reports network failures in `response.failed`. The watcher
+starts on tab discovery, so it cannot report requests before attachment or
+before a popup was discovered. Clear the network history before the triggering
+action when a prior response must not match. Upload paths refer to the machine
+running Chrome and must be accessible to it.
+
+## Attach, restore tabs, and PDF
+
+```python
+session = BrowserSession(ws_address="ws://127.0.0.1:9222/devtools/browser/...")
+tools = Browser(session=session)
+# A person can use the same browser while the agent is paused.
+session.save_tabs("tabs.json")
+session.restore_tabs("tabs.json")  # adds tabs; existing tabs remain open
+session.pdf("page.pdf", width=8.5, height=11)  # inches
+session.close()  # disconnects, leaving the attached Chrome running
+```
+
+The WebSocket address must refer to an already-running Chrome with remote
+debugging enabled. Attachment controls a live browser with its existing
+credentials. The ordinary dialog policy still applies, and a human and an
+agent controlling the same tab can interfere with each other. `ws_address`
+cannot be combined with `user_data_dir`, `cookie_state`, or `fingerprint`.
+The detach implementation uses Pydoll's private connection cleanup API because
+its public `stop()` closes the remote browser; it may need adjustment after a
+Pydoll upgrade.
+
+The tab state file contains URLs and the active tab index, not cookies,
+storage, tab history, or window arrangement. Use a persistent profile for
+logins and storage. Restore validates every URL against the explicit navigation
+policy before opening tabs; a navigation error may leave partially opened tabs.
+Treat state files as sensitive because URLs can contain secrets. PDF export
+prints page backgrounds with zero margins; its destination directory must exist.
+
+For trusted Python callers, `session.cdp("Domain.method", {"parameter": value})`
+sends an arbitrary CDP command to the active page and returns Pydoll's raw
+response. It is intentionally not exposed as a default agent tool and is not
+subject to the explicit-navigation URL checks.

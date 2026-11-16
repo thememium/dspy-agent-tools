@@ -64,6 +64,7 @@ class _PageWatch:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._network_changed = threading.Condition(self._lock)
         self._answers_lock = threading.Lock()
         self._answers_done = threading.Condition(self._answers_lock)
         self._answers = 0
@@ -158,6 +159,7 @@ class _PageWatch:
                 entry["mime"] = str(response.get("mimeType") or "")[:80]
                 if response.get("fromDiskCache") or response.get("fromServiceWorker"):
                     entry["cached"] = True
+                self._network_changed.notify_all()
         except Exception as exc:  # noqa: BLE001 - one event must not stop the collector
             config.logger.debug(
                 "Could not record a response: %s", errors._format_error(exc)
@@ -172,6 +174,7 @@ class _PageWatch:
                 if entry is None:
                     return
                 entry["failed"] = str(params.get("errorText") or "failed")[:120]
+                self._network_changed.notify_all()
         except Exception as exc:  # noqa: BLE001 - one event must not stop the collector
             config.logger.debug(
                 "Could not record a failure: %s", errors._format_error(exc)
@@ -192,6 +195,26 @@ class _PageWatch:
                 if needle in entry.get("url", "") or needle == entry.get("id")
             ]
         return entries[-limit:]
+
+    def wait_response(self, needle: str, timeout: float) -> dict[str, Any]:
+        """Wait for a matching retained response or network failure."""
+        import time
+
+        deadline = time.monotonic() + timeout
+        with self._network_changed:
+            while True:
+                for request_id in reversed(self._network_order):
+                    entry = self._network.get(request_id, {})
+                    if (needle in entry.get("url", "") or needle == request_id) and (
+                        "status" in entry or "failed" in entry
+                    ):
+                        return dict(entry)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"timed out waiting for response matching {needle!r}"
+                    )
+                self._network_changed.wait(remaining)
 
     def clear_network(self) -> None:
         with self._lock:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import uuid4
 
 from . import actions, config, errors, session
 
@@ -16,18 +17,73 @@ def _clamp_nodes(value: int | str) -> int:
     return max(1, min(nodes, config._MAX_SNAPSHOT_NODES))
 
 
-def _snapshot_tab(tab: Any, max_nodes: int) -> dict:
-    script = config._SNAPSHOT_JS.replace("__MAX_NODES__", str(max_nodes)).replace(
-        "__MAX_NAME__", str(config._MAX_NAME_CHARS)
+def _snapshot_tab(tab: Any, max_nodes: int, *, frame: bool = False) -> dict:
+    script = (
+        config._SNAPSHOT_JS.replace("__MAX_NODES__", str(max_nodes))
+        .replace("__MAX_NAME__", str(config._MAX_NAME_CHARS))
+        .replace("__GENERATION__", uuid4().hex)
     )
-    response = tab.execute_script(
-        script,
-        return_by_value=True,
-        allow_unsafe_eval_blocked_by_csp=True,
-    )
+    if frame:
+        response = tab.execute_script(script, return_by_value=True)
+    else:
+        response = tab.execute_script(
+            script,
+            return_by_value=True,
+            allow_unsafe_eval_blocked_by_csp=True,
+        )
     data = actions._remote_value(response)
     if not isinstance(data, dict) or not isinstance(data.get("nodes"), list):
         raise errors._ToolError("Snapshot script returned an unexpected shape")
+    return data
+
+
+def _snapshot_with_frames(tab: Any, max_nodes: int) -> dict:
+    data = _snapshot_tab(tab, max_nodes)
+    if not hasattr(tab, "find_shadow_roots"):
+        return data
+    failures = 0
+    seen = 0
+
+    def walk(parent: Any, depth: int) -> None:
+        nonlocal failures, seen
+        if depth >= 12:
+            data["truncated"] = True
+            return
+        try:
+            frames = parent.query("iframe", find_all=True, raise_exc=False)
+        except Exception:  # noqa: BLE001 - report inaccessible frames
+            failures += 1
+            return
+        if not isinstance(frames, list):
+            return
+        for frame in frames:
+            seen += 1
+            remaining = max_nodes - len(data["nodes"])
+            if remaining <= 0:
+                data["truncated"] = True
+                return
+            try:
+                document = frame.query("body", raise_exc=False)
+                if document is None:
+                    failures += 1
+                    continue
+                child = _snapshot_tab(document, remaining, frame=True)
+                for node in child["nodes"]:
+                    node["frame_url"] = child.get("url", "")
+                    node["depth"] = int(node.get("depth", 0)) + depth + 1
+                data["nodes"].extend(child["nodes"])
+                data["truncated"] = data.get("truncated", False) or child.get(
+                    "truncated", False
+                )
+                walk(frame, depth + 1)
+            except Exception:  # noqa: BLE001 - one inaccessible frame should not hide the page
+                failures += 1
+
+    walk(tab, 0)
+    if seen:
+        data["frames"] = seen
+    if failures:
+        data["frames_unavailable"] = failures
     return data
 
 
@@ -69,7 +125,16 @@ def _snapshot(
     try:
         nodes_limit = _clamp_nodes(max_nodes)
         view = _coerce_snapshot_format(format)
-        data = session._run(lambda tab: _snapshot_tab(tab, nodes_limit))
+
+        def capture(tab: Any) -> dict:
+            data = _snapshot_with_frames(tab, nodes_limit)
+            tab_id = str(getattr(tab, "target_id", ""))
+            session._snapshot_refs[tab_id] = {
+                node["ref"] for node in data["nodes"] if "ref" in node
+            }
+            return data
+
+        data = session._run(capture)
     except Exception as exc:  # noqa: BLE001 - returned as tool status
         return errors._error("snapshot", exc)
     nodes = data["nodes"]
@@ -85,7 +150,7 @@ def _snapshot(
         payload["nodes"] = nodes
     if view in ("text", "both"):
         payload["text"] = _render_nodes(nodes)
-    for key in ("console", "errors", "dialog"):
+    for key in ("console", "errors", "dialog", "frames", "frames_unavailable"):
         if key in data:
             payload[key] = data[key]
     return payload

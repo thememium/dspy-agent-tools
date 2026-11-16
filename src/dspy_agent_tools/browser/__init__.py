@@ -41,8 +41,9 @@ a ``BrowserSession``::
     tools.close()
 
 The session defaults to http, https, about, and data URLs. Pass
-``allowed_schemes`` or ``url_policy`` to ``BrowserSession`` when a server must
-block local files, private hosts, or other destinations.
+``allowed_schemes`` or ``url_policy`` to filter explicit navigation requests.
+These filters are not a security boundary; use network and OS isolation to
+restrict destinations.
 
 Requires the optional ``browser`` extra (pydoll)::
 
@@ -59,11 +60,15 @@ from .tools import (
     browser_evaluate,
     browser_network,
     browser_open,
+    browser_pdf,
     browser_record_start,
     browser_record_stop,
+    browser_restore_tabs,
+    browser_save_tabs,
     browser_screenshot,
     browser_snapshot,
     browser_tabs,
+    browser_wait_response,
 )
 
 __all__ = [
@@ -76,9 +81,13 @@ __all__ = [
     "browser_evaluate",
     "browser_network",
     "browser_open",
+    "browser_pdf",
     "browser_record_start",
     "browser_record_stop",
+    "browser_restore_tabs",
+    "browser_save_tabs",
     "browser_screenshot",
     "browser_snapshot",
     "browser_tabs",
+    "browser_wait_response",
 ]

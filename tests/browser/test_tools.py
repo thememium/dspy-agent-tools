@@ -28,6 +28,19 @@ class TestModuleFunctions:
         assert browser_module.browser_evaluate("return 'ok'")["result"] == "ok"
         assert browser_module.browser_screenshot(as_base64=True)["base64"] == "ZmFrZQ=="
 
+    def test_module_tab_state_and_response_tools_delegate(
+        self, default_session, tmp_path
+    ):
+        assert browser_module.browser_wait_response("", 0)["status"] == "error"
+        state = tmp_path / "tabs.json"
+        assert browser_module.browser_save_tabs(str(state))["action"] == "save_tabs"
+        assert (
+            browser_module.browser_restore_tabs(str(state))["action"] == "restore_tabs"
+        )
+        assert (
+            browser_module.browser_pdf(str(tmp_path / "nope.txt"))["status"] == "error"
+        )
+
     def test_module_recording_delegates_to_default_session(
         self, default_session, tmp_path, fake_ffmpeg
     ):
@@ -61,6 +74,10 @@ class TestBrowserBundle:
         "browser_snapshot",
         "browser_tabs",
         "browser_network",
+        "browser_wait_response",
+        "browser_pdf",
+        "browser_save_tabs",
+        "browser_restore_tabs",
         "browser_cookies",
         "browser_screenshot",
         "browser_evaluate",
@@ -109,8 +126,10 @@ class TestBrowserBundle:
         with pytest.raises(ValueError, match="not both"):
             browser_module.Browser(session=BrowserSession(), user_data_dir="./profile")
 
-    def test_no_options_uses_the_shared_session(self, default_session):
-        assert browser_module.Browser().session is default_session
+    def test_no_options_create_isolated_sessions(self, default_session):
+        first, second = browser_module.Browser(), browser_module.Browser()
+        assert first.session is not second.session
+        assert first.session is not default_session
 
     def test_browser_requires_pydoll(self, monkeypatch):
         monkeypatch.setattr(_pydoll, "_loaded", False)
@@ -196,3 +215,48 @@ class TestBrowserBundle:
         monkeypatch.setattr(builtins, "__import__", fake_import)
         with pytest.raises(ImportError, match="requires DSPy"):
             browser_module.Browser()
+
+
+def test_humanize_and_stealth_options():
+    first = browser_module.Browser(humanize=True)
+    second = browser_module.Browser(stealth=True, fingerprint={"locale": "en-US"})
+    assert first.session.humanize is True
+    assert second.session.humanize is True
+    assert second.session.fingerprint == {"locale": "en-US"}
+    with pytest.raises(ValueError, match="not both"):
+        browser_module.Browser(session=BrowserSession(), humanize=True)
+
+
+def test_humanized_actions_use_pydoll_flags(session, monkeypatch):
+    session.humanize = True
+    tab = session._get_tab()
+    calls = []
+    monkeypatch.setattr(
+        tab.element, "click", lambda **kwargs: calls.append(("click", kwargs))
+    )
+    monkeypatch.setattr(
+        tab.element, "type_text", lambda value, **kwargs: calls.append(("type", kwargs))
+    )
+    monkeypatch.setattr(
+        tab.element, "hover", lambda **kwargs: calls.append(("hover", kwargs))
+    )
+    monkeypatch.setattr(
+        tab.scroll, "by", lambda *args, **kwargs: calls.append(("scroll", kwargs))
+    )
+    for action, value in (
+        ("click", None),
+        ("type", "test"),
+        ("hover", None),
+        ("scroll", "down"),
+    ):
+        assert session.browser(action, target="#target", value=value)["status"] == "ok"
+    assert [name for name, _ in calls] == ["click", "type", "hover", "scroll"]
+    assert all(kwargs["humanize"] is True for _, kwargs in calls)
+
+
+def test_ws_address_option_is_forwarded():
+    tools = browser_module.Browser(ws_address="ws://127.0.0.1:9222/devtools/browser/a")
+    try:
+        assert tools.session.ws_address == "ws://127.0.0.1:9222/devtools/browser/a"
+    finally:
+        tools.close()

@@ -44,6 +44,7 @@ def browser(
             or covered by an overlay at its centre point. The result reports
             ``changed`` and ``effect`` (``dom``, ``navigation``, or ``none``),
             and a JavaScript fallback is flagged in ``warning``.
+        upload: ``target`` is a file input and ``value`` is a local file path.
         type: ``target`` plus ``value`` text. Clears the field first, then
             types. The field is read back and ``verified`` says whether it now
             holds exactly ``value``; a mismatch adds ``actual``, unless the
@@ -296,6 +297,30 @@ def browser_close() -> dict:
     return _close_payload(_default_session)
 
 
+def browser_wait_response(url: str, timeout: float = 15) -> dict:
+    """Wait for a response or failure matching a URL substring or request id.
+
+    Searches retained requests first. Call browser_network("clear") before the
+    triggering action when an older matching response should not satisfy it.
+    """
+    return _default_session.wait_response(url, timeout)
+
+
+def browser_pdf(path: str, width: float = 8.5, height: float = 11.0) -> dict:
+    """Print the current page to a PDF at path; paper dimensions are inches."""
+    return _default_session.pdf(path, width, height)
+
+
+def browser_save_tabs(path: str) -> dict:
+    """Save open tab URLs and the active tab to a JSON file."""
+    return _default_session.save_tabs(path)
+
+
+def browser_restore_tabs(path: str) -> dict:
+    """Open tabs from a previously saved JSON file alongside existing tabs."""
+    return _default_session.restore_tabs(path)
+
+
 def _bind(
     function: Callable[..., Any], method: Callable[..., Any]
 ) -> Callable[..., Any]:
@@ -359,6 +384,10 @@ def _build_tools(
         _bind(browser_snapshot, session.snapshot),
         _bind(browser_tabs, session.tabs),
         _bind(browser_network, session.network),
+        _bind(browser_wait_response, session.wait_response),
+        _bind(browser_pdf, session.pdf),
+        _bind(browser_save_tabs, session.save_tabs),
+        _bind(browser_restore_tabs, session.restore_tabs),
         _bind(browser_cookies, session.cookies),
         _bind(browser_screenshot, session.screenshot),
         _bind(browser_evaluate, session.evaluate),
@@ -390,6 +419,10 @@ def Browser(
     cookie_state: str | Path | None = None,
     allowed_schemes: Iterable[str] | None = None,
     url_policy: Callable[[str], bool] | None = None,
+    humanize: bool | None = None,
+    stealth: bool | None = None,
+    fingerprint: dict[str, Any] | None = None,
+    ws_address: str | None = None,
 ) -> BrowserTools:
     """Return the browser tools as a ready-to-use list of ``dspy.Tool`` objects.
 
@@ -401,8 +434,8 @@ def Browser(
     ``include_search=True`` to append ``web_search`` for research agents that
     need both search and a real browser.
 
-    By default the tools use the shared module-level session, matching the
-    individual functions. Pass ``session=BrowserSession(...)`` to bind every
+    Each call creates an isolated session; module-level functions retain their
+    own shared session. Pass ``session=BrowserSession(...)`` to bind every
     tool, including ``browser_close`` and :meth:`BrowserTools.close`, to an
     isolated per-user or per-request session.
 
@@ -417,6 +450,9 @@ def Browser(
     works without a profile; ``dialog_policy`` picks ``dismiss`` (default) or
     ``accept`` for page dialogs; ``headless``, ``timeout``,
     ``allowed_schemes``, and ``url_policy`` match :class:`BrowserSession`.
+    ``humanize`` uses pydoll humanized input. ``stealth`` also enables it;
+    ``fingerprint`` supplies an optional pydoll fingerprint profile. URL
+    filters apply only to explicit navigation, not all browser requests.
     Passing any of them together with ``session=`` raises ``ValueError``,
     because the session would be built twice.
     """
@@ -435,16 +471,22 @@ def Browser(
         options["allowed_schemes"] = allowed_schemes
     if url_policy is not None:
         options["url_policy"] = url_policy
+    if humanize is not None:
+        options["humanize"] = humanize
+    if stealth is not None:
+        options["stealth"] = stealth
+    if fingerprint is not None:
+        options["fingerprint"] = fingerprint
+    if ws_address is not None:
+        options["ws_address"] = ws_address
     if session is not None and options:
         raise ValueError(
             "pass either session= or session options to Browser(), not both"
         )
     if session is not None:
         target_session = session
-    elif options:
-        target_session = session_module.BrowserSession(**options)
     else:
-        target_session = _default_session
+        target_session = session_module.BrowserSession(**options)
     return _build_tools(
         target_session,
         include_search=include_search,

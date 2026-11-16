@@ -120,13 +120,17 @@ def _key(value: str) -> _pydoll.Key:
     )
 
 
-def _scroll(tab: Any, value: str | None) -> None:
+def _scroll(tab: Any, value: str | None, humanize: bool = False) -> None:
     direction = (value or "down").strip().lower()
     if direction == "top":
-        tab.scroll.to_top(smooth=False)
+        tab.scroll.to_top(
+            smooth=False, humanize=True
+        ) if humanize else tab.scroll.to_top(smooth=False)
         return
     if direction == "bottom":
-        tab.scroll.to_bottom(smooth=False)
+        tab.scroll.to_bottom(
+            smooth=False, humanize=True
+        ) if humanize else tab.scroll.to_bottom(smooth=False)
         return
     if direction in ("up", "down"):
         position = (
@@ -134,7 +138,11 @@ def _scroll(tab: Any, value: str | None) -> None:
             if direction == "up"
             else _pydoll.ScrollPosition.DOWN
         )
-        tab.scroll.by(position, config._DEFAULT_SCROLL_PX, smooth=False)
+        tab.scroll.by(
+            position, config._DEFAULT_SCROLL_PX, smooth=False, humanize=True
+        ) if humanize else tab.scroll.by(
+            position, config._DEFAULT_SCROLL_PX, smooth=False
+        )
         return
     if config._INT_RE.fullmatch(direction):
         pixels = int(direction)
@@ -143,7 +151,9 @@ def _scroll(tab: Any, value: str | None) -> None:
         position = (
             _pydoll.ScrollPosition.DOWN if pixels > 0 else _pydoll.ScrollPosition.UP
         )
-        tab.scroll.by(position, abs(pixels), smooth=False)
+        tab.scroll.by(
+            position, abs(pixels), smooth=False, humanize=True
+        ) if humanize else tab.scroll.by(position, abs(pixels), smooth=False)
         return
     raise errors._ToolError(
         "scroll value must be down, up, top, bottom, or a pixel count"
@@ -213,6 +223,7 @@ def _perform(
     timeout: float,
     *,
     url: str | None = None,
+    humanize: bool = False,
 ) -> dict:
     if action == "navigate":
         assert url is not None
@@ -229,7 +240,7 @@ def _perform(
         element = dom._element(tab, target, timeout)
         dom._require_actionable(element, "click")
         before = dom._probe(tab)
-        method, method_warning = dom._click(element)
+        method, method_warning = dom._click(element, humanize=humanize)
         settled = _settle(tab, timeout)
         effect = dom._effect(tab, before)
         payload: dict[str, Any] = {
@@ -246,6 +257,23 @@ def _perform(
             payload["warning"] = "; ".join(warnings)
         return payload
 
+    if action == "upload":
+        if not value:
+            raise errors._ToolError("upload requires value=local file path")
+        from pathlib import Path
+
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            raise errors._ToolError("upload path must be an existing file")
+        element = dom._element(tab, target, timeout)
+        element.set_input_files(str(path))
+        return {
+            "status": "ok",
+            "action": "upload",
+            "target": target,
+            "filename": path.name,
+        }
+
     if action == "type":
         if value is None:
             raise errors._ToolError("type requires value=text")
@@ -259,7 +287,9 @@ def _perform(
         element.clear()
         method = "keys"
         try:
-            element.type_text(value)
+            element.type_text(value, humanize=True) if humanize else element.type_text(
+                value
+            )
         except Exception as type_error:  # noqa: BLE001 - fall back to JS insertion
             try:
                 element.focus()
@@ -296,7 +326,7 @@ def _perform(
     if action == "hover":
         element = dom._element(tab, target, timeout)
         dom._require_actionable(element, "hover")
-        element.hover()
+        element.hover(humanize=True) if humanize else element.hover()
         return {
             "status": "ok",
             "action": "hover",
@@ -329,7 +359,7 @@ def _perform(
         return payload
 
     if action == "scroll":
-        _scroll(tab, value)
+        _scroll(tab, value, humanize)
         return {
             "status": "ok",
             "action": "scroll",
@@ -392,9 +422,26 @@ def _browser_action(
             else None
         )
         before = tabs._tab_count(session) if action in config._TAB_ACTIONS else None
-        payload = session._run(
-            lambda tab: _perform(tab, action, target, value, timeout_s, url=url)
-        )
+
+        def perform(tab: Any) -> dict:
+            ref = "@" + target[4:] if target and target.startswith("ref=") else target
+            if ref and re.fullmatch(r"@e[0-9a-f]{32}_[0-9]+", ref):
+                tab_id = str(getattr(tab, "target_id", ""))
+                if ref not in session._snapshot_refs.get(tab_id, set()):
+                    raise errors._ToolError(
+                        "stale element ref; call browser_snapshot for fresh refs"
+                    )
+            return _perform(
+                tab,
+                action,
+                target,
+                value,
+                timeout_s,
+                url=url,
+                humanize=session.humanize,
+            )
+
+        payload = session._run(perform)
     except Exception as exc:  # noqa: BLE001 - returned as tool status
         extra.update(session.take_diagnostics())
         return errors._error(action, exc, **extra)

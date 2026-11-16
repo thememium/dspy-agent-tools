@@ -4,6 +4,7 @@ import atexit
 import threading
 import time
 
+import pytest
 from pydoll.exceptions import ConnectionException, FailedToStartBrowser
 
 from dspy_agent_tools.browser import BrowserSession, config
@@ -237,3 +238,47 @@ class TestPersistentProfile:
         assert not any(
             argument.startswith("--user-data-dir=") for argument in options.arguments
         )
+
+
+class TestConnectionAddress:
+    WS_ADDRESS = "ws://127.0.0.1:9222/devtools/browser/abc"
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"user_data_dir": "./profile"},
+            {"cookie_state": "./cookies.json"},
+            {"fingerprint": {"locale": "en-US"}},
+        ],
+    )
+    def test_ws_address_rejects_profile_state(self, extra):
+        with pytest.raises(ValueError, match="cannot be combined"):
+            BrowserSession(ws_address=self.WS_ADDRESS, **extra)
+
+    def test_ws_address_connects_instead_of_starting(self, fake_chrome):
+        session = BrowserSession(ws_address=self.WS_ADDRESS)
+        session._get_tab()
+        chrome = fake_chrome.instances[0]
+        assert chrome.connections == [self.WS_ADDRESS]
+        assert chrome.started is True
+        session.close()
+        assert chrome.stopped is False
+        assert chrome._impl.releases == 1
+        assert chrome.runs == ["release-browser"]
+
+    def test_reset_releases_a_connected_browser(self, fake_chrome):
+        session = BrowserSession(ws_address=self.WS_ADDRESS)
+        session._get_tab()
+        session._reset()
+        chrome = fake_chrome.instances[0]
+        assert chrome._impl.releases == 1
+        assert chrome.stopped is False
+
+
+def test_fingerprint_is_applied_to_each_new_tab(fake_chrome):
+    session = BrowserSession(fingerprint={"locale": "en-US"})
+    try:
+        session._get_tab()
+        assert fake_chrome.instances[0].tab.fingerprints == [{"locale": "en-US"}]
+    finally:
+        session.close()
