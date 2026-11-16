@@ -60,11 +60,15 @@ from .tools import (
     browser_evaluate,
     browser_network,
     browser_open,
+    browser_pdf,
     browser_record_start,
     browser_record_stop,
+    browser_restore_tabs,
+    browser_save_tabs,
     browser_screenshot,
     browser_snapshot,
     browser_tabs,
+    browser_wait_response,
 )
 
 __all__ = [
@@ -77,9 +81,13 @@ __all__ = [
     "browser_evaluate",
     "browser_network",
     "browser_open",
+    "browser_pdf",
     "browser_record_start",
     "browser_record_stop",
+    "browser_restore_tabs",
+    "browser_save_tabs",
     "browser_screenshot",
     "browser_snapshot",
     "browser_tabs",
+    "browser_wait_response",
 ]
