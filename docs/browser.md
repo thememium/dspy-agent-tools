@@ -64,6 +64,7 @@ Two flags extend the list:
 
 ```python
 Browser(include_recording=True)  # adds browser_record_start/stop
+Browser(include_recording=True, show_cursor=True, humanize=True)
 Browser(include_search=True)  # appends web_search
 ```
 
@@ -447,7 +448,7 @@ Record the session by bracketing the actions:
 ```python
 from dspy_agent_tools import browser, browser_record_start, browser_record_stop
 
-browser_record_start(path="checkout.mp4", fps=10)
+browser_record_start(path="checkout.mp4", fps=20, show_cursor=True)
 browser("navigate", value="https://example.com/checkout")
 browser("click", target="text=Pay")
 video = browser_record_stop()
@@ -456,13 +457,22 @@ video = browser_record_stop()
 ```
 
 `browser_record_start(path=None, fps=10, quality=80, max_width=None,
-max_height=None)`:
+max_height=None, show_cursor=False)`:
 
 - `path` defaults to a temp file. `.mp4` uses H.264 and `.webm` uses VP9;
   other suffixes are rejected.
 - `fps` caps how many frames per second are kept (1–60).
 - `quality` applies to the intermediate JPEG frames (0–100).
 - `max_width` / `max_height` downscale the capture.
+- `show_cursor` draws a pointer and click indicator in the recorded tab. Use
+  `Browser(humanize=True, include_recording=True)` or
+  `BrowserSession(humanize=True)` for gradual mouse paths. Without humanized
+  input, the pointer can jump directly to an element. The overlay is part of
+  the page while recording, so it may also appear in screenshots. It follows
+  mouse events, not JavaScript-only clicks, and is limited to the recorded tab.
+  Set `show_cursor=True` on `Browser()` (or `session.tools()`) to make it the
+  default for that tool list; `browser_record_start(show_cursor=False)` can
+  override it. Recording still needs to be started and stopped explicitly.
 
 Frames come from Chrome's CDP screencast and are encoded with `ffmpeg` when
 recording stops. `fps` is a capture cap, not a guarantee: Chrome only emits
