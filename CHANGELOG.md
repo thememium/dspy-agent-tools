@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.1.15 (2026-11-16)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.14...v0.1.15)
+
+### 🚀 Enhancements
+
+- browser improvements (#17) ([d3045ef](https://github.com/thememium/dspy-agent-tools/commit/d3045ef7f9277570440e4163f51a93f026ad7461))
+- **pyproject**: add an `all` extras grouping optional bridges ([5bdd8ff](https://github.com/thememium/dspy-agent-tools/commit/5bdd8ff105e8af47300f7cd90249274420421bc2))
+
+### 📖 Documentation
+
+- add `[all]` optional bridge install example to README ([1200904](https://github.com/thememium/dspy-agent-tools/commit/120090447d9858adc7cb310d0a76366b1272b4df))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.14 (2026-11-15)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.13...v0.1.14)
