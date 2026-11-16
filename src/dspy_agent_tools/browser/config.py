@@ -12,6 +12,7 @@ TextArg = str | int | float
 Action = Literal[
     "navigate",
     "click",
+    "upload",
     "type",
     "press",
     "hover",
@@ -132,6 +133,7 @@ _NO_EFFECT_WARNING = (
 _ACTIONS = (
     "navigate",
     "click",
+    "upload",
     "type",
     "press",
     "hover",
