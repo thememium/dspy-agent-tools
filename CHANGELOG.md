@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.1.16 (2026-11-16)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.15...v0.1.16)
+
+### 🚀 Enhancements
+
+- browser show cursor in recordings (#18) ([fcc55ad](https://github.com/thememium/dspy-agent-tools/commit/fcc55adecb687a09b72c977b86f1c458a269dc62))
+
+### 📖 Documentation
+
+- **browser**: add browser lifecycle section to clarify session handling ([1eeca67](https://github.com/thememium/dspy-agent-tools/commit/1eeca67a058d44a7787613593c5aa59a23212b11))
+- add Browser lifecycle cleanup example ([8e308e7](https://github.com/thememium/dspy-agent-tools/commit/8e308e7ea5a690214b01cd0df41cd06b7ed077c2))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.15 (2026-11-16)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.14...v0.1.15)
