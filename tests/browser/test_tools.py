@@ -28,6 +28,19 @@ class TestModuleFunctions:
         assert browser_module.browser_evaluate("return 'ok'")["result"] == "ok"
         assert browser_module.browser_screenshot(as_base64=True)["base64"] == "ZmFrZQ=="
 
+    def test_module_tab_state_and_response_tools_delegate(
+        self, default_session, tmp_path
+    ):
+        assert browser_module.browser_wait_response("", 0)["status"] == "error"
+        state = tmp_path / "tabs.json"
+        assert browser_module.browser_save_tabs(str(state))["action"] == "save_tabs"
+        assert (
+            browser_module.browser_restore_tabs(str(state))["action"] == "restore_tabs"
+        )
+        assert (
+            browser_module.browser_pdf(str(tmp_path / "nope.txt"))["status"] == "error"
+        )
+
     def test_module_recording_delegates_to_default_session(
         self, default_session, tmp_path, fake_ffmpeg
     ):
@@ -239,3 +252,11 @@ def test_humanized_actions_use_pydoll_flags(session, monkeypatch):
         assert session.browser(action, target="#target", value=value)["status"] == "ok"
     assert [name for name, _ in calls] == ["click", "type", "hover", "scroll"]
     assert all(kwargs["humanize"] is True for _, kwargs in calls)
+
+
+def test_ws_address_option_is_forwarded():
+    tools = browser_module.Browser(ws_address="ws://127.0.0.1:9222/devtools/browser/a")
+    try:
+        assert tools.session.ws_address == "ws://127.0.0.1:9222/devtools/browser/a"
+    finally:
+        tools.close()

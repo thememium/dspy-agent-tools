@@ -31,6 +31,8 @@ class FakeElement:
         self.on_top = True
         self.editable = True
         self.scroll_calls = 0
+        self.uploads = []
+        self.script_error = None
         self.field_state = {
             "tag": "input",
             "value": None,
@@ -89,8 +91,13 @@ class FakeElement:
     def hover(self):
         self.hover_calls += 1
 
+    def set_input_files(self, path):
+        self.uploads.append(path)
+
     def execute_script(self, script, **kwargs):
         self.scripts.append((script, kwargs))
+        if self.script_error:
+            raise self.script_error
         if "readOnly" in script:
             if self.field_state_error:
                 raise self.field_state_error
@@ -162,6 +169,8 @@ class FakeTab:
         self.removed_callbacks = []
         self.commands = []
         self.command_error = None
+        self.command_response = {"result": {}}
+        self.fingerprints = []
         self.remove_callback_error = None
         self._next_callback_id = 0
         self.probe_responses = []
@@ -275,6 +284,9 @@ class FakeTab:
     def handle_dialog(self, accept, prompt_text=None):
         self.dialogs.append((accept, prompt_text))
 
+    def apply_fingerprint(self, fingerprint):
+        self.fingerprints.append(dict(fingerprint))
+
     def on(self, event_name, callback, temporary=False):
         self._next_callback_id += 1
         self.callbacks[self._next_callback_id] = (event_name, callback, temporary)
@@ -290,7 +302,16 @@ class FakeTab:
         self.commands.append(command)
         if self.command_error:
             raise self.command_error
-        return {"result": {}}
+        return self.command_response
+
+
+class FakeBrowserImpl:
+    def __init__(self):
+        self.releases = 0
+
+    def _release_browser(self):
+        self.releases += 1
+        return "release-browser"
 
 
 class FakeChrome:
@@ -305,6 +326,9 @@ class FakeChrome:
         self.tab = FakeTab()
         self.tabs = [self.tab]
         self.opened_urls = []
+        self.connections = []
+        self.runs = []
+        self._impl = FakeBrowserImpl()
         FakeChrome.instances.append(self)
 
     def start(self):
@@ -312,6 +336,15 @@ class FakeChrome:
             raise FakeChrome.start_error
         self.started = True
         return self.tab
+
+    def connect(self, ws_address):
+        self.connections.append(ws_address)
+        self.started = True
+        return self.tab
+
+    def _run(self, command):
+        self.runs.append(command)
+        return command
 
     def new_tab(self, url="", browser_context_id=None):
         tab = FakeTab()
@@ -333,6 +366,68 @@ class FakeChrome:
 
     def stop(self):
         self.stopped = True
+
+
+class FakeFrameDocument:
+    """Page or iframe document for shadow-root and frame traversal.
+
+    ``frames`` is returned for ``find_all`` queries and may be any value so a
+    test can pose a parent whose iframe query is not a list. ``body`` answers
+    single-element queries, which is how an iframe yields its document.
+    """
+
+    def __init__(
+        self,
+        nodes=(),
+        *,
+        frames=None,
+        body=None,
+        shadow_roots=(),
+        url="",
+        query_error=None,
+        script_error=None,
+        truncated=False,
+    ):
+        self.nodes = [dict(node) for node in nodes]
+        self.frames = frames
+        self.body = body
+        self.shadow_roots = list(shadow_roots)
+        self.url = url
+        self.query_error = query_error
+        self.script_error = script_error
+        self.truncated = truncated
+        self.queries = []
+        self.scripts = []
+
+    def find_shadow_roots(self, deep=True):
+        return list(self.shadow_roots)
+
+    def query(self, expression, timeout=0, find_all=False, raise_exc=True):
+        self.queries.append((expression, find_all))
+        if self.query_error is not None:
+            raise self.query_error
+        return self.frames if find_all else self.body
+
+    def execute_script(self, script, **kwargs):
+        self.scripts.append((script, kwargs))
+        if self.script_error is not None:
+            raise self.script_error
+        value = {"url": self.url, "nodes": [dict(node) for node in self.nodes]}
+        if self.truncated:
+            value["truncated"] = True
+        return {"result": {"result": {"value": value}}}
+
+
+class FakeShadowRoot:
+    """Shadow root stand-in whose queries answer from one fixed element."""
+
+    def __init__(self, element=None):
+        self.element = element
+        self.queries = []
+
+    def query(self, expression, timeout=0, find_all=False, raise_exc=True):
+        self.queries.append(expression)
+        return self.element
 
 
 def frame_event(data=b"frame", timestamp=1.0, session_id=1):

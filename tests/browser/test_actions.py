@@ -590,3 +590,35 @@ class TestWaitConditions:
         result = session.browser("wait", value=value)
         assert result["status"] == "error"
         assert message in result["error"]
+
+
+class TestUpload:
+    def test_upload_requires_a_file_path(self, session):
+        result = session.browser("upload", target="#file")
+        assert result["status"] == "error"
+        assert "upload requires value=local file path" in result["error"]
+
+    def test_upload_rejects_a_missing_file(self, session, tmp_path):
+        result = session.browser(
+            "upload", target="#file", value=str(tmp_path / "missing.txt")
+        )
+        assert result["status"] == "error"
+        assert "upload path must be an existing file" in result["error"]
+
+    def test_upload_sets_the_resolved_file_input(self, session, tmp_path):
+        file = tmp_path / "upload.txt"
+        file.write_text("hello")
+        result = session.browser("upload", target="#file", value=str(file))
+        assert result["status"] == "ok"
+        assert result["action"] == "upload"
+        assert result["filename"] == "upload.txt"
+        assert session._tab.element.uploads == [str(file.resolve())]
+
+
+class TestStaleRefs:
+    def test_hash_ref_from_a_previous_snapshot_is_rejected(self, session):
+        stale = "@e" + "0" * 32 + "_1"
+        result = session.browser("click", target=stale)
+        assert result["status"] == "error"
+        assert "stale element ref" in result["error"]
+        assert session._tab.element.click_calls == 0
