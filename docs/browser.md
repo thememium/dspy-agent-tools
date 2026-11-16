@@ -65,8 +65,9 @@ Browser(include_search=True)  # appends web_search
 ```
 
 The individual functions (`browser`, `browser_snapshot`, …) remain available
-when you want a hand-picked list. They use the shared module-level session,
-the same one `Browser()` uses by default.
+when you want a hand-picked list. They share a module-level session; each
+`Browser()` call instead creates its own isolated session. To share deliberately,
+pass the same `BrowserSession` to each bundle.
 
 The browser starts on the first tool call, not when `Browser()` is called.
 Later calls reuse the same tab until you call `browser_close` or the process
@@ -110,7 +111,10 @@ tools.close()  # stops this session only
 | `user_data_dir` | `None` | Persistent Chrome profile directory. |
 | `cookie_state` | `None` | JSON cookie file loaded at startup and rewritten on cookie changes and close. |
 | `allowed_schemes` | `http`, `https`, `about`, `data` | URL schemes the browser may open. |
-| `url_policy` | `None` | Callable that receives each normalized URL and returns whether it is allowed. |
+| `url_policy` | `None` | Filters URLs passed to explicit navigate and new-tab calls. |
+| `humanize` | `False` | Use pydoll humanized click, type, hover, and scroll. |
+| `stealth` | `False` | Enable humanized input; optionally provide a fingerprint. Pydoll already uses CDP without WebDriver. |
+| `fingerprint` | `None` | Pydoll fingerprint profile applied before navigation on each installed tab. |
 
 Passing any of them together with `session=` raises `ValueError`, because the
 session would be built twice. `BrowserSession` also accepts `window_size`
@@ -126,6 +130,16 @@ session = BrowserSession(
 )
 tools = Browser(session=session)
 ```
+
+**These URL checks are not a security boundary.** They do not prevent redirects,
+links, JavaScript, popups, or subresource requests from reaching other URLs.
+Use an egress proxy or network isolation to enforce destination restrictions.
+
+Pydoll does not provide a single stealth switch or bundled fingerprint profiles.
+`stealth=True` enables humanized input, and `fingerprint` accepts a profile for
+pydoll’s `apply_fingerprint`. A profile must match the host and browser; neither
+setting guarantees a site will accept the browser. Fingerprints on popups are
+applied when the tab is discovered, which may be after its first navigation.
 
 Navigation fills in a missing scheme: `example.com` becomes
 `https://example.com`, while `localhost` and loopback addresses use `http`.
@@ -197,13 +211,25 @@ password. `select` verifies the same way and reports the selected option.
     "node_count": 42,
     "truncated": False,
     "nodes": [
-        {"ref": "@e1", "role": "heading", "name": "Example", "tag": "h1", "depth": 0},
-        {"ref": "@e3", "role": "textbox", "name": "Email", "tag": "input", "depth": 2},
+        {
+            "ref": "@e0123456789abcdef0123456789abcdef_1",
+            "role": "heading",
+            "name": "Example",
+            "tag": "h1",
+            "depth": 0,
+        },
+        {
+            "ref": "@e0123456789abcdef0123456789abcdef_3",
+            "role": "textbox",
+            "name": "Email",
+            "tag": "input",
+            "depth": 2,
+        },
     ],
 }
 ```
 
-Each node carries `ref` (`@e1`), `role`, `name` (accessible name), `tag`, and
+Each node carries an opaque `ref` (such as `@e..._1`), `role`, `name` (estimated accessible name), `tag`, and
 `depth`; form controls and links add `value`, `href`, `checked`, `disabled`,
 `placeholder`, or `expanded` when relevant. The same `ref` works as the
 `target` of the next action:
@@ -226,7 +252,11 @@ browser("press", value="Enter")
 
 `max_nodes` defaults to 400 and is capped at 1000. Interactive elements and
 landmarks are kept first when a long page is truncated; `truncated` says
-whether anything was cut. Every snapshot clears and reassigns refs, so take a
+whether anything was cut. Password input values are omitted. The snapshot walks
+open shadow roots and discovers iframe documents, including cross-origin frames
+when pydoll can access them. `frames_unavailable` reports frames that could not
+be read. Closed shadow roots and frames nested in shadow roots are not included.
+Every snapshot clears and reassigns refs, so take a
 fresh one after navigation or DOM changes. A stale `@ref` fails with a message
 asking for a new snapshot.
 
@@ -458,6 +488,6 @@ recording was active, `recording`.
   navigate elsewhere, or reveal data it can read.
 - Use one `BrowserSession` per user or session on a shared server so cookies
   and tabs do not leak between callers.
-- Restrict destinations with `allowed_schemes` and `url_policy` when the
-  browser must not reach internal hosts or local files.
+- `allowed_schemes` and `url_policy` filter explicit navigations only. Use
+  network and operating-system isolation to enforce access restrictions.
 - `dialog_policy="accept"` confirms every dialog, including destructive ones.
