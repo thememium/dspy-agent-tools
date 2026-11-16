@@ -152,6 +152,22 @@ class TestBrowserBundle:
             "browser_close",
         ]
 
+    @pytest.mark.parametrize("use_session_tools", [False, True])
+    def test_cursor_default_for_recording_tool(self, session, use_session_tools):
+        calls = []
+        session.record_start = lambda *args, **kwargs: calls.append((args, kwargs))
+        if use_session_tools:
+            tools = session.tools(include_recording=True, show_cursor=True)
+        else:
+            tools = browser_module.Browser(
+                session=session, include_recording=True, show_cursor=True
+            )
+        start = next(tool for tool in tools if tool.name == "browser_record_start")
+        assert start.args["show_cursor"]["default"] is True
+        start.func()
+        start.func(show_cursor=False)
+        assert calls == [((), {"show_cursor": True}), ((), {"show_cursor": False})]
+
     def test_browser_can_include_search(self):
         tools = browser_module.Browser(include_search=True)
         assert [tool.name for tool in tools] == [*self.DEFAULT_NAMES, "web_search"]
