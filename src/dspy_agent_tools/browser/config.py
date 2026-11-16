@@ -183,6 +183,7 @@ _SNAPSHOT_JS = r"""
 return (
   function () {
   const MAX_NODES = __MAX_NODES__;
+  const GENERATION = "__GENERATION__";
   const MAX_NAME = __MAX_NAME__;
   const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "META", "LINK", "HEAD", "TITLE"]);
   const TEXT_TAGS = new Set(["H1","H2","H3","H4","H5","H6","P","LI","TD","TH","PRE","CODE","BLOCKQUOTE","DD","DT","FIGCAPTION","LABEL","IMG"]);
@@ -190,9 +191,16 @@ return (
   const INTERACTIVE_TAGS = new Set(["A","BUTTON","INPUT","SELECT","TEXTAREA","SUMMARY","DETAILS"]);
   const INTERACTIVE_ROLES = new Set(["button","link","checkbox","radio","tab","menuitem","menuitemcheckbox","menuitemradio","option","switch","textbox","searchbox","combobox","slider","spinbutton"]);
 
-  for (const el of document.querySelectorAll("[data-dspy-agent-ref]")) {
-    el.removeAttribute("data-dspy-agent-ref");
+  function clearRefs(root) {
+    for (const el of root.querySelectorAll("*")) {
+      el.removeAttribute("data-dspy-agent-ref");
+      if (el.shadowRoot) clearRefs(el.shadowRoot);
+      if (el.tagName === "IFRAME") {
+        try { if (el.contentDocument) clearRefs(el.contentDocument); } catch (_) {}
+      }
+    }
   }
+  clearRefs(document);
 
   const candidates = [];
   let order = 0;
@@ -279,7 +287,7 @@ return (
   }
 
   function collect(root, depth) {
-    for (const el of root.children) {
+    for (const el of root.children || []) {
       if (SKIP.has(el.tagName) || !isVisible(el)) continue;
       const tag = el.tagName;
       const interactive = isInteractive(el);
@@ -299,6 +307,7 @@ return (
         });
       }
       collect(el, depth + 1);
+      if (el.shadowRoot) collect(el.shadowRoot, depth + 1);
     }
   }
 
@@ -315,7 +324,7 @@ return (
     .sort((a, b) => a.order - b.order);
 
   const nodes = selected.map((candidate, index) => {
-    const ref = "e" + (index + 1);
+    const ref = "e" + GENERATION + "_" + (index + 1);
     candidate.el.setAttribute("data-dspy-agent-ref", ref);
     const node = {
       ref: "@" + ref,
@@ -324,7 +333,8 @@ return (
       tag: candidate.tag,
       depth: candidate.depth,
     };
-    if (candidate.el.value !== undefined && ["input", "textarea", "select"].includes(candidate.tag)) {
+    if (candidate.el.value !== undefined && ["input", "textarea", "select"].includes(candidate.tag) &&
+        !(candidate.tag === "input" && (candidate.el.type || "").toLowerCase() === "password")) {
       node.value = String(candidate.el.value).slice(0, 200);
     }
     if (candidate.tag === "a" && candidate.el.getAttribute("href")) {
