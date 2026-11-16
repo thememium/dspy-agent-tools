@@ -41,8 +41,9 @@ a ``BrowserSession``::
     tools.close()
 
 The session defaults to http, https, about, and data URLs. Pass
-``allowed_schemes`` or ``url_policy`` to ``BrowserSession`` when a server must
-block local files, private hosts, or other destinations.
+``allowed_schemes`` or ``url_policy`` to filter explicit navigation requests.
+These filters are not a security boundary; use network and OS isolation to
+restrict destinations.
 
 Requires the optional ``browser`` extra (pydoll)::
 
