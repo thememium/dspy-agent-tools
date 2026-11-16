@@ -390,6 +390,9 @@ def Browser(
     cookie_state: str | Path | None = None,
     allowed_schemes: Iterable[str] | None = None,
     url_policy: Callable[[str], bool] | None = None,
+    humanize: bool | None = None,
+    stealth: bool | None = None,
+    fingerprint: dict[str, Any] | None = None,
 ) -> BrowserTools:
     """Return the browser tools as a ready-to-use list of ``dspy.Tool`` objects.
 
@@ -401,8 +404,8 @@ def Browser(
     ``include_search=True`` to append ``web_search`` for research agents that
     need both search and a real browser.
 
-    By default the tools use the shared module-level session, matching the
-    individual functions. Pass ``session=BrowserSession(...)`` to bind every
+    Each call creates an isolated session; module-level functions retain their
+    own shared session. Pass ``session=BrowserSession(...)`` to bind every
     tool, including ``browser_close`` and :meth:`BrowserTools.close`, to an
     isolated per-user or per-request session.
 
@@ -417,6 +420,9 @@ def Browser(
     works without a profile; ``dialog_policy`` picks ``dismiss`` (default) or
     ``accept`` for page dialogs; ``headless``, ``timeout``,
     ``allowed_schemes``, and ``url_policy`` match :class:`BrowserSession`.
+    ``humanize`` uses pydoll humanized input. ``stealth`` also enables it;
+    ``fingerprint`` supplies an optional pydoll fingerprint profile. URL
+    filters apply only to explicit navigation, not all browser requests.
     Passing any of them together with ``session=`` raises ``ValueError``,
     because the session would be built twice.
     """
@@ -435,16 +441,20 @@ def Browser(
         options["allowed_schemes"] = allowed_schemes
     if url_policy is not None:
         options["url_policy"] = url_policy
+    if humanize is not None:
+        options["humanize"] = humanize
+    if stealth is not None:
+        options["stealth"] = stealth
+    if fingerprint is not None:
+        options["fingerprint"] = fingerprint
     if session is not None and options:
         raise ValueError(
             "pass either session= or session options to Browser(), not both"
         )
     if session is not None:
         target_session = session
-    elif options:
-        target_session = session_module.BrowserSession(**options)
     else:
-        target_session = _default_session
+        target_session = session_module.BrowserSession(**options)
     return _build_tools(
         target_session,
         include_search=include_search,
