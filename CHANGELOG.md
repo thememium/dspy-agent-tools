@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.1.17 (2026-11-16)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.16...v0.1.17)
+
+### 🚀 Enhancements
+
+- **mcp**: allow MCP tool arguments that are not valid Python identifiers ([fd0cfb2](https://github.com/thememium/dspy-agent-tools/commit/fd0cfb2a1bc353b3c22619c273448ad6ca075eb9))
+
+### 💅 Refactors
+
+- return signature and renames from _mcp_signature ([7e5dcdb](https://github.com/thememium/dspy-agent-tools/commit/7e5dcdba8f743ba421e338ee546212de560153c3))
+- **mcp**: pass renames to _as_sync_capable for proper signature handling ([99dabbd](https://github.com/thememium/dspy-agent-tools/commit/99dabbd24d9f93e3863f9e28ec85cb9d9b8bbc59))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.16 (2026-11-16)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.15...v0.1.16)
