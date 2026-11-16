@@ -44,6 +44,7 @@ def browser(
             or covered by an overlay at its centre point. The result reports
             ``changed`` and ``effect`` (``dom``, ``navigation``, or ``none``),
             and a JavaScript fallback is flagged in ``warning``.
+        upload: ``target`` is a file input and ``value`` is a local file path.
         type: ``target`` plus ``value`` text. Clears the field first, then
             types. The field is read back and ``verified`` says whether it now
             holds exactly ``value``; a mismatch adds ``actual``, unless the
@@ -296,6 +297,30 @@ def browser_close() -> dict:
     return _close_payload(_default_session)
 
 
+def browser_wait_response(url: str, timeout: float = 15) -> dict:
+    """Wait for a response or failure matching a URL substring or request id.
+
+    Searches retained requests first. Call browser_network("clear") before the
+    triggering action when an older matching response should not satisfy it.
+    """
+    return _default_session.wait_response(url, timeout)
+
+
+def browser_pdf(path: str, width: float = 8.5, height: float = 11.0) -> dict:
+    """Print the current page to a PDF at path; paper dimensions are inches."""
+    return _default_session.pdf(path, width, height)
+
+
+def browser_save_tabs(path: str) -> dict:
+    """Save open tab URLs and the active tab to a JSON file."""
+    return _default_session.save_tabs(path)
+
+
+def browser_restore_tabs(path: str) -> dict:
+    """Open tabs from a previously saved JSON file alongside existing tabs."""
+    return _default_session.restore_tabs(path)
+
+
 def _bind(
     function: Callable[..., Any], method: Callable[..., Any]
 ) -> Callable[..., Any]:
@@ -359,6 +384,10 @@ def _build_tools(
         _bind(browser_snapshot, session.snapshot),
         _bind(browser_tabs, session.tabs),
         _bind(browser_network, session.network),
+        _bind(browser_wait_response, session.wait_response),
+        _bind(browser_pdf, session.pdf),
+        _bind(browser_save_tabs, session.save_tabs),
+        _bind(browser_restore_tabs, session.restore_tabs),
         _bind(browser_cookies, session.cookies),
         _bind(browser_screenshot, session.screenshot),
         _bind(browser_evaluate, session.evaluate),
@@ -393,6 +422,7 @@ def Browser(
     humanize: bool | None = None,
     stealth: bool | None = None,
     fingerprint: dict[str, Any] | None = None,
+    ws_address: str | None = None,
 ) -> BrowserTools:
     """Return the browser tools as a ready-to-use list of ``dspy.Tool`` objects.
 
@@ -447,6 +477,8 @@ def Browser(
         options["stealth"] = stealth
     if fingerprint is not None:
         options["fingerprint"] = fingerprint
+    if ws_address is not None:
+        options["ws_address"] = ws_address
     if session is not None and options:
         raise ValueError(
             "pass either session= or session options to Browser(), not both"
