@@ -61,6 +61,7 @@ instead of a sibling tool, and HOW to pass arguments.
 
 Requires **Python 3.13+**; run agents with **DSPy 3.1+**. The `[browser]` extra
 installs DSPy; `[mcp]` requires **DSPy 3.4.1+** for its MCP result conversion API.
+`[all]` installs every optional bridge at once.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -105,6 +106,13 @@ The MCP bridge pulls in DSPy, `httpx2`, and MCP SDK 2.x:
 
 ```bash
 uv add "dspy-agent-tools[mcp]"
+```
+
+To install every optional bridge at once, use `all` (browser, ffmpeg, and MCP):
+
+```bash
+uv add 'dspy-agent-tools[all]'
+# or: pip install 'dspy-agent-tools[all]'
 ```
 
 Ready to build an agent? [Usage](#usage) shows complete `dspy.ReAct` and
