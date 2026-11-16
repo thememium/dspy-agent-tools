@@ -257,6 +257,23 @@ def _perform(
             payload["warning"] = "; ".join(warnings)
         return payload
 
+    if action == "upload":
+        if not value:
+            raise errors._ToolError("upload requires value=local file path")
+        from pathlib import Path
+
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            raise errors._ToolError("upload path must be an existing file")
+        element = dom._element(tab, target, timeout)
+        element.set_input_files(str(path))
+        return {
+            "status": "ok",
+            "action": "upload",
+            "target": target,
+            "filename": path.name,
+        }
+
     if action == "type":
         if value is None:
             raise errors._ToolError("type requires value=text")
