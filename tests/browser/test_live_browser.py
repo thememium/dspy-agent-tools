@@ -2,6 +2,7 @@
 
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -12,6 +13,39 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("DSPY_BROWSER_LIVE_TESTS") != "1",
     reason="set DSPY_BROWSER_LIVE_TESTS=1 to run real Chrome integration tests",
 )
+
+
+def test_recording_cursor_navigation_and_cleanup(tmp_path):
+    from urllib.parse import quote
+
+    page = "data:text/html," + quote('<button id="go">Click me</button>')
+    session = BrowserSession(humanize=True)
+    try:
+        assert session.browser("navigate", value=page)["status"] == "ok"
+        assert (
+            session.record_start(path=str(tmp_path / "cursor.mp4"), show_cursor=True)[
+                "status"
+            ]
+            == "ok"
+        )
+        assert session.browser("click", target="#go")["status"] == "ok"
+        cursor = "document.querySelector('[data-dspy-recording-cursor]')"
+        assert session.evaluate(f"return !!{cursor}")["result"] is True
+        assert session.browser("navigate", value=page)["status"] == "ok"
+        assert session.browser("click", target="#go")["status"] == "ok"
+        assert session.evaluate(f"return !!{cursor}")["result"] is True
+        time.sleep(0.3)
+        assert session.record_stop()["status"] == "ok"
+        for _ in range(20):
+            if not session.evaluate(f"return !!{cursor}")["result"]:
+                break
+            time.sleep(0.05)
+        assert session.evaluate(f"return !!{cursor}")["result"] is False
+        assert session.browser("navigate", value=page)["status"] == "ok"
+        assert session.browser("click", target="#go")["status"] == "ok"
+        assert session.evaluate(f"return !!{cursor}")["result"] is False
+    finally:
+        session.close()
 
 
 class Handler(BaseHTTPRequestHandler):

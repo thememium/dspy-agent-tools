@@ -12,6 +12,64 @@ from .fakes import frame_event, screencast_callback, screencast_callback_id
 
 
 class TestRecording:
+    def test_cursor_install_and_cleanup_on_recorded_tab(
+        self, session, fake_ffmpeg, monkeypatch
+    ):
+        session._get_tab()
+        tab = session._tab
+        execute = tab.execute_command
+
+        def command(value, timeout=60):
+            result = execute(value, timeout=timeout)
+            if value["method"] == "Page.addScriptToEvaluateOnNewDocument":
+                return {"result": {"identifier": "cursor-script"}}
+            return result
+
+        monkeypatch.setattr(tab, "execute_command", command)
+        assert session.record_start(show_cursor=True)["show_cursor"] is True
+        add = next(
+            c
+            for c in tab.commands
+            if c["method"] == "Page.addScriptToEvaluateOnNewDocument"
+        )
+        assert add["params"]["runImmediately"] is True
+        screencast_callback(tab)(frame_event())
+        assert session.record_stop()["status"] == "ok"
+        assert any(
+            c["method"] == "Page.removeScriptToEvaluateOnNewDocument"
+            and c["params"]["identifier"] == "cursor-script"
+            for c in tab.commands
+        )
+        assert any(c["method"] == "Runtime.evaluate" for c in tab.commands)
+
+    def test_cursor_requires_boolean(self, session, fake_ffmpeg):
+        assert (
+            "show_cursor must be a boolean"
+            in session.record_start(show_cursor="false")["error"]
+        )
+
+    def test_cursor_cleanup_failure_preserves_recording(
+        self, session, fake_ffmpeg, monkeypatch, caplog
+    ):
+        session._get_tab()
+        tab = session._tab
+        execute = tab.execute_command
+
+        def command(value, timeout=60):
+            if value["method"] == "Page.addScriptToEvaluateOnNewDocument":
+                return {"result": {"identifier": "cursor-script"}}
+            if value["method"] == "Page.removeScriptToEvaluateOnNewDocument":
+                raise RuntimeError("cleanup failed")
+            return execute(value, timeout=timeout)
+
+        monkeypatch.setattr(tab, "execute_command", command)
+        assert session.record_start(show_cursor=True)["status"] == "ok"
+        recorder = session._recorder
+        screencast_callback(tab)(frame_event())
+        assert session.record_stop()["status"] == "ok"
+        assert recorder.cursor_script_id is None
+        assert "cleanup failed" in caplog.text
+
     @pytest.mark.parametrize("stop", ["record_stop", "close"])
     def test_stop_after_switch_targets_recorded_tab(
         self, session, tmp_path, fake_ffmpeg, stop

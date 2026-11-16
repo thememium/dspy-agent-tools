@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import functools
+import inspect
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Self, cast
 
 from ..utils.dspy import load_tool
 from . import (
@@ -237,6 +238,7 @@ def browser_record_start(
     quality: int | str = config._DEFAULT_SCREENSHOT_QUALITY,
     max_width: int | str | None = None,
     max_height: int | str | None = None,
+    show_cursor: bool = False,
 ) -> dict:
     """Start recording the current browser tab to an MP4 or WebM video.
 
@@ -245,6 +247,7 @@ def browser_record_start(
     ``browser_record_stop`` is called. ``fps`` caps how many frames per second
     are kept (1-60); ``quality`` applies to the intermediate JPEG frames.
     ``max_width`` and ``max_height`` downscale the capture when given.
+    ``show_cursor`` draws a cursor and click indicator in the recorded tab.
 
     Without ``path``, an MP4 is written under the system temp directory.
     ``.mp4`` uses H.264 and ``.webm`` uses VP9; other suffixes are rejected.
@@ -256,7 +259,7 @@ def browser_record_start(
     stops and encodes an active recording.
     """
     return recording._record_start(
-        _default_session, path, fps, quality, max_width, max_height
+        _default_session, path, fps, quality, max_width, max_height, show_cursor
     )
 
 
@@ -373,6 +376,7 @@ def _build_tools(
     *,
     include_search: bool = False,
     include_recording: bool = False,
+    show_cursor: bool = False,
 ) -> BrowserTools:
     _pydoll.require()
     Tool = load_tool(
@@ -393,9 +397,28 @@ def _build_tools(
         _bind(browser_evaluate, session.evaluate),
     ]
     if include_recording:
+        record_start = _bind(browser_record_start, session.record_start)
+        if show_cursor:
+            signature = inspect.signature(browser_record_start)
+            parameters = [
+                parameter.replace(default=True)
+                if parameter.name == "show_cursor"
+                else parameter
+                for parameter in signature.parameters.values()
+            ]
+
+            @functools.wraps(browser_record_start)
+            def record_start(*args: Any, **kwargs: Any) -> dict:
+                if len(args) < 6:
+                    kwargs.setdefault("show_cursor", True)
+                return session.record_start(*args, **kwargs)
+
+            cast(Any, record_start).__signature__ = signature.replace(
+                parameters=parameters
+            )
         functions.extend(
             [
-                _bind(browser_record_start, session.record_start),
+                record_start,
                 _bind(browser_record_stop, session.record_stop),
             ]
         )
@@ -412,6 +435,7 @@ def Browser(
     session: session_module.BrowserSession | None = None,
     include_search: bool = False,
     include_recording: bool = False,
+    show_cursor: bool = False,
     headless: bool | None = None,
     timeout: float | None = None,
     dialog_policy: config.DialogPolicy | None = None,
@@ -433,6 +457,8 @@ def Browser(
     ``browser_record_start`` and ``browser_record_stop``, and
     ``include_search=True`` to append ``web_search`` for research agents that
     need both search and a real browser.
+    ``show_cursor=True`` makes cursor overlays the default for recordings;
+    each call to ``browser_record_start`` can override it.
 
     Each call creates an isolated session; module-level functions retain their
     own shared session. Pass ``session=BrowserSession(...)`` to bind every
@@ -491,4 +517,5 @@ def Browser(
         target_session,
         include_search=include_search,
         include_recording=include_recording,
+        show_cursor=show_cursor,
     )

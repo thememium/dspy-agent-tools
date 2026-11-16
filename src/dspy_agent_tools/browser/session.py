@@ -414,9 +414,12 @@ class BrowserSession:
         quality: int | str = config._DEFAULT_SCREENSHOT_QUALITY,
         max_width: int | str | None = None,
         max_height: int | str | None = None,
+        show_cursor: bool = False,
     ) -> dict:
         """Start recording the current tab; see ``browser_record_start``."""
-        return recording._record_start(self, path, fps, quality, max_width, max_height)
+        return recording._record_start(
+            self, path, fps, quality, max_width, max_height, show_cursor
+        )
 
     def record_stop(self) -> dict:
         """Stop recording and encode the video; see ``browser_record_stop``."""
@@ -623,6 +626,7 @@ class BrowserSession:
         *,
         include_search: bool = False,
         include_recording: bool = False,
+        show_cursor: bool = False,
     ) -> BrowserTools:
         """Return ``dspy.Tool`` objects bound to this session."""
         from . import tools
@@ -631,4 +635,5 @@ class BrowserSession:
             self,
             include_search=include_search,
             include_recording=include_recording,
+            show_cursor=show_cursor,
         )
