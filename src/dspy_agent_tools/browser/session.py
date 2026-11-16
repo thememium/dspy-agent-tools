@@ -95,8 +95,9 @@ class BrowserSession:
 
     Navigation defaults to ``http``, ``https``, ``about``, and ``data`` URLs.
     Pass ``allowed_schemes`` to extend or restrict that set, or ``url_policy``
-    to reject individual normalized URLs. For example, a server can block
-    private hosts with a callback while keeping the default scheme policy.
+    to reject explicit normalized navigation URLs. These checks do not cover
+    redirects, clicks, scripts, popups, or subresources and are not a security
+    boundary. Use network-level isolation for untrusted browsing.
 
     ``dialog_policy`` decides what happens to ``alert``, ``confirm``,
     ``beforeunload``, and ``prompt`` dialogs: ``dismiss`` (default) cancels
@@ -128,9 +129,15 @@ class BrowserSession:
         dialog_policy: config.DialogPolicy = config._DEFAULT_DIALOG_POLICY,
         user_data_dir: str | Path | None = None,
         cookie_state: str | Path | None = None,
+        humanize: bool = False,
+        stealth: bool = False,
+        fingerprint: dict[str, Any] | None = None,
     ) -> None:
         if dialog_policy not in ("dismiss", "accept"):
             raise ValueError("dialog_policy must be dismiss or accept")
+        self.humanize = humanize or stealth
+        self.stealth = stealth
+        self.fingerprint = fingerprint
         self.headless = headless
         self.timeout = timeout
         self.window_size = window_size
@@ -156,6 +163,7 @@ class BrowserSession:
         self._tab: Any | None = None
         self._watch = watch._PageWatch()
         self._watched: set[str] = set()
+        self._snapshot_refs: dict[str, set[str]] = {}
         self._recorder: recording._VideoRecorder | None = None
         self.last_recording: dict[str, Any] | None = None
         self._exit_hook_registered = False
@@ -208,9 +216,12 @@ class BrowserSession:
         """Subscribe *tab* to console, error, dialog, and network events."""
         watch = self._watch
         target = getattr(tab, "target_id", None)
+        if target is not None and target in self._watched:
+            return
+
+        if self.fingerprint is not None:
+            tab.apply_fingerprint(self.fingerprint)
         if target is not None:
-            if target in self._watched:
-                return
             self._watched.add(target)
 
         def responder(dialog: dict[str, Any]) -> str:
@@ -300,6 +311,7 @@ class BrowserSession:
         browser, self._browser, self._tab = self._browser, None, None
         self._watch = watch._PageWatch()
         self._watched = set()
+        self._snapshot_refs = {}
         if browser is not None:
             if self.user_data_dir is not None:
                 _close_browser_gracefully(browser)
@@ -349,6 +361,7 @@ class BrowserSession:
             browser, self._browser, self._tab = self._browser, None, None
             self._watch = watch._PageWatch()
             self._watched = set()
+            self._snapshot_refs = {}
             if browser is None:
                 return False
             if self.user_data_dir is not None:
