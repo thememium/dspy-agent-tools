@@ -191,20 +191,27 @@ result = coder(task="Rename the class SessionManager to Session across the repo"
 ### With the headless browser
 
 `Browser()` returns the core browser toolset as one list of `dspy.Tool`
-objects. Nothing is created or cleaned up by hand:
+objects. Chrome starts on the first browser tool call:
 
 ```python
 import dspy
 from dspy_agent_tools import Browser
 
+browser_tools = Browser()
 agent = dspy.ReAct(
     "task -> result",
-    tools=Browser(),
+    tools=browser_tools,
     max_iters=12,
 )
 
 result = agent(task="Open https://example.com and summarize the page")
+browser_tools.close()
 ```
+
+For cleanup even if the agent raises an exception, call `browser_tools.close()`
+in a `finally` block or use `with Browser() as browser_tools:`. Otherwise, the
+session is cleaned up at normal interpreter exit. See
+[browser lifecycle](docs/browser.md#browser-lifecycle) for examples.
 
 `Browser(include_search=True)` appends `web_search` for research agents, and
 `Browser(include_recording=True)` adds video recording. The individual
