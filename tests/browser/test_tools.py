@@ -109,8 +109,10 @@ class TestBrowserBundle:
         with pytest.raises(ValueError, match="not both"):
             browser_module.Browser(session=BrowserSession(), user_data_dir="./profile")
 
-    def test_no_options_uses_the_shared_session(self, default_session):
-        assert browser_module.Browser().session is default_session
+    def test_no_options_create_isolated_sessions(self, default_session):
+        first, second = browser_module.Browser(), browser_module.Browser()
+        assert first.session is not second.session
+        assert first.session is not default_session
 
     def test_browser_requires_pydoll(self, monkeypatch):
         monkeypatch.setattr(_pydoll, "_loaded", False)
@@ -196,3 +198,40 @@ class TestBrowserBundle:
         monkeypatch.setattr(builtins, "__import__", fake_import)
         with pytest.raises(ImportError, match="requires DSPy"):
             browser_module.Browser()
+
+
+def test_humanize_and_stealth_options():
+    first = browser_module.Browser(humanize=True)
+    second = browser_module.Browser(stealth=True, fingerprint={"locale": "en-US"})
+    assert first.session.humanize is True
+    assert second.session.humanize is True
+    assert second.session.fingerprint == {"locale": "en-US"}
+    with pytest.raises(ValueError, match="not both"):
+        browser_module.Browser(session=BrowserSession(), humanize=True)
+
+
+def test_humanized_actions_use_pydoll_flags(session, monkeypatch):
+    session.humanize = True
+    tab = session._get_tab()
+    calls = []
+    monkeypatch.setattr(
+        tab.element, "click", lambda **kwargs: calls.append(("click", kwargs))
+    )
+    monkeypatch.setattr(
+        tab.element, "type_text", lambda value, **kwargs: calls.append(("type", kwargs))
+    )
+    monkeypatch.setattr(
+        tab.element, "hover", lambda **kwargs: calls.append(("hover", kwargs))
+    )
+    monkeypatch.setattr(
+        tab.scroll, "by", lambda *args, **kwargs: calls.append(("scroll", kwargs))
+    )
+    for action, value in (
+        ("click", None),
+        ("type", "test"),
+        ("hover", None),
+        ("scroll", "down"),
+    ):
+        assert session.browser(action, target="#target", value=value)["status"] == "ok"
+    assert [name for name, _ in calls] == ["click", "type", "hover", "scroll"]
+    assert all(kwargs["humanize"] is True for _, kwargs in calls)
