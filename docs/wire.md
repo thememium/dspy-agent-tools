@@ -40,31 +40,19 @@ is duck-typed, so any object with the three methods below works.
 
 ## Memory
 
-```python
-class Store(Protocol):
-    def create_memory(
-        self, *, user_id, content, session_id="", memory_type="semantic"
-    ): ...
-    def create_memories(self, *, user_id, contents, session_id="", extract=True): ...
-    def search_memories(self, *, user_id, query, session_id=None, limit=5): ...
-    def delete_memory(self, *, memory_id): ...  # optional
-```
+`Memory(store, user_id=...)` returns the three memory tools. On an RLM the
+history is:
 
-`Memory(store, user_id=...)` returns three tools:
+- `pre_iteration_hook` recalls once against `query=` or the call's inputs and
+  injects the block as prompt context.
+- `post_iteration_hook` extracts memories from the call's inputs on iteration
+  1 (best-effort; a failure is logged).
 
-- `memory_recall(query, limit=5)` — text for ReAct, `list[dict]` for `mode="code"`.
-- `memory_remember(content, memory_type="semantic")`
-- `memory_forget(memory_id)` — omitted when the store has no `delete_memory`.
-
-`MemoryTools.recall()`, `.remember()`, `.remember_turn()`, and `.format()` are
-plain Python, used by the hooks and available to your code.
-
-For an RLM, `Wire` adds the memory family as tools, so generated code calls
-`memory_recall(...)` directly. Recall happens once per run against the call's
-inputs (or `query=`), and iteration 1 extracts new memories from those inputs.
-
-Write-back is best-effort: a store or extraction failure is logged and the
-agent continues. Pass `write_back=False` to disable it.
+The tools themselves are added to the agent, so generated code calls
+`memory_recall(...)` / `memory_remember(...)` like any other tool. ReAct gets
+the same tools, plus recalled text as injected guidance when `query=` is given.
+The store contract, modes, scoping, and `MemoryTools` API are in
+[docs/memory.md](memory.md).
 
 ## Offloading
 

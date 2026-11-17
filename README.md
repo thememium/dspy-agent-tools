@@ -51,7 +51,7 @@ Core tools, optional bridges, and progressive discovery:
 - **Patch** — add tools to a built agent and inject one guidance section per tool family. See [docs/patch.md](docs/patch.md).
 - **Browser** (optional) — headless Chrome as one `dspy.Tool` list, with optional recording and search. See [docs/browser.md](docs/browser.md).
 - **Toolbox** — mix MCP servers, tools, and functions; optional progressive discovery.
-- **Memory** — recall, remember, and forget over a duck-typed vector store. See [docs/wire.md](docs/wire.md).
+- **Memory** — recall, remember, and forget over a duck-typed vector store. See [docs/memory.md](docs/memory.md).
 - **Wire** (optional RLM) — compose memory, offloading, tracing, sessions, and policy around one agent. See [docs/wire.md](docs/wire.md).
 
 Tools are just Python functions, exactly as
@@ -401,6 +401,7 @@ URL-reading tools the agent actually has.
 | `drop` | `()` | Tools to remove, by name, tool, or function. Unknown names warn and are ignored; a name in both `tools` and `drop`, or an internal tool (ReAct's `finish`, ReActV2's `submit`), raises `ValueError`. Dropping a tool removes its section too. |
 | `guide` | `None` | Your own policy, placed before the family sections. Omitted, the agent keeps its last guide; `guide=""` clears it. |
 | `describe` | `True` | Inject the family sections. `False` appends tools and `guide` only. |
+| `replace` | `False` | Swap a tool that has the same name but a different function instead of raising. `Wire` uses it to install middleware. |
 
 Everything Patch adds lives in one delimited region and is recomputed on every
 call, so repeated patching converges instead of growing the prompt:
@@ -437,52 +438,55 @@ full family list and how to add a new family.
 
 ### With memory and lifecycle wiring
 
-`Memory` turns a store into three tools. `Wire` composes it with offloading,
-tracing, a session log, and a policy — the capabilities an agent loop needs but
-no single tool can provide.
+The smallest useful setup needs no extras: offload large results and keep a
+log of what the agent did.
 
 ```python
 import dspy
-from dspy_lancedb_memory import memory
-from dspy_agent_tools import Memory, Offloader, Session, Wire, read_file
-
-store = memory.Store()
-memory_tools = Memory(store, user_id="user_123")
-offload = Offloader(limit=20_000)
-session = Session("runs.db")
-
-
-def policy(name, arguments):
-    if name == "bash_exec" and "rm -rf" in arguments.get("command", ""):
-        return "destructive commands are not allowed"
-    return None
-
+from dspy_agent_tools import Offloader, Session, Wire, read_file
 
 agent = dspy.ReAct("question -> answer", tools=[read_file])
-Wire(agent, memory=memory_tools, offload=offload, session=session, policy=policy)
+Wire(agent, offload=Offloader(limit=20_000), session=Session("runs.db"))
 ```
 
-For an RLM the same call installs four lifecycle hooks: recall before the
-action, policy before execution, offloading after it, and a log plus memory
-extraction after the iteration.
+Any result over `limit` characters is written to a file and replaced with
+`{path, chars, bytes, head, tail, note}`, so one large file cannot consume the
+context window. `Session` records every call in SQLite so the run can be
+inspected afterwards.
+
+Add memory with any store that implements three methods. `dspy-lancedb-memory`
+ships one; install it with `dspy-agent-tools[memory]`.
+
+```python
+from dspy_lancedb_memory import memory
+from dspy_agent_tools import Memory, Patch
+
+memory_tools = Memory(memory.Store(), user_id="user_123")
+Patch(agent, tools=memory_tools)
+```
+
+That adds `memory_recall`, `memory_remember`, and `memory_forget`, plus a
+`## Memory` guidance section. See [docs/memory.md](docs/memory.md) for the
+store contract and the Python API.
+
+For an RLM, `Wire` also installs four lifecycle hooks: recall before the
+action, policy before execution, offloading after it, and a log plus one
+memory write-back after iteration 1.
 
 ```python
 worker = dspy.RLM("task -> report")
 Wire(
     worker,
     memory=memory_tools,
-    offload=offload,
-    session=session,
-    query="deployment notes",
+    offload=Offloader(limit=20_000),
+    session=Session("runs.db"),
 )
 ```
 
-`Offloader` spills any result over `limit` characters to a file and returns the
-path, sizes, and head/tail samples, so one build log cannot consume the context
-window. `Session` is an append-only SQLite log of iterations, tool calls, and
-spilled artifacts. Policy denials reach the model as a `PermissionError`
-instead of crashing the run. See [docs/wire.md](docs/wire.md) for the store
-contract, per-agent behavior, the span names, and the log schema.
+A policy returns a reason string to deny a tool call or a block of generated
+code; the denial reaches the model as a `PermissionError` instead of crashing
+the run. See [docs/wire.md](docs/wire.md) for policy, spans, and the session
+schema.
 
 ### Tool discovery with Toolbox
 
@@ -747,10 +751,6 @@ Chrome runs headless by default. Actions return `{"status": "ok" | "error", ...}
 on failure `error` carries the reason, and a stale `@ref` asks for a fresh
 snapshot. See [docs/browser.md](docs/browser.md).
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-<!-- DEVELOPMENT -->
-
 ### Memory (`dspy_agent_tools.memory`)
 
 | Tool | Use it for |
@@ -760,7 +760,7 @@ snapshot. See [docs/browser.md](docs/browser.md).
 
 The store is duck-typed: `create_memory`, `create_memories`, and
 `search_memories`, plus optional `delete_memory`. `dspy_lancedb_memory`'s
-`memory.Store()` satisfies it. See [docs/wire.md](docs/wire.md).
+`memory.Store()` satisfies it. See [docs/memory.md](docs/memory.md).
 
 ### Wire (`dspy_agent_tools.wire`)
 
@@ -775,6 +775,10 @@ The store is duck-typed: `create_memory`, `create_memories`, and
 `Wire` on an RLM requires `dspy-agent-tools[hooks]`; on ReAct it needs nothing.
 Spans appear only when the application installs an OpenTelemetry SDK. See
 [docs/wire.md](docs/wire.md).
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+<!-- DEVELOPMENT -->
 
 ## Development
 

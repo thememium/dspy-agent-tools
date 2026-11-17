@@ -82,6 +82,9 @@ instead of overwriting a newer change. Never claim a file change you did not
 make.
 ```
 
+The `Memory` family comes from `Memory(...)`; see [docs/memory.md](memory.md)
+for the store contract and tools.
+
 Families come from `dspy_agent_tools.patch.guide`, and a tool joins a family by its
 module (`dspy_agent_tools.bash`, `.files`, `.search`, `.browser`, `.cli`,
 `.mcp`, `.skills`, `.memory`, `.toolbox`) or by a name a foreign tool is likely to use,
