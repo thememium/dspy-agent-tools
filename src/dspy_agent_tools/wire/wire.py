@@ -149,13 +149,44 @@ def Wire(
 
     kind = _kind(agent)
 
+    def add_memory(guide: str | None = None) -> None:
+        assert memory is not None
+        existing = agent._user_tools if kind == "RLM" else agent.tools
+        previous = getattr(agent, "_dspy_agent_tools_memory_names", set())
+        incoming_names = {tool.name for tool in memory}
+        collisions = {
+            tool.name
+            for tool in memory
+            if tool.name in existing
+            and tool.name not in previous
+            and getattr(
+                existing[tool.name].func,
+                "_dspy_agent_tools_original",
+                existing[tool.name].func,
+            )
+            is not getattr(tool.func, "_dspy_agent_tools_original", tool.func)
+        }
+        if collisions:
+            raise ValueError(
+                f"Agent already has a different tool named {min(collisions)!r}; "
+                "pass name_prefix=... to the memory factory."
+            )
+        Patch(
+            agent,
+            tools=memory.with_tools(with_middleware(memory)),
+            guide=guide,
+            replace=True,
+        )
+        agent._dspy_agent_tools_memory_names = previous | incoming_names
+
     if kind == "RLM":
+        Patch(agent, tools=with_middleware(agent._user_tools), replace=True)
         if memory is not None:
             # RLM tools are callable from generated code, so adding the
             # memory family gives the REPL memory_recall/memory_remember
             # without injecting Python objects the interpreter cannot
             # serialise. Patch rebuilds the module, so it runs before hooks.
-            Patch(agent, tools=memory.with_tools(with_middleware(memory)))
+            add_memory()
         install(
             agent,
             memory=memory,
@@ -174,7 +205,7 @@ def Wire(
         guide = None
         if query:
             guide = memory.format(memory.recall(query)) or None
-        Patch(agent, tools=memory.with_tools(with_middleware(memory)), guide=guide)
+        add_memory(guide)
     return agent
 
 
