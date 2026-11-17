@@ -856,7 +856,7 @@ Run tests using pytest:
 # Run all tests
 uv run pytest
 
-# Run with coverage
+# Run with coverage (the project requires 100% statement coverage)
 uv run poe test-cov
 
 # Run specific test
