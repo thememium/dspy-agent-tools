@@ -239,3 +239,34 @@ class TestAvailability:
 
         with pytest.raises(ImportError, match=r"dspy-agent-tools\[hooks\]"):
             hook_module.build_hooks()
+
+
+def test_recall_is_fresh_for_each_run():
+    memory = FakeMemory()
+    hooks = _iteration(memory=memory, trace=False)
+    pre = hooks["pre_iteration_hook"]
+    pre(0, [], [], {"question": "first"})
+    pre(1, [], [], {"question": "first"})
+    pre(0, [], [], {"question": "second"})
+    pre(1, [], [], {"question": "second"})
+    assert memory.queries == ["first", "second"]
+
+
+def test_interleaved_runs_keep_their_inputs_separate():
+    from contextvars import Context
+
+    memory = FakeMemory()
+    hooks = _iteration(memory=memory, trace=False)
+    first, second = Context(), Context()
+    pre, post = hooks["pre_iteration_hook"], hooks["post_iteration_hook"]
+    first.run(pre, 0, [], [], {"question": "first"})
+    second.run(pre, 0, [], [], {"question": "second"})
+    first.run(pre, 1, [], [], {"question": "first"})
+    second.run(pre, 1, [], [], {"question": "second"})
+    first.run(post, 1, None, "", "", [])
+    second.run(post, 1, None, "", "", [])
+    assert memory.queries == ["first", "second"]
+    assert [turn[0]["content"] for turn in memory.turns] == [
+        "question: first",
+        "question: second",
+    ]

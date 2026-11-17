@@ -333,3 +333,42 @@ class TestUnsupported:
     def test_rejects_other_modules(self):
         with pytest.raises(TypeError, match="supports dspy.ReAct"):
             Wire(object())
+
+
+def test_rlm_existing_tools_receive_and_replace_policy():
+    agent = dspy.RLM(QA, tools=[echo])
+    Wire(agent, policy=deny_tools("echo"))
+    with pytest.raises(PermissionError):
+        agent._user_tools["echo"](text="hi")
+    Wire(agent, policy=None)
+    assert agent._user_tools["echo"](text="hi") == "echo:hi"
+
+
+@pytest.mark.parametrize("agent_class", [dspy.ReAct, dspy.RLM])
+def test_rewiring_memory_replaces_its_middleware(agent_class):
+    memory = Memory(FakeStore(), user_id="u1")
+    agent = agent_class(QA, tools=[])
+    Wire(agent, memory=memory, policy=deny_tools("memory_remember"))
+    Wire(agent, memory=memory, policy=None)
+    tools = agent._user_tools if agent_class is dspy.RLM else agent.tools
+    assert tools["memory_remember"](content="a fact")["content"] == "a fact"
+
+
+@pytest.mark.parametrize("agent_class", [dspy.ReAct, dspy.RLM])
+def test_memory_name_conflict_explains_prefix(agent_class):
+    def memory_recall(query: str) -> str:
+        """An unrelated tool with the same name."""
+        return query
+
+    agent = agent_class(QA, tools=[memory_recall])
+    with pytest.raises(ValueError, match="memory_recall.*name_prefix"):
+        Wire(agent, memory=Memory(FakeStore(), user_id="u1"))
+
+
+@pytest.mark.parametrize("agent_class", [dspy.ReAct, dspy.RLM])
+def test_wire_accepts_memory_already_attached_to_agent(agent_class):
+    memory = Memory(FakeStore(), user_id="u1")
+    agent = agent_class(QA, tools=memory)
+    Wire(agent, memory=memory)
+    tools = agent._user_tools if agent_class is dspy.RLM else agent.tools
+    assert tools["memory_remember"](content="a fact")["content"] == "a fact"
