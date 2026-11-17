@@ -51,15 +51,16 @@ Wire(agent, policy=[workspace("."), deny_tools("web_search")])  # lists are ANDe
 
 `Wire` is re-runnable: calling it again replaces the middleware rather than
 stacking a second layer of logging, offloading, or policy. Tools added with
-`Patch` after a `Wire` call are unwrapped until the next `Wire`.
+`Patch` after a `Wire` call are unwrapped until the next `Wire`. Existing RLM
+tools also receive tool-call middleware, including policy checks.
 
 ## Memory
 
 `Memory(store, user_id=...)` returns the three memory tools. On an RLM the
 history is:
 
-- `pre_iteration_hook` recalls once against `query=` or the call's inputs and
-  injects the block as prompt context.
+- `pre_iteration_hook` recalls once per run against `query=` or the call's inputs and
+  injects the block as prompt context. Later runs perform a fresh recall.
 - `post_iteration_hook` extracts memories from the call's inputs on iteration
   1 (best-effort; a failure is logged).
 
