@@ -98,9 +98,13 @@ class DictStore:
         ]
 
     def search_memories(self, *, user_id, query, session_id=None, limit=5):
-        return [row for row in self.rows if query.lower() in row["content"].lower()][
-            :limit
-        ]
+        return [
+            row
+            for row in self.rows
+            if row["user_id"] == user_id
+            and (session_id is None or row["session_id"] == session_id)
+            and query.lower() in row["content"].lower()
+        ][:limit]
 ```
 
 ## Basic use
@@ -190,12 +194,19 @@ Wire(agent, memory=store, user_id="user_123")  # same, with a bare store
 
 For `dspy.RLM`, `Wire` adds the tools to the REPL (so generated code can call
 `memory_recall(...)`), recalls once per run, and extracts memories from the
-call's inputs on iteration 1:
+call's inputs on iteration 1. Each new run performs a fresh recall; its
+recalled context and extraction inputs are kept separate from other execution
+contexts:
 
 ```python
 worker = dspy.RLM("task -> report")
 Wire(worker, memory=Memory(store, user_id="user_123"))
 ```
+
+If an unrelated existing tool has a memory tool's name, `Wire` raises a
+`ValueError`; use `Memory(..., name_prefix="project_")` to avoid the collision.
+Calling `Wire` again with memory replaces its middleware and can update its
+store and scope.
 
 Write-back is best-effort: a store or extraction failure is logged and the
 agent continues. Pass `write_back=False` to disable it. ReAct has no per-turn
