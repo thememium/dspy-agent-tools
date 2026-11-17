@@ -16,6 +16,7 @@ Hook                          Composition
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from .observe import start_span
@@ -87,10 +88,16 @@ def build_hooks(
         :func:`dspy_rlm_hooks.enable_rlm_hooks`.
     """
     hooks = _hooks_module()
-    iteration_spans: dict[int, Any] = {}
-    execution_spans: dict[int, Any] = {}
-    recalled: list[list[dict[str, Any]]] = []
-    inputs: dict[str, Any] = {}
+    # A wired agent can be called repeatedly or from separate execution contexts.
+    # Start a fresh state at iteration zero instead of caching across runs.
+    state: ContextVar[dict[str, Any] | None] = ContextVar("wire_run", default=None)
+
+    def run_state(*, new: bool = False) -> dict[str, Any]:
+        current = state.get()
+        if new or current is None:
+            current = {"iteration_spans": {}, "execution_spans": {}, "inputs": {}}
+            state.set(current)
+        return current
 
     def pre_iteration(
         iteration: int,
@@ -99,8 +106,9 @@ def build_hooks(
         input_args: dict[str, Any],
     ) -> Any:
         output = hooks.PreIterationOutput()
+        current_state = run_state(new=iteration == 0)
         if trace:
-            iteration_spans[iteration] = start_span(
+            current_state["iteration_spans"][iteration] = start_span(
                 "rlm.iteration",
                 {
                     "gen_ai.operation.name": "rlm.iteration",
@@ -109,15 +117,16 @@ def build_hooks(
             )
         if memory is None:
             return output
-        inputs.clear()
-        inputs.update(input_args)
-        if not recalled:
+        current_state["inputs"] = dict(input_args)
+        if "recalled" not in current_state:
             try:
-                recalled.append(memory.recall(recall_query or _query(input_args)))
+                current_state["recalled"] = memory.recall(
+                    recall_query or _query(input_args)
+                )
             except Exception:  # noqa: BLE001 - recall is best-effort
                 logger.warning("Memory recall failed; continuing without it.")
-                recalled.append([])
-        found = recalled[0]
+                current_state["recalled"] = []
+        found = current_state["recalled"]
         if found:
             output.prompt_context = memory.format(found)
         return output
@@ -130,7 +139,7 @@ def build_hooks(
         input_args: dict[str, Any],
     ) -> Any:
         if trace:
-            execution_spans[iteration] = start_span(
+            run_state()["execution_spans"][iteration] = start_span(
                 "rlm.execute",
                 {
                     "gen_ai.operation.name": "rlm.execute",
@@ -156,7 +165,7 @@ def build_hooks(
     ) -> Any:
         if offload is not None:
             result = offload.spill(result, label=f"rlm-{iteration}")
-        current = execution_spans.pop(iteration, None)
+        current = run_state()["execution_spans"].pop(iteration, None)
         if current is not None:
             current.set_attribute("dspy.rlm.result.chars", len(str(result)))
             current.end()
@@ -169,7 +178,8 @@ def build_hooks(
         result: Any,
         history: Any,
     ) -> Any:
-        current = iteration_spans.pop(iteration, None)
+        current_state = run_state()
+        current = current_state["iteration_spans"].pop(iteration, None)
         if current is not None:
             current.set_attribute("dspy.rlm.code.chars", len(code or ""))
             current.set_attribute("dspy.rlm.result.chars", len(str(result)))
@@ -181,6 +191,7 @@ def build_hooks(
                 code=code,
                 output=result,
             )
+        inputs = current_state["inputs"]
         if memory is not None and write_back and iteration == 1 and inputs:
             try:
                 memory.remember_turn(_messages(inputs))
