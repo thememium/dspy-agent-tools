@@ -1,7 +1,7 @@
 [project]
 name = "dspy-agent-tools"
 version = "0.1.17"
-description = "Ready-made, tool-annotated Python functions for DSPy agents: bash, files, search, CLI, MCP, skills, and browser."
+description = "Ready-made, tool-annotated Python functions for DSPy agents: bash, files, search, CLI, MCP, skills, browser, memory, and lifecycle wiring."
 readme = "README.md"
 authors = [{ name = "Edward Boswell", email = "thememium@gmail.com" }]
 requires-python = ">=3.13"
@@ -27,13 +27,22 @@ dependencies = [
 browser = ["dspy>=3.1", "pydoll-python>=3.0.1"]
 ffmpeg = ["imageio-ffmpeg>=0.8.1"]
 mcp = ["dspy>=3.4.1", "httpx2>=2.10", "mcp>=2"]
-# Every optional bridge in one install. Extras cannot reference each other,
-# so the dependencies are the union of browser, ffmpeg, and mcp.
+# Lifecycle hooks for dspy.RLM: memory recall, policy, offloading, sessions.
+hooks = ["dspy>=3.4.1", "dspy-rlm-hooks>=0.1.17"]
+# OTLP spans for tool calls and RLM iterations, exported by the host's SDK.
+otel = ["opentelemetry-api>=1.27"]
+# Duck-typed store support is built in; this installs a working backend.
+# LanceDB, pyarrow, and litellm make it ~200 MB, so it is not in `all`.
+memory = ["dspy>=3.4.1", "dspy-lancedb-memory>=0.1.13"]
+# Every optional bridge except [memory]. Extras cannot reference each other,
+# so the dependencies are the union of browser, ffmpeg, mcp, hooks, and otel.
 all = [
   "dspy>=3.4.1",
+  "dspy-rlm-hooks>=0.1.17",
   "httpx2>=2.10",
   "imageio-ffmpeg>=0.8.1",
   "mcp>=2",
+  "opentelemetry-api>=1.27",
   "pydoll-python>=3.0.1",
 ]
 
@@ -46,9 +55,11 @@ dev = [
   "bandit>=1.9.4",
   "deptry>=0.25.1",
   "dspy>=3.4.1",
+  "dspy-rlm-hooks>=0.1.17",
   "httpx2>=2.10",
   "isort>=9.0.2",
   "mcp>=2",
+  "opentelemetry-api>=1.27",
   "poethepoet>=0.49.0",
   "pydoll-python>=3.0.1",
   "pytest>=9.1.1",
@@ -68,7 +79,7 @@ known_first_party = ["dspy_agent_tools"]
 
 [tool.deptry.per_rule_ignores]
 # Imported dynamically only when the optional [ffmpeg] extra is installed.
-DEP002 = ["imageio-ffmpeg"]
+DEP002 = ["dspy-lancedb-memory", "imageio-ffmpeg"]
 
 [tool.deptry.package_module_name_map]
 imageio-ffmpeg = "imageio_ffmpeg"

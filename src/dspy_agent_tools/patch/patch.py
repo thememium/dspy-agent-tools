@@ -164,6 +164,12 @@ def _sources(tools: Any) -> list[Any]:
     ``tools=Skills(...)`` is one source that owns its section; ``tools=[skills,
     read_file]`` is two. A bare tool or function is one source.
     """
+    import dspy
+
+    # A ``dspy.Tool`` is a pydantic model and therefore iterable over its
+    # field names; check it before ``list()`` turns it into strings.
+    if isinstance(tools, dspy.Tool):
+        return [tools]
     if callable(getattr(tools, "section", None)):
         return [tools]
     if isinstance(tools, (str, bytes)):
@@ -194,6 +200,7 @@ def Patch(
     drop: Any = (),
     guide: str | None = None,
     describe: bool = True,
+    replace: bool = False,
 ) -> Any:
     """Add ``tools`` to ``agent`` and inject tool guidance into its instructions.
 
@@ -222,6 +229,9 @@ def Patch(
             keeps it; pass ``guide=""`` to clear it.
         describe: Add the family sections. ``False`` appends only the tools and
             ``guide``.
+        replace: Replace a tool that has the same name but a different
+            function instead of raising. Used by :func:`dspy_agent_tools.Wire`
+            to install middleware around an agent's existing tools.
 
     Returns:
         The same ``agent``, for chaining: ``agent = Patch(agent, tools=...)``.
@@ -230,10 +240,10 @@ def Patch(
         TypeError: ``agent`` is not one of the supported modules, or ``tools``
             holds something that is neither a tool nor a list of tools.
         ValueError: The agent already has a *different* tool with one of the
-            incoming names (pass ``name_prefix=...`` to the factory that built
-            it), a name is in both ``tools`` and ``drop``, or ``drop`` names
-            the agent's own internal tool (ReAct's ``finish`` or ReActV2's
-            ``submit``).
+            incoming names and ``replace`` is false (pass ``name_prefix=...``
+            to the factory that built it), a name is in both ``tools`` and
+            ``drop``, or ``drop`` names the agent's own internal tool (ReAct's
+            ``finish`` or ReActV2's ``submit``).
 
     The injected block lives in one delimited region of the instructions and
     is recomputed on every call from the tools the agent holds, the sources
@@ -267,15 +277,23 @@ def Patch(
     incoming = [tool for source in sources for tool in _flatten(source)]
 
     checked = dict(existing)
+    replaced: set[str] = set()
     for tool in incoming:
         found = checked.get(tool.name)
         if found is not None and not _same(found, tool):
-            raise ValueError(
-                f"Agent already has a different tool named {tool.name!r}; "
-                "pass name_prefix=... to the factory that built it."
-            )
+            if not replace:
+                raise ValueError(
+                    f"Agent already has a different tool named {tool.name!r}; "
+                    "pass name_prefix=... to the factory that built it, or "
+                    "replace=True to install this one instead."
+                )
+            replaced.add(str(tool.name))
         checked[str(tool.name)] = tool
-    additions = [tool for name, tool in checked.items() if name not in existing]
+    additions = [
+        tool
+        for name, tool in checked.items()
+        if name not in existing or name in replaced
+    ]
 
     removed = _drop_names(drop)
     internal = (
@@ -296,8 +314,10 @@ def Patch(
         )
 
     kept = [
-        tool for tool in [*existing.values(), *additions] if tool.name not in removed
-    ]
+        tool
+        for tool in [*existing.values(), *additions]
+        if tool.name not in removed and str(tool.name) not in replaced
+    ] + [tool for tool in additions if str(tool.name) in replaced]
 
     if guide is None:
         note = getattr(agent, _GUIDE_ATTR, None)
@@ -310,8 +330,10 @@ def Patch(
         blocks = [note] if note else []
     instructions = _with_region(base, blocks)
     setattr(agent, _GUIDE_ATTR, note)
-    if [tool.name for tool in kept] == list(existing) and (
-        instructions == agent.signature.instructions
+    if (
+        not replaced
+        and [tool.name for tool in kept] == list(existing)
+        and (instructions == agent.signature.instructions)
     ):
         return agent
 

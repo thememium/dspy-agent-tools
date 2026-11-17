@@ -33,10 +33,18 @@ from .browser import (
 from .cli import CLI, Argument, CLITools, Command, Option
 from .files import delete_file, edit_file, read_file, write_file
 from .mcp import MCP, MCPTools
+from .memory import Memory, MemoryTools
 from .patch import Patch
 from .search import web_news, web_search
 from .skills import Skill, Skills, SkillTools
 from .toolbox import Toolbox
+from .wire import (
+    Offloader,
+    Policy,
+    Session,
+    Wire,
+    wrap_tools,
+)
 
 __all__ = [
     "CLI",
@@ -48,12 +56,18 @@ __all__ = [
     "CLITools",
     "Command",
     "MCPTools",
+    "Memory",
+    "MemoryTools",
+    "Offloader",
     "Option",
     "Patch",
+    "Policy",
+    "Session",
     "Skill",
     "SkillTools",
     "Skills",
     "Toolbox",
+    "Wire",
     "bash_curl",
     "bash_exec",
     "bash_fetch",
@@ -84,5 +98,6 @@ __all__ = [
     "read_file",
     "web_news",
     "web_search",
+    "wrap_tools",
     "write_file",
 ]

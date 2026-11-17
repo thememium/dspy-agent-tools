@@ -51,6 +51,8 @@ Core tools, optional bridges, and progressive discovery:
 - **Patch** — add tools to a built agent and inject one guidance section per tool family. See [docs/patch.md](docs/patch.md).
 - **Browser** (optional) — headless Chrome as one `dspy.Tool` list, with optional recording and search. See [docs/browser.md](docs/browser.md).
 - **Toolbox** — mix MCP servers, tools, and functions; optional progressive discovery.
+- **Memory** — recall, remember, and forget over a duck-typed vector store. See [docs/wire.md](docs/wire.md).
+- **Wire** (optional RLM) — compose memory, offloading, tracing, sessions, and policy around one agent. See [docs/wire.md](docs/wire.md).
 
 Tools are just Python functions, exactly as
 [DSPy's docs describe](https://dspy.ai/current/getting-started/react-and-tools/#tools-are-just-python-functions):
@@ -61,7 +63,8 @@ instead of a sibling tool, and HOW to pass arguments.
 
 Requires **Python 3.13+**; run agents with **DSPy 3.1+**. The `[browser]` extra
 installs DSPy; `[mcp]` requires **DSPy 3.4.1+** for its MCP result conversion API.
-`[all]` installs every optional bridge at once.
+`[all]` installs every optional bridge except `[memory]`, whose LanceDB backend
+adds roughly 200 MB.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -108,7 +111,24 @@ The MCP bridge pulls in DSPy, `httpx2`, and MCP SDK 2.x:
 uv add "dspy-agent-tools[mcp]"
 ```
 
-To install every optional bridge at once, use `all` (browser, ffmpeg, and MCP):
+`Wire` needs `dspy-rlm-hooks` to instrument `dspy.RLM`; without it the ReAct
+path still works. OTLP spans need only the OpenTelemetry API — the exporter and
+SDK live in your application.
+
+```bash
+uv add 'dspy-agent-tools[hooks]'
+uv add 'dspy-agent-tools[otel]'
+```
+
+Memory tools work with any store that implements the three documented methods.
+To install the LanceDB backend too:
+
+```bash
+uv add 'dspy-agent-tools[memory]'
+```
+
+To install every optional bridge except `memory`, use `all` (browser, ffmpeg,
+MCP, hooks, and otel):
 
 ```bash
 uv add 'dspy-agent-tools[all]'
@@ -407,10 +427,62 @@ tool whether it arrives as a function or a `dspy.Tool`. Two other edges matter:
 an agent that already has a *different* tool with an incoming name raises
 `ValueError` (pass `name_prefix=...` to the factory that built it), and
 `Patch` needs the agent module itself — a `dspy.Predict` or a wrapper such as
-`dspy.Retry` raises `TypeError`. Rebuilding replaces the inner predictor, so
+`dspy.Retry` raises `TypeError`. `Patch(agent, tools=..., replace=True)` swaps
+a tool that has the same name but a different function, which is how
+`Wire` installs middleware around existing tools. Rebuilding replaces the
+inner predictor, so
 few-shot demos from an optimizer are dropped with a warning; patch before
 compiling, or recompile afterwards. See [docs/patch.md](docs/patch.md) for the
 full family list and how to add a new family.
+
+### With memory and lifecycle wiring
+
+`Memory` turns a store into three tools. `Wire` composes it with offloading,
+tracing, a session log, and a policy — the capabilities an agent loop needs but
+no single tool can provide.
+
+```python
+import dspy
+from dspy_lancedb_memory import memory
+from dspy_agent_tools import Memory, Offloader, Session, Wire, read_file
+
+store = memory.Store()
+memory_tools = Memory(store, user_id="user_123")
+offload = Offloader(limit=20_000)
+session = Session("runs.db")
+
+
+def policy(name, arguments):
+    if name == "bash_exec" and "rm -rf" in arguments.get("command", ""):
+        return "destructive commands are not allowed"
+    return None
+
+
+agent = dspy.ReAct("question -> answer", tools=[read_file])
+Wire(agent, memory=memory_tools, offload=offload, session=session, policy=policy)
+```
+
+For an RLM the same call installs four lifecycle hooks: recall before the
+action, policy before execution, offloading after it, and a log plus memory
+extraction after the iteration.
+
+```python
+worker = dspy.RLM("task -> report")
+Wire(
+    worker,
+    memory=memory_tools,
+    offload=offload,
+    session=session,
+    query="deployment notes",
+)
+```
+
+`Offloader` spills any result over `limit` characters to a file and returns the
+path, sizes, and head/tail samples, so one build log cannot consume the context
+window. `Session` is an append-only SQLite log of iterations, tool calls, and
+spilled artifacts. Policy denials reach the model as a `PermissionError`
+instead of crashing the run. See [docs/wire.md](docs/wire.md) for the store
+contract, per-agent behavior, the span names, and the log schema.
 
 ### Tool discovery with Toolbox
 
@@ -678,6 +750,31 @@ snapshot. See [docs/browser.md](docs/browser.md).
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- DEVELOPMENT -->
+
+### Memory (`dspy_agent_tools.memory`)
+
+| Tool | Use it for |
+| --- | --- |
+| **`Memory`** | Return `memory_recall`, `memory_remember`, and (when the store supports it) `memory_forget` for one user. `mode="search"` returns text; `mode="code"` returns dicts. |
+| **`MemoryTools`** | `list` subclass with `.recall()`, `.remember()`, `.remember_turn()`, `.format()`, and `.section()` for `Patch`. |
+
+The store is duck-typed: `create_memory`, `create_memories`, and
+`search_memories`, plus optional `delete_memory`. `dspy_lancedb_memory`'s
+`memory.Store()` satisfies it. See [docs/wire.md](docs/wire.md).
+
+### Wire (`dspy_agent_tools.wire`)
+
+| Tool | Use it for |
+| --- | --- |
+| **`Wire`** | Attach memory, offloading, tracing, a session, and a policy to a `dspy.ReAct`, `dspy.ReActV2`, or `dspy.RLM`. Returns the same agent. |
+| **`Offloader`** | Replace an oversized value with `{path, chars, bytes, head, tail, note}` and write the full value to a content-addressed file. |
+| **`Session`** | Append-only SQLite log of iterations, tool calls, errors, and artifacts, keyed by session. |
+| **`wrap_tools`** | Apply policy, spans, offloading, and session logging to a tool list without an agent. |
+| **`Policy`** | Protocol for the allow/deny callable `Wire` and `wrap_tools` use. |
+
+`Wire` on an RLM requires `dspy-agent-tools[hooks]`; on ReAct it needs nothing.
+Spans appear only when the application installs an OpenTelemetry SDK. See
+[docs/wire.md](docs/wire.md).
 
 ## Development
 
