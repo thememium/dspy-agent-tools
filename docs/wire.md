@@ -38,6 +38,21 @@ Wire(
 `ReAct` wiring, offloading, sessions, and policy need no extra. A memory store
 is duck-typed, so any object with the three methods below works.
 
+## Shortcuts
+
+Every option is independent, and the flags mean "use the default":
+
+```python
+Wire(agent, policy=safe_defaults("."))  # one policy, one line
+Wire(agent, offload=True, session=True)  # default Offloader and Session
+Wire(agent, memory=store, user_id="u1")  # a bare store is wrapped for you
+Wire(agent, policy=[workspace("."), deny_tools("web_search")])  # lists are ANDed
+```
+
+`Wire` is re-runnable: calling it again replaces the middleware rather than
+stacking a second layer of logging, offloading, or policy. Tools added with
+`Patch` after a `Wire` call are unwrapped until the next `Wire`.
+
 ## Memory
 
 `Memory(store, user_id=...)` returns the three memory tools. On an RLM the
@@ -108,19 +123,22 @@ and `trace=False` skips them entirely.
 
 ## Policy
 
-A policy is a synchronous callable:
+`Wire` accepts one policy or a list combined with conjunction. A policy is a
+synchronous `(name, arguments) -> str | None` callable; a string denies the
+call with that reason.
 
 ```python
-def policy(name: str, arguments: dict) -> str | None:
-    if name == "bash_exec" and "rm -rf" in arguments.get("command", ""):
-        return "destructive commands are not allowed"
-    return None
+from dspy_agent_tools import deny_tools, safe_defaults, workspace
+
+Wire(agent, policy=safe_defaults("."))
+Wire(agent, policy=workspace("src") & deny_tools("web_search"))
 ```
 
-For tool calls, `name` is the tool name and `arguments` are the keyword
+For a tool call, `name` is the tool name and `arguments` are its keyword
 arguments. For generated RLM code, `name` is `"code"` and `arguments` holds
-`code` and `iteration`.
+`code` and `iteration`; a denial rewrites the iteration into
+`raise PermissionError(...)` so the model sees the reason and adapts.
 
-A denial on a tool call raises `PermissionError`. A denial on generated code
-rewrites the iteration into `raise PermissionError(...)`, so the model sees the
-reason in its REPL history and can adapt instead of crashing the run.
+The premade rules for the shipped tools — `workspace`, `protect_secrets`,
+`destructive_shell`, `read_only`, `no_network`, `require_approval`, and the
+rest — are documented in [docs/policies.md](policies.md).

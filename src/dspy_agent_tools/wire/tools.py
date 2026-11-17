@@ -15,20 +15,23 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 from ..utils.dspy import load_tool, sync_tool_class
 from .observe import NOOP, span
 from .offload import Offloader
-from .policy import Policy, check
+from .policy import Policy, PolicyLike, as_policy, check
 from .session import Session
 
 if TYPE_CHECKING:
     from dspy import Tool
 
 _DIGEST_LIMIT = 500
+
+#: Attribute linking a middleware wrapper back to the function it wraps.
+_ORIGINAL_ATTR = "_dspy_agent_tools_original"
 
 
 def _digest(value: Any) -> str:
@@ -88,7 +91,10 @@ def _wrap_one(
 ) -> Tool:
     """Return a tool with the same schema whose call runs the middleware."""
     tool_cls = sync_tool_class()
-    original = tool.func
+    # Wrapping a tool that already carries middleware rebuilds it around the
+    # original function, so Wire() can be called again to replace a policy
+    # instead of stacking a second layer of logging and offloading.
+    original = getattr(tool.func, _ORIGINAL_ATTR, tool.func)
     name = str(tool.name or getattr(original, "__name__", "tool"))
 
     if _is_async(original):
@@ -147,6 +153,7 @@ def _wrap_one(
                     current=current,
                 )
 
+    setattr(wrapper, _ORIGINAL_ATTR, original)
     wrapper.__module__ = getattr(original, "__module__", "")
     wrapper.__name__ = getattr(original, "__name__", name)
     wrapper.__doc__ = getattr(original, "__doc__", None)
@@ -163,7 +170,7 @@ def _wrap_one(
 def wrap_tools(
     tools: Iterable[Any] | Mapping[str, Any],
     *,
-    policy: Policy | None = None,
+    policy: PolicyLike | Sequence[PolicyLike] | None = None,
     offload: Offloader | None = None,
     session: Session | None = None,
     trace: bool = True,
@@ -176,7 +183,8 @@ def wrap_tools(
 
     Args:
         tools: An agent's ``tools`` mapping or any iterable of tools.
-        policy: Deny a call by returning a reason string.
+        policy: One policy, or a sequence combined with conjunction. Each
+            call is checked before it runs; a denial raises ``PermissionError``.
         offload: Spill oversized results to a file and return a handle.
         session: Record each call's result or error.
         trace: Emit an OTel span per call.
@@ -191,6 +199,7 @@ def wrap_tools(
     ToolClass = load_tool(
         "wrap_tools() requires DSPy. Install it with: uv add 'dspy-agent-tools[mcp]'"
     )
+    policy = as_policy(policy)
     items = list(tools.values()) if isinstance(tools, Mapping) else list(tools)
     wrapped: list[Tool] = []
     for item in items:

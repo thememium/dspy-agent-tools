@@ -27,18 +27,29 @@ A store is any object with three methods:
 
 ```python
 def create_memory(
-    *, user_id: str, content: str, session_id: str = "",
+    *,
+    user_id: str,
+    content: str,
+    session_id: str = "",
     memory_type: str = "semantic",
 ) -> object: ...
 
+
 def create_memories(
-    *, user_id: str, contents: list[dict[str, str]],
-    session_id: str = "", extract: bool = True,
+    *,
+    user_id: str,
+    contents: list[dict[str, str]],
+    session_id: str = "",
+    extract: bool = True,
 ) -> list[object]: ...
 
+
 def search_memories(
-    *, user_id: str, query: str,
-    session_id: str | None = None, limit: int = 5,
+    *,
+    user_id: str,
+    query: str,
+    session_id: str | None = None,
+    limit: int = 5,
 ) -> list[object]: ...
 ```
 
@@ -87,10 +98,9 @@ class DictStore:
         ]
 
     def search_memories(self, *, user_id, query, session_id=None, limit=5):
-        return [
-            row for row in self.rows
-            if query.lower() in row["content"].lower()
-        ][:limit]
+        return [row for row in self.rows if query.lower() in row["content"].lower()][
+            :limit
+        ]
 ```
 
 ## Basic use
@@ -153,10 +163,10 @@ available to your code:
 memories = Memory(store, user_id="user_123")
 
 memories.remember("Prefers tabs over spaces.", memory_type="preference")
-memories.recall("indentation preference")        # -> list[dict]
+memories.recall("indentation preference")  # -> list[dict]
 memories.remember_turn([{"role": "user", "content": "..."}])
 memories.forget("memory-id")
-memories.format(records)                         # -> prompt block, bounded
+memories.format(records)  # -> prompt block, bounded
 ```
 
 - `recall(query, limit=None)` returns `[]` for an empty or whitespace-only
@@ -175,6 +185,7 @@ once and injects the result as guidance:
 from dspy_agent_tools import Wire
 
 Wire(agent, memory=Memory(store, user_id="user_123"), query="deployment notes")
+Wire(agent, memory=store, user_id="user_123")  # same, with a bare store
 ```
 
 For `dspy.RLM`, `Wire` adds the tools to the REPL (so generated code can call

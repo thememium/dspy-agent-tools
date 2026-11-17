@@ -20,11 +20,11 @@ from typing import TYPE_CHECKING, Any
 
 from .observe import start_span
 from .offload import Offloader
-from .policy import Policy, check
+from .policy import PolicyLike, check
 from .session import Session
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ..memory.tools import MemoryTools
 
@@ -64,7 +64,7 @@ def build_hooks(
     memory: MemoryTools | None = None,
     session: Session | None = None,
     offload: Offloader | None = None,
-    policy: Policy | None = None,
+    policy: PolicyLike | Sequence[PolicyLike] | None = None,
     trace: bool = True,
     write_back: bool = True,
     recall_query: str | None = None,

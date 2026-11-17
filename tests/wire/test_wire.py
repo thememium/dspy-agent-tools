@@ -8,7 +8,13 @@ from typing import Any, cast
 import dspy
 import pytest
 
-from dspy_agent_tools import Memory, Offloader, Session, Wire
+from dspy_agent_tools import (
+    Memory,
+    Offloader,
+    Session,
+    Wire,
+    deny_tools,
+)
 from tests.patch.helpers import QA, react_instructions
 
 
@@ -71,6 +77,11 @@ def long_echo(text: str) -> str:
     return "x" * 100
 
 
+def huge() -> str:
+    """Return more than the default offload limit."""
+    return "x" * 25_000
+
+
 class TestReAct:
     def test_retools_in_place(self):
         agent = dspy.ReAct(QA, tools=[echo], max_iters=3)
@@ -117,6 +128,63 @@ class TestReAct:
 
         with pytest.raises(PermissionError, match="blocked"):
             cast(Any, agent.tools)["echo"](text="hi")
+
+    def test_policy_list_is_conjuncted(self):
+        agent = dspy.ReAct(QA, tools=[echo])
+        Wire(
+            agent,
+            policy=[lambda name, arguments: None, deny_tools("echo", reason="no")],
+        )
+
+        with pytest.raises(PermissionError, match="no"):
+            cast(Any, agent.tools)["echo"](text="hi")
+
+    def test_true_flags_build_defaults(self, session: Session):
+        agent = dspy.ReAct(QA, tools=[huge])
+
+        Wire(agent, offload=True, session=session)
+
+        handle = cast(Any, agent.tools)["huge"]()
+        assert handle["offloaded"] is True
+        [event] = session.events()
+        assert event["data"] == {"tool": "huge"}
+
+    def test_false_flags_mean_none(self):
+        agent = dspy.ReAct(QA, tools=[echo])
+
+        returned = Wire(agent, offload=False, session=False)
+
+        assert returned is agent
+
+    def test_memory_store_is_accepted_with_a_user(self):
+        store = FakeStore()
+        agent = dspy.ReAct(QA, tools=[echo])
+
+        Wire(agent, memory=store, user_id="u9")
+
+        assert "memory_recall" in cast(Any, agent.tools)
+        assert "user `u9`" in react_instructions(agent)
+
+    def test_memory_store_needs_a_user(self):
+        with pytest.raises(TypeError, match="needs user_id"):
+            Wire(dspy.ReAct(QA, tools=[echo]), memory=FakeStore())
+
+    def test_memory_rejects_an_unrelated_object(self):
+        with pytest.raises(TypeError, match="takes Memory"):
+            Wire(dspy.ReAct(QA, tools=[echo]), memory=object())
+
+    def test_rewiring_replaces_middleware(self, session: Session):
+        agent = dspy.ReAct(QA, tools=[echo])
+        Wire(agent, session=session, policy=lambda name, arguments: None)
+        assert cast(Any, agent.tools)["echo"](text="one") == "echo:one"
+
+        Wire(agent, session=session, policy=deny_tools("echo", reason="second"))
+        with pytest.raises(PermissionError, match="second"):
+            cast(Any, agent.tools)["echo"](text="two")
+
+        Wire(agent, session=session, policy=lambda name, arguments: None)
+        assert cast(Any, agent.tools)["echo"](text="three") == "echo:three"
+        assert len(session.events()) == 2
 
     def test_offload_and_session(self, tmp_path, session: Session):
         agent = dspy.ReAct(QA, tools=[long_echo])
@@ -170,6 +238,19 @@ class TestRLM:
             "memory_recall",
             "memory_remember",
         }
+
+    def test_memory_tools_are_wrapped_by_the_policy(self):
+        store = FakeStore()
+        agent = dspy.RLM(QA)
+
+        Wire(
+            agent,
+            memory=Memory(store, user_id="u1"),
+            policy=deny_tools("memory_recall"),
+        )
+
+        with pytest.raises(PermissionError, match="memory_recall"):
+            agent._user_tools["memory_recall"](query="x")
 
     def test_missing_hooks_package_explains_the_extra(
         self, monkeypatch: pytest.MonkeyPatch

@@ -131,6 +131,17 @@ class TestConstruction:
             "memory_remember",
         ]
 
+    def test_with_tools_keeps_the_source(self):
+        memory = Memory(FakeStore(), user_id="u1", session_id="s1")
+
+        replaced = memory.with_tools([dspy.Tool(lambda: "x", name="memory_recall")])
+
+        assert isinstance(replaced, MemoryTools)
+        assert [tool.name for tool in replaced] == ["memory_recall"]
+        assert replaced.user_id == "u1"
+        assert replaced.session_id == "s1"
+        assert "user `u1`" in replaced.section()
+
     def test_family_is_recognised(self):
         memory = Memory(FakeStore(), user_id="u1")
 

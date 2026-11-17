@@ -18,6 +18,7 @@ them from RLM hooks while the same object is handed to ``Patch`` or
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..utils.dspy import load_tool, sync_tool_class
@@ -110,6 +111,22 @@ class MemoryTools(list):
         self.session_id = session_id
         self.mode = mode
         self.limit = limit
+
+    def with_tools(self, tools: Sequence[Any]) -> MemoryTools:
+        """Return the same source with replaced tool objects.
+
+        ``Wire`` uses it after wrapping each tool with middleware, so the
+        tools gain policy/offloading/logging while the source keeps its store,
+        scope, and ``section()`` guidance.
+        """
+        return MemoryTools(
+            list(tools),
+            store=self.store,
+            user_id=self.user_id,
+            session_id=self.session_id,
+            mode=self.mode,
+            limit=self.limit,
+        )
 
     def recall(self, query: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         """Return memories for ``query``, or ``[]`` when the store has none."""

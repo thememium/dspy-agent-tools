@@ -9,7 +9,7 @@ from typing import Any
 import dspy
 import pytest
 
-from dspy_agent_tools import Offloader, Session, read_file, wrap_tools
+from dspy_agent_tools import Offloader, Session, deny_tools, read_file, wrap_tools
 from dspy_agent_tools.patch.guide import family_of
 from dspy_agent_tools.wire import observe
 from tests.patch.helpers import QA
@@ -141,6 +141,22 @@ class TestWrapTools:
 
         [event] = session.events()
         assert event["error"] == "RuntimeError: async boom"
+
+    def test_wrapping_twice_uses_the_original(self, session: Session):
+        [once] = wrap_tools([echo], session=session)
+
+        [twice] = wrap_tools([once], session=session)
+
+        assert twice(text="hi") == "echo:hi"
+        assert len(session.events()) == 1
+
+    def test_policy_list_is_supported(self):
+        [wrapped] = wrap_tools(
+            [echo], policy=[lambda name, arguments: None, deny_tools("echo")]
+        )
+
+        with pytest.raises(PermissionError):
+            wrapped(text="hi")
 
     def test_trace_false_skips_spans(self, monkeypatch: pytest.MonkeyPatch):
         fake = FakeTrace()

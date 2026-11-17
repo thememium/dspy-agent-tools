@@ -102,6 +102,18 @@ class TestPreExecution:
 
         assert output.code == "x = 1"
 
+    def test_policy_list_is_supported(self):
+        from dspy_agent_tools import deny_code
+
+        pre = _iteration(policy=[lambda name, arguments: None, deny_code()])[
+            "pre_execution_hook"
+        ]
+
+        output = pre(1, "x = 1", [], [], {})
+
+        with pytest.raises(PermissionError):
+            exec(output.code, {})  # noqa: S102
+
     def test_denied_code_raises_in_the_repl(self):
         def deny(name: str, arguments: dict[str, Any]) -> str | None:
             assert name == "code"

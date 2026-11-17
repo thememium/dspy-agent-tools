@@ -53,6 +53,7 @@ Core tools, optional bridges, and progressive discovery:
 - **Toolbox** — mix MCP servers, tools, and functions; optional progressive discovery.
 - **Memory** — recall, remember, and forget over a duck-typed vector store. See [docs/memory.md](docs/memory.md).
 - **Wire** (optional RLM) — compose memory, offloading, tracing, sessions, and policy around one agent. See [docs/wire.md](docs/wire.md).
+- **Policies** — ready-made allow/deny rules for shell, files, network, code, and approvals, composable with `&`. See [docs/policies.md](docs/policies.md).
 
 Tools are just Python functions, exactly as
 [DSPy's docs describe](https://dspy.ai/current/getting-started/react-and-tools/#tools-are-just-python-functions):
@@ -488,6 +489,26 @@ code; the denial reaches the model as a `PermissionError` instead of crashing
 the run. See [docs/wire.md](docs/wire.md) for policy, spans, and the session
 schema.
 
+### With policies
+
+A policy is a callable `(tool_name, arguments) -> None | str`; returning a
+string denies the call with that reason. Ready-made rules cover the shipped
+tools and compose with `&`:
+
+```python
+import dspy
+from dspy_agent_tools import Wire, deny_tools, safe_defaults, workspace
+
+agent = dspy.ReAct("question -> answer", tools=[read_file, bash_exec])
+Wire(agent, policy=safe_defaults("."))
+Wire(agent, policy=workspace("src") & deny_tools("web_search"))
+```
+
+`safe_defaults` keeps file tools inside the working tree, blocks credential
+files, and denies destructive shell commands. `read_only()`, `no_network()`,
+`require_approval(...)`, and every per-tool rule are in
+[docs/policies.md](docs/policies.md).
+
 ### Tool discovery with Toolbox
 
 `Toolbox` accepts any mix of MCP servers, `dspy.Tool` objects, and sync or
@@ -772,9 +793,30 @@ The store is duck-typed: `create_memory`, `create_memories`, and
 | **`wrap_tools`** | Apply policy, spans, offloading, and session logging to a tool list without an agent. |
 | **`Policy`** | Protocol for the allow/deny callable `Wire` and `wrap_tools` use. |
 
-`Wire` on an RLM requires `dspy-agent-tools[hooks]`; on ReAct it needs nothing.
-Spans appear only when the application installs an OpenTelemetry SDK. See
-[docs/wire.md](docs/wire.md).
+`Wire` accepts a bare store plus `user_id=`, `offload=True` / `session=True`
+for defaults, and a policy or list of policies. Calling `Wire` again replaces
+the middleware instead of stacking it. On an RLM it requires
+`dspy-agent-tools[hooks]`; on ReAct it needs nothing. Spans appear only when the
+application installs an OpenTelemetry SDK. See [docs/wire.md](docs/wire.md).
+
+### Policies (`dspy_agent_tools.wire.policies`)
+
+| Tool | Use it for |
+| --- | --- |
+| **`Policy`** | Wrap a decision callable; compose with `&` or `Policy.all`. Any callable also works. |
+| **`allow_tools`** / **`deny_tools`** | Name-based allow/deny; names accept fnmatch patterns such as `browser_*`. |
+| **`deny_patterns`** | Generic regex rule over named or all string arguments. |
+| **`deny_shell`** / **`destructive_shell`** | Regex over the `command` argument; no patterns denies all shell. |
+| **`deny_code`** | Regex over RLM-generated Python; no patterns denies all code. |
+| **`workspace`** | Confine file paths to a root; absolute paths and symlinks are resolved first. |
+| **`protect`** / **`protect_secrets`** | Deny file tools touching matching paths or credential files. |
+| **`deny_urls`** | Host and scheme denylist, scanned from every string argument. |
+| **`require_approval`** | Ask a callback before the named calls (all calls by default). |
+| **`read_only`** / **`no_network`** / **`safe_defaults`** | Bundles for common postures. |
+
+`Wire(agent, policy=...)` and `wrap_tools(..., policy=...)` accept one policy
+or a list combined with conjunction. See [docs/policies.md](docs/policies.md)
+for defaults, examples, and limits.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
