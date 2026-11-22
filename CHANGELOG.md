@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.18 (2026-11-22)
+
+[Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.17...v0.1.18)
+
+### 💅 Refactors
+
+- **pytest**: enable parallel test execution with pytest‑xdist ([71cbeaf](https://github.com/thememium/dspy-agent-tools/commit/71cbeaf22141336fa780e3661d5b2cb026a2785a))
+
+### 🏡 Chore
+
+- **deps**: bump usechange to 0.1.53 ([3a054c3](https://github.com/thememium/dspy-agent-tools/commit/3a054c3d54be4fc7c15ca86815b2b765fdaf46e8))
+
+### Contributors
+
+- Edward Boswell <thememium@gmail.com>
+
 ## v0.1.17 (2026-11-16)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.16...v0.1.17)
