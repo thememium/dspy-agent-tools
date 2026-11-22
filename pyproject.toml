@@ -55,7 +55,7 @@ dev = [
   "pytest-cov>=7.1.0",
   "ruff>=0.17.1",
   "ty>=0.0.89",
-  "usechange>=0.1.49",
+  "usechange>=0.1.53",
 ]
 
 [tool.deptry]
