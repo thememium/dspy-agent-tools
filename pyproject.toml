@@ -53,6 +53,7 @@ dev = [
   "pydoll-python>=3.0.1",
   "pytest>=9.1.1",
   "pytest-cov>=7.1.0",
+  "pytest-xdist[psutil]>=3.8.0",
   "ruff>=0.17.1",
   "ty>=0.0.89",
   "usechange>=0.1.53",
@@ -99,8 +100,11 @@ exclude = ["**/__pycache__", "**/.venv"]
 [tool.poe.tasks]
 clean-full = "sh -c 'uv run isort . && uv run ruff check . --fix && uv run ruff format . && uv run deptry . && uv run ty check'"
 clean = "sh -c 'uv run isort . && uv run ruff format .'"
-test = "uv run pytest tests/ -v"
-test-cov = "uv run pytest tests/ -v --cov=dspy_agent_tools --cov-report=term-missing"
+# xdist `-n auto` pins every core at 100%, which ramps the fans on long runs.
+# PYTEST_XDIST_AUTO_NUM_WORKERS caps `auto` at half the online CPUs; override
+# per run, e.g. PYTEST_XDIST_AUTO_NUM_WORKERS=4 uv run poe test.
+test = "sh -c 'PYTEST_XDIST_AUTO_NUM_WORKERS=$(( ($(getconf _NPROCESSORS_ONLN) + 1) / 2 )) uv run pytest tests/ -n auto --dist worksteal -v $@' --"
+test-cov = "sh -c 'PYTEST_XDIST_AUTO_NUM_WORKERS=$(( ($(getconf _NPROCESSORS_ONLN) + 1) / 2 )) uv run pytest tests/ -n auto --dist worksteal -v --cov=dspy_agent_tools --cov-report=term-missing $@' --"
 sort = "uv run isort ."
 lint = "uv run ruff check ."
 format = "uv run ruff format ."
