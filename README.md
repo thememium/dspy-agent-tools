@@ -180,7 +180,7 @@ the returned value:
 }
 ```
 
-A predictor step contains its inputs, the parsed `dspy.Prediction`, and the raw
+A predictor step contains its inputs, the parsed prediction fields, and the raw
 LM responses captured while the prediction ran:
 
 ```python
@@ -188,10 +188,15 @@ LM responses captured while the prediction ran:
     "__durable_llm_checkpoint__": True,
     "predictor": "react",
     "input": {"args": (), "kwargs": {"question": "...", "trajectory": ""}},
-    "output": dspy.Prediction(...),
+    "output": {"next_thought": "...", "next_tool_name": "..."},
+    "output_type": "prediction",
+    "usage": None,
     "llm": [["[[ ## next_thought ## ]] ..."]],
 }
 ```
+
+A `dspy.Prediction` is stored as plain fields for the DBOS viewer and rebuilt
+on read, so step output stays readable instead of a pickled custom class.
 
 Values that DBOS cannot serialize are replaced by a readable summary instead
 of failing the step. The persisted event stream carries the same inputs and
