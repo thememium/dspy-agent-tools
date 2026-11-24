@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from typing import Any
 
 import dspy
 import pytest
@@ -24,7 +25,7 @@ from .conftest import unique_name
 from .helpers import KeyedLM, wait_for_pending
 
 
-def _react(signature: str, tools: list[object]) -> object:
+def _react(signature: str, tools: list[object]) -> Any:
     # DSPy's runtime accepts signature strings; its annotation only advertises
     # Signature classes.
     return dspy.ReAct(signature, tools=tools)  # ty: ignore[invalid-argument-type]

@@ -266,7 +266,7 @@ def test_auto_names_and_duplicate_guards():
     with pytest.raises(DuplicateAgentName):
         Durable(_module(), name=first.name)
     with pytest.raises(TypeError):
-        Durable(42)
+        Durable(42)  # ty: ignore[no-matching-overload]
     with pytest.raises(TypeError):
         Durable()
 
@@ -278,7 +278,7 @@ def test_agent_outside_workflow_and_repr():
     assert agent._execute(question="?").answer == "ok"
 
     with pytest.raises(TypeError):
-        agent.__class__(42)
+        agent.__class__(42)  # ty: ignore[invalid-argument-type]
     alias = unique_name("alias")
     assert Durable.agent(_module(), name=alias).name == alias
     with_lm = Durable(
@@ -410,7 +410,7 @@ def test_durable_helpers():
     assert Durable.get_run("missing").id == "missing"
     assert Durable.get_schedule("missing").name == "missing"
     with pytest.raises(TypeError):
-        Durable(1.5)
+        Durable(1.5)  # ty: ignore[no-matching-overload]
 
 
 def test_function_helpers():
@@ -419,7 +419,7 @@ def test_function_helpers():
 
     assert _function_name(plain, None).endswith("plain")
     with pytest.raises(TypeError):
-        DurableFunction(42)
+        DurableFunction(42)  # ty: ignore[invalid-argument-type]
     first = DurableFunction(plain, name=unique_name("fn"))
     with pytest.raises(DurableError, match="already exists"):
         DurableFunction(plain, name=first.name)
@@ -599,7 +599,7 @@ def test_human_tool_and_predicate():
     with pytest.raises(TypeError):
         Human(None)
     with pytest.raises(TypeError):
-        Human(42)
+        Human(42)  # ty: ignore[no-matching-overload]
 
     assert human_module._matches(lambda value: value > 0, add, (1,), {}) is True
 
