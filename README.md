@@ -23,6 +23,7 @@
   <ol>
     <li><a href="#about">About</a></li>
     <li><a href="#quick-start">Quick Start</a></li>
+    <li><a href="#durable-execution">Durable Execution</a></li>
     <li><a href="#usage">Usage</a></li>
     <li><a href="#tool-reference">Tool Reference</a></li>
     <li><a href="#development">Development</a></li>
@@ -51,6 +52,7 @@ Core tools, optional bridges, and progressive discovery:
 - **Patch** — add tools to a built agent and inject one guidance section per tool family. See [docs/patch.md](docs/patch.md).
 - **Browser** (optional) — headless Chrome as one `dspy.Tool` list, with optional recording and search. See [docs/browser.md](docs/browser.md).
 - **Toolbox** — mix MCP servers, tools, and functions; optional progressive discovery.
+- **Durable** (optional) — wrap an agent, tool, or function in a DBOS workflow with checkpointed LLM/tool calls, persisted human approvals, queues, and schedules. See [Durable Execution](#durable-execution).
 
 Tools are just Python functions, exactly as
 [DSPy's docs describe](https://dspy.ai/current/getting-started/react-and-tools/#tools-are-just-python-functions):
@@ -108,7 +110,7 @@ The MCP bridge pulls in DSPy, `httpx2`, and MCP SDK 2.x:
 uv add "dspy-agent-tools[mcp]"
 ```
 
-To install every optional bridge at once, use `all` (browser, ffmpeg, and MCP):
+To install every optional bridge at once, use `all` (browser, durable execution, ffmpeg, and MCP):
 
 ```bash
 uv add 'dspy-agent-tools[all]'
@@ -117,6 +119,213 @@ uv add 'dspy-agent-tools[all]'
 
 Ready to build an agent? [Usage](#usage) shows complete `dspy.ReAct` and
 `dspy.RLM` examples.
+
+<!-- DURABLE -->
+
+## Durable Execution
+
+`Durable` turns an existing DSPy agent into a DBOS workflow. Predictor calls
+and tool calls become checkpointed steps; a crashed process resumes from the
+last completed operation instead of paying for the same LLM and tool calls
+again.
+
+```bash
+uv add "dspy-agent-tools[dbos]"
+```
+
+Local development needs no configuration: DBOS defaults to a SQLite system
+database in the working directory. Production should point at PostgreSQL:
+
+```python
+from dspy_agent_tools import Durable
+
+Durable.configure(
+    name="my-agents",
+    database_url=os.environ["DATABASE_URL"],
+)
+```
+
+### Two-line wrapping
+
+```python
+import dspy
+from dspy_agent_tools import Durable, bash_fetch, web_search
+
+Durable.configure(name="my-agents")  # once at startup
+agent = Durable(
+    dspy.ReAct("question -> answer", tools=[web_search, bash_fetch]),
+    name="researcher",  # stable: recovery looks this workflow up by name
+)
+
+result = agent(question="Research the latest advances in RLMs")
+print(result.answer)
+```
+
+`name=` must remain stable across deployments: it identifies the workflow
+function that DBOS replays after a restart. Wrap each module once.
+
+Start in the background and reconnect from any process:
+
+```python
+run = agent.start(question="What is new in DBOS?")
+print(run.id, run.status())
+
+# later, possibly another process
+from dspy_agent_tools import Run
+
+Run.get(run.id).result()
+for event in Run.get(run.id).events():
+    print(event)
+```
+
+Workflow arguments and results are serialized with cloudpickle, so
+`dspy.Prediction` round-trips with its attributes intact.
+
+### Human approvals and questions
+
+`Human(tool)` preserves the tool's name, signature, and docstring. The agent
+pauses *before* the checkpointed tool step and waits for a persisted message:
+
+```python
+from dspy_agent_tools import Durable, Human, bash_exec, read_file
+
+agent = Durable(
+    dspy.RLM("task -> summary", tools=[read_file, Human(bash_exec), Human.ask]),
+    name="coder",
+)
+
+run = agent.start(task="Improve the codebase")
+for event in run.events():
+    if isinstance(event, ApprovalRequest):
+        event.approve()  # or event.reject(reason="...")
+    elif isinstance(event, QuestionRequest):
+        event.respond(input(event.question))
+```
+
+Out-of-band control does not need the agent object:
+
+```python
+pending = run.pending()
+run.approve(pending[0].id)
+run.reject(pending[0].id, reason="create a local commit instead")
+run.respond(pending[0].id, answer="develop")
+
+# global inbox across every waiting run
+Human.pending()
+```
+
+Rejection is returned to the agent as an observation
+(`{"status": "rejected", "reason": ...}`), so ReAct/RLM can choose another
+action instead of failing the workflow.
+
+Conditional approval:
+
+```python
+shell = Durable.tool(
+    bash_exec,
+    approval=lambda command, **_: command.startswith("git push"),
+)
+```
+
+`Human.approve("Deploy?")` and `Human.ask("Which branch?")` also work as plain
+Python calls: inside a workflow they persist; outside one they prompt the
+terminal when it is interactive, and raise `HumanInputRequired` otherwise.
+
+### Workers, queues, and schedules
+
+```python
+from dspy_agent_tools import Durable
+
+Durable.queue("research", concurrency=10)
+
+researcher = Durable(
+    dspy.ReAct("question -> report", tools=[web_search]),
+    name="researcher",
+    queue="research",
+)
+run = researcher.enqueue(question="Compare vector databases")
+run.result()
+
+researcher.schedule(
+    cron="0 8 * * *",
+    inputs={"question": "What is new in AI research?"},
+    name="daily-ai-research",
+)
+```
+
+Plain functions become queued workers:
+
+```python
+@Durable.worker(queue="indexing", concurrency=5, retries=3)
+def index_repository(repo: str) -> dict:
+    return {"repo": repo}
+
+
+index_repository(repo="thememium/dspy-agent-tools")  # run and wait
+run = index_repository.enqueue(repo="thememium/dspy-agent-tools")
+```
+
+Worker bodies execute at the workflow level, so they can call `Human.ask`,
+start other runs, or schedule work. Wrap individual side effects with
+`Durable.tool` when they need their own checkpoint.
+
+The remaining helpers are small on purpose:
+
+```python
+Durable.tools([read_file, bash_exec])  # checkpoint a collection
+Durable.schedule(agent, cron="0 8 * * *", question="...")
+Durable.sleep(3600)  # persisted inside a workflow
+Durable.operation_id()  # stable idempotency key in a step
+```
+
+Queues and schedules are declared before `DBOS.launch()` / the first run in a
+server. `Durable.launch()` and `Durable.shutdown()` make the lifecycle
+explicit; standalone scripts launch automatically on first use. When another
+DBOS application owns the process, use `Durable.configure(manage_runtime=False)`.
+
+### Exposing workers to an LLM
+
+`Durable.worker_tools([...])` returns an allowlisted tool set:
+`list_workers`, `start_worker`, `worker_status`, `worker_result`,
+`cancel_worker`, `wait_for_workers`, `schedule_worker`, and `list_schedules`.
+The model can only start pre-registered workers; it cannot register arbitrary
+code or unbounded schedules.
+
+```python
+agent = Durable(
+    dspy.RLM(
+        "task -> result",
+        tools=[*Durable.worker_tools([researcher, index_repository])],
+    ),
+    name="orchestrator",
+)
+```
+
+### What is durable, and what is not
+
+- **LLM predictions** and **tool calls** are steps. `Durable.tool` can wrap a
+  single function; agent instrumentation wraps every predictor and tool
+  automatically.
+- **ReAct, ReActV2, RLM**: the loop itself is deterministic replay. RLM
+  regenerates the code from recorded predictions, re-executes it, and reuses
+  recorded host tool and `llm_query` results. Interpreter state is *not*
+  snapshotted; replay requires the generated code to be deterministic.
+- **Side effects are not exactly-once.** DBOS records a completed step, but a
+  crash between the external effect and the checkpoint can repeat it. Mark
+  non-idempotent tools with `idempotent=False` and use
+  `Durable.operation_id()` as an idempotency key:
+
+  ```python
+  @Durable.tool(idempotent=False)
+  def create_order(customer_id: str) -> dict:
+      return api.create_order(customer_id, idempotency_key=Durable.operation_id())
+  ```
+
+- Agent errors are recorded as `AgentExecutionError` with the original type
+  and message, so `Run.result()` works even when the underlying exception is
+  not picklable. Inspect `run.steps()` for the failing operation.
+- `Run.cancel()` stops a run; `Run.resume()` resumes an interrupted one.
+
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
