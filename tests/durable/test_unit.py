@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import pickle
 from types import SimpleNamespace
 from typing import Any
@@ -219,6 +220,9 @@ def test_runtime_helpers(monkeypatch):
     Durable.launch()
     with pytest.raises(DurableError, match="cannot change"):
         live.configure(name=unique_name("other"))
+    live.configure(verbose=True)
+    assert live.config.verbose is True
+    live.configure(verbose=False)
 
     created: dict[str, Any] = {}
 
@@ -243,7 +247,6 @@ def test_runtime_helpers(monkeypatch):
             database_url="sqlite:///fake.sqlite",
             application_version="v1",
             executor_id="exec",
-            log_level="WARNING",
         ),
         queues={"research": {"concurrency": 3}},
     )
@@ -251,8 +254,27 @@ def test_runtime_helpers(monkeypatch):
     assert created["launched"] is True
     assert created["config"]["application_version"] == "v1"
     assert created["config"]["executor_id"] == "exec"
+    assert created["config"]["log_level"] == "WARNING"
+    assert created["config"]["console_log_level"] == "WARNING"
     assert created["queues"] == {"research": {"concurrency": 3}}
     assert fake.launched is True
+
+    verbose_created: dict[str, Any] = {}
+
+    class FakeVerbose:
+        def __init__(self, *, config: dict[str, Any]) -> None:
+            verbose_created["config"] = config
+
+        @staticmethod
+        def launch() -> None:
+            return None
+
+    monkeypatch.setattr(dbos, "DBOS", FakeVerbose)
+    quiet = runtime_module._Runtime(
+        config=runtime_module.RuntimeConfig(name="fake-loud", verbose=True)
+    )
+    quiet.launch()
+    assert "log_level" not in verbose_created["config"]
 
 
 def test_auto_names_and_duplicate_guards():
@@ -763,3 +785,36 @@ def test_worker_variants_and_tools(monkeypatch):
     }
     with pytest.raises(DurableError):
         worker_tools([])
+
+
+def test_verbose_logging_controls(caplog):
+    runtime = runtime_module._Runtime(
+        config=runtime_module.RuntimeConfig(name="verbose-test")
+    )
+    runtime.set_verbose(True)
+    assert logging.getLogger("dbos").level == logging.INFO
+    assert logging.getLogger("dspy.primitives.module").level == logging.WARNING
+    runtime.set_verbose(False)
+    assert logging.getLogger("dbos").level == logging.WARNING
+    assert logging.getLogger("dspy.primitives.module").level == logging.ERROR
+
+    explicit = runtime_module._Runtime(
+        config=runtime_module.RuntimeConfig(name="explicit", log_level="ERROR")
+    )
+    explicit.set_verbose(False)
+    assert logging.getLogger("dbos").level == logging.ERROR
+    runtime.set_verbose(False)
+
+    dspy.configure(lm=KeyedLM(DIRECT_ANSWERS))
+    with caplog.at_level(logging.WARNING, logger="dspy.primitives.module"):
+        Durable(
+            _react("question -> answer", tools=[]),
+            name=unique_name("quiet"),
+            verbose=True,
+        )
+    assert not [
+        record
+        for record in caplog.records
+        if "Calling module.forward" in record.getMessage()
+    ]
+    runtime_module.runtime().set_verbose(False)
