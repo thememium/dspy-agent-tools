@@ -251,9 +251,43 @@ Workflow arguments and results are serialized with cloudpickle, so
 `dspy.Prediction` round-trips with its attributes intact.
 
 The public surface is typed for type checkers: `Durable(module)` returns
-`DurableAgent`, `Durable(fn)` returns `DurableFunction`, `Durable.tool(fn)`
-preserves the callable's signature, `Human(fn)` preserves its name/signature,
-and `Worker(...)` returns a `WorkerHandle` with `start`/`enqueue`/`result`.
+`DurableAgent`, `Durable(fn)` and `@Durable.workflow` return
+`DurableFunction`, `Durable.tool(fn)` and `Durable.step(fn)` preserve the
+callable's signature, `Human(fn)` preserves its name/signature, and
+`Worker(...)` returns a `WorkerHandle` with `start`/`enqueue`/`result`.
+
+### Workflows and steps
+
+`Durable.workflow` and `Durable.step` are the decorator spelling of
+`Durable(fn)` and `Durable.tool(fn)`, mirroring `@DBOS.workflow` and
+`@DBOS.step`:
+
+```python
+from dspy_agent_tools import Durable
+
+Durable.configure(name="pipeline")
+
+
+@Durable.step()
+def fetch(url: str) -> str:
+    return httpx.get(url).text
+
+
+@Durable.workflow(name="pipeline")
+def main(*, url: str) -> str:
+    return summarize(fetch(url=url))
+
+
+main(url="https://example.com")  # run and wait
+run = main.start(url="https://example.com")  # background, returns Run
+```
+
+`Durable.workflow(...)` returns a `DurableFunction`, so `start`, `enqueue`,
+and `schedule` work as they do for `Durable(fn)`. `Durable.step` checkpoints
+the call's inputs and output when it runs inside a durable workflow; outside
+one it calls the function normally. Workflow bodies take keyword arguments
+only. Both decorators accept the same options as their call-form equivalents
+(`name`, `retries`, `queue`, ...).
 
 ### Human approvals and questions
 
