@@ -31,6 +31,19 @@ from .browser import (
     browser_wait_response,
 )
 from .cli import CLI, Argument, CLITools, Command, Option
+from .durable import (
+    ApprovalRequest,
+    Durable,
+    DurableAgent,
+    DurableFunction,
+    Event,
+    EventType,
+    Human,
+    QuestionRequest,
+    Run,
+    Schedule,
+    Worker,
+)
 from .files import delete_file, edit_file, read_file, write_file
 from .mcp import MCP, MCPTools
 from .patch import Patch
@@ -41,19 +54,30 @@ from .toolbox import Toolbox
 __all__ = [
     "CLI",
     "MCP",
+    "ApprovalRequest",
     "Argument",
     "Browser",
     "BrowserSession",
     "BrowserTools",
     "CLITools",
     "Command",
+    "Durable",
+    "DurableAgent",
+    "DurableFunction",
+    "Event",
+    "EventType",
+    "Human",
     "MCPTools",
     "Option",
     "Patch",
+    "QuestionRequest",
+    "Run",
+    "Schedule",
     "Skill",
     "SkillTools",
     "Skills",
     "Toolbox",
+    "Worker",
     "bash_curl",
     "bash_exec",
     "bash_fetch",
