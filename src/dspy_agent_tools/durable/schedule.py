@@ -15,6 +15,7 @@ class Schedule:
     """A recurring durable execution registered with DBOS.
 
     Example:
+        >>> import dspy
         >>> from dspy_agent_tools import Durable
         >>> agent = Durable(dspy.ReAct("question -> answer", tools=[]), name="research")
         >>> schedule = agent.schedule(cron="0 8 * * *", question="What is new?")

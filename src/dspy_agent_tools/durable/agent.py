@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 import logging
 from collections.abc import Callable, Iterable
 from datetime import datetime
@@ -97,6 +98,7 @@ class DurableAgent:
         retries: int = 0,
         approvals: Iterable[Any] | None = None,
         lm: Any = None,
+        verbose: bool | None = None,
     ) -> None:
         if not _is_dspy_module(module):
             raise TypeError(
@@ -104,6 +106,9 @@ class DurableAgent:
                 f"{type(module).__name__}"
             )
         load_dbos()
+        runtime().set_verbose(
+            verbose if verbose is not None else runtime().config.verbose
+        )
         self.module = module
         self.name = name or _auto_name(module)
         self.queue = queue
@@ -165,12 +170,20 @@ class DurableAgent:
             self._patch_predictor(predictor, path)
 
     def _patch_predictor(self, predictor: Any, path: str) -> None:
-        original_forward = predictor.forward
+        # ``inspect.getattr_static`` bypasses DSPy's ``__getattribute__`` hook
+        # that warns when ``forward`` is read directly. We bind the function
+        # ourselves so instrumenting a module does not emit that warning.
+        original = inspect.getattr_static(predictor, "forward")
+        bound_forward = (
+            original.__get__(predictor, type(predictor))
+            if hasattr(original, "__get__")
+            else original
+        )
         step_name = f"{self.name}:llm:{path}"
 
-        @functools.wraps(original_forward)
+        @functools.wraps(bound_forward)
         def forward(*args: Any, **kwargs: Any) -> Any:
-            return self._llm_call(original_forward, path, step_name, args, kwargs)
+            return self._llm_call(bound_forward, path, step_name, args, kwargs)
 
         predictor.forward = forward
         vars(predictor)["__durable_predictor__"] = True
@@ -409,6 +422,7 @@ class Durable:
             retries: int = ...,
             approvals: Iterable[Any] | None = ...,
             lm: Any = ...,
+            verbose: bool | None = ...,
         ) -> DurableAgent: ...
 
         @overload
@@ -421,6 +435,7 @@ class Durable:
             retries: int = ...,
             concurrency: int | None = ...,
             worker: bool = ...,
+            verbose: bool | None = ...,
         ) -> DurableFunction: ...
 
         @overload
@@ -487,8 +502,22 @@ class Durable:
         application_version: str | None = None,
         executor_id: str | None = None,
         log_level: str | None = None,
+        verbose: bool | None = None,
     ) -> None:
-        """Configure the process-wide DBOS runtime exactly once at startup."""
+        """Configure the process-wide DBOS runtime exactly once at startup.
+
+        ``verbose=False`` (the default) keeps DBOS INFO logs and DSPy's
+        direct-``forward`` warning quiet. Set ``verbose=True`` to see them.
+
+        Example:
+            >>> import os
+            >>> from dspy_agent_tools import Durable
+            >>> Durable.configure(
+            ...     name="my-agents",
+            ...     database_url=os.environ["DATABASE_URL"],
+            ...     verbose=True,
+            ... )
+        """
         load_dbos()
         runtime().configure(
             name=name,
@@ -497,6 +526,7 @@ class Durable:
             application_version=application_version,
             executor_id=executor_id,
             log_level=log_level,
+            verbose=verbose,
         )
 
     @classmethod

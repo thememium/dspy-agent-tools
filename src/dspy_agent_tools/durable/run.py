@@ -22,7 +22,7 @@ class Run:
     """A durable execution that can be inspected and controlled by ID.
 
     Example:
-        >>> from dspy_agent_tools import Run
+        >>> from dspy_agent_tools import ApprovalRequest, Run
         >>> run = Run.get(workflow_id)
         >>> run.status()
         'PENDING'

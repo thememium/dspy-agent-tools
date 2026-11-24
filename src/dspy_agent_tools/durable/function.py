@@ -54,12 +54,16 @@ class DurableFunction:
         retries: int = 0,
         concurrency: int | None = None,
         worker: bool = False,
+        verbose: bool | None = None,
     ) -> None:
         if not callable(function):
             raise TypeError(
                 f"Durable() expected a callable, got {type(function).__name__}"
             )
         load_dbos()
+        runtime().set_verbose(
+            verbose if verbose is not None else runtime().config.verbose
+        )
         self.function: Callable[..., Any] = function
         self.name = _function_name(function, name)
         self.queue = queue or (self.name if worker else None)

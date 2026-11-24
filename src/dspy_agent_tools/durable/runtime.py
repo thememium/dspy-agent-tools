@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ._dbos import load_dbos
@@ -21,6 +22,7 @@ class RuntimeConfig:
     application_version: str | None = None
     executor_id: str | None = None
     log_level: str | None = None
+    verbose: bool = False
 
 
 @dataclass
@@ -41,6 +43,7 @@ class _Runtime:
         application_version: str | None = None,
         executor_id: str | None = None,
         log_level: str | None = None,
+        verbose: bool | None = None,
     ) -> None:
         """Set the runtime configuration before the first execution."""
         incoming = RuntimeConfig(
@@ -62,14 +65,36 @@ class _Runtime:
                 executor_id if executor_id is not None else self.config.executor_id
             ),
             log_level=log_level or self.config.log_level,
+            verbose=verbose if verbose is not None else self.config.verbose,
         )
         with self.lock:
-            if self.launched and incoming != self.config:
+            if (
+                self.launched
+                and replace(incoming, verbose=self.config.verbose) != self.config
+            ):
                 raise DurableError(
                     "Durable.configure() cannot change configuration after the "
                     "runtime has launched. Configure once at startup."
                 )
             self.config = incoming
+            self._apply_verbosity(incoming.verbose)
+
+    def set_verbose(self, verbose: bool) -> None:
+        """Toggle DBOS and DSPy log verbosity for this process."""
+        with self.lock:
+            self.config = replace(self.config, verbose=verbose)
+            self._apply_verbosity(verbose)
+
+    def _apply_verbosity(self, verbose: bool) -> None:
+        explicit = self.config.log_level
+        logging.getLogger("dbos").setLevel(
+            explicit or ("INFO" if verbose else "WARNING")
+        )
+        # DSPy's direct-forward warning is noise when Durable instruments a
+        # module; hide it unless the caller asked for verbose output.
+        logging.getLogger("dspy.primitives.module").setLevel(
+            logging.WARNING if verbose else logging.ERROR
+        )
 
     @property
     def name(self) -> str:
@@ -116,7 +141,12 @@ class _Runtime:
             config["executor_id"] = self.config.executor_id
         if self.config.log_level:
             config["log_level"] = self.config.log_level
+            config["console_log_level"] = self.config.log_level
+        elif not self.config.verbose:
+            config["log_level"] = "WARNING"
+            config["console_log_level"] = "WARNING"
         config["serializer"] = self.serializer
+        self._apply_verbosity(self.config.verbose)
 
         DBOS(config=config)
         DBOS.launch()
