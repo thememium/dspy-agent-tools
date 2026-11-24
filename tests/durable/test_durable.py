@@ -14,6 +14,7 @@ from dbos import DBOS
 from dspy_agent_tools import (
     ApprovalRequest,
     Durable,
+    DurableFunction,
     EventType,
     Human,
     Patch,
@@ -22,7 +23,7 @@ from dspy_agent_tools import (
     Worker,
 )
 from dspy_agent_tools.durable import human as human_module
-from dspy_agent_tools.durable.exceptions import HumanInputRequired
+from dspy_agent_tools.durable.exceptions import DurableError, HumanInputRequired
 
 from .conftest import unique_name
 from .helpers import KeyedLM, wait_for_pending
@@ -422,6 +423,43 @@ def test_worker_runs_and_exposes_tools():
     }
     listed = next(tool for tool in tools if tool.name == "list_workers")
     assert listed() == [worker.name]
+
+
+def test_workflow_and_step_decorators():
+    @Durable.step()
+    def increment(value: int) -> int:
+        """Increment a value."""
+        return value + 1
+
+    assert increment(value=1) == 2  # outside a workflow: plain call
+
+    @Durable.workflow(name=unique_name("decorated"))
+    def main(*, value: int) -> int:
+        return increment(value=value) * 2
+
+    assert isinstance(main, DurableFunction)
+    assert main(value=1) == 4
+
+    run = main.start(value=2)
+    assert run.result() == 6
+    step = next(s for s in run.steps() if s["function_name"] == "increment")
+    assert step["output"]["input"]["kwargs"] == {"value": 2}
+    assert step["output"]["output"] == 3
+
+    with pytest.raises(DurableError, match="already exists"):
+        Durable.workflow(lambda: None, name=main.name)
+
+
+def test_workflow_and_step_decorators_without_parentheses():
+    @Durable.step
+    def double(value: int) -> int:
+        return value * 2
+
+    @Durable.workflow
+    def bare(*, value: int) -> int:
+        return double(value=value)
+
+    assert bare(value=3) == 6
 
 
 def test_worker_tools_reject_unknown_worker():
