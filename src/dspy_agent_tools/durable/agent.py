@@ -363,7 +363,8 @@ class DurableAgent:
         if not in_workflow_body():
             return self._call_module(inputs)
         with workflow_state(self.name):
-            emit(EventType.RUN_STARTED, agent=self.name)
+            input_data = jsonable(inputs)
+            emit(EventType.RUN_STARTED, agent=self.name, input=input_data)
             try:
                 result = self._call_module(inputs)
             except Exception as exc:
@@ -373,12 +374,18 @@ class DurableAgent:
                 emit(
                     EventType.RUN_FAILED,
                     agent=self.name,
+                    input=input_data,
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 raise AgentExecutionError(
                     self.name, type(exc).__name__, str(exc)
                 ) from None
-            emit(EventType.RUN_COMPLETED, agent=self.name)
+            emit(
+                EventType.RUN_COMPLETED,
+                agent=self.name,
+                input=input_data,
+                output=jsonable(result),
+            )
             return result
 
     def _call_module(self, inputs: dict[str, Any]) -> Any:

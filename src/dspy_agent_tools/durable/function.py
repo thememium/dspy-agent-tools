@@ -15,7 +15,7 @@ from .events import EventType
 from .exceptions import AgentExecutionError, DurableError
 from .runtime import runtime
 from .schedule import Schedule
-from .tool import tool_name
+from .tool import jsonable, tool_name
 
 if TYPE_CHECKING:
     from .run import Run
@@ -101,7 +101,8 @@ class DurableFunction:
         if not in_workflow_body():
             return self._call(inputs)
         with workflow_state(self.name):
-            emit(EventType.RUN_STARTED, agent=self.name)
+            input_data = jsonable(inputs)
+            emit(EventType.RUN_STARTED, agent=self.name, input=input_data)
             try:
                 result = self._call(inputs)
             except Exception as exc:
@@ -110,12 +111,18 @@ class DurableFunction:
                 emit(
                     EventType.RUN_FAILED,
                     agent=self.name,
+                    input=input_data,
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 raise AgentExecutionError(
                     self.name, type(exc).__name__, str(exc)
                 ) from None
-            emit(EventType.RUN_COMPLETED, agent=self.name)
+            emit(
+                EventType.RUN_COMPLETED,
+                agent=self.name,
+                input=input_data,
+                output=jsonable(result),
+            )
             return result
 
     def _call(self, inputs: dict[str, Any]) -> Any:

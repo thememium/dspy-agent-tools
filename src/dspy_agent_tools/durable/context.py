@@ -29,7 +29,48 @@ class WorkflowState:
     run_id: str
     human_seq: int = 0
     operation_seq: int = 0
+    event_seq: int = 0
     pending: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+_EVENT_FUNCTION_BASE = -1_000_000
+
+
+def _write_event(run_id: str, seq: int, payload: dict[str, Any]) -> None:
+    """Append an event to the DBOS stream without creating a step record.
+
+    ``DBOS.write_stream`` records an empty ``DBOS.writeStream`` operation for
+    every event. The event sequence is also its stream offset, so a replayed
+    workflow can detect the existing event by ``(workflow, key, offset)`` and
+    skip the duplicate. The synthetic function ID only distinguishes rows.
+    """
+    from dbos import _sys_db
+    from dbos._dbos import _get_dbos_instance
+    from dbos._serialization import WorkflowSerializationFormat
+
+    select = _sys_db.sa.select
+    dbos = _get_dbos_instance()
+    function_id = _EVENT_FUNCTION_BASE - seq
+    streams = dbos._sys_db.tables.streams
+    with dbos._sys_db.engine.connect() as conn:
+        existing = conn.execute(
+            select(streams.c.offset)
+            .where(
+                streams.c.workflow_uuid == run_id,
+                streams.c.key == EVENTS_STREAM,
+                streams.c.offset == seq,
+            )
+            .limit(1)
+        ).first()
+    if existing is not None:
+        return
+    dbos._sys_db.write_stream_from_step(
+        run_id,
+        function_id,
+        EVENTS_STREAM,
+        payload,
+        serialization_type=WorkflowSerializationFormat.DEFAULT,
+    )
 
 
 def _context() -> Any:
@@ -124,7 +165,9 @@ def emit(event_type: EventType | str, **data: Any) -> Event | None:
     if run_id is None:  # pragma: no cover - in_workflow_body implies an ID
         return None
     event = Event(str(event_type), run_id, data, time.time())
-    load_dbos().DBOS.write_stream(EVENTS_STREAM, event_payload(event))
+    current = state()
+    _write_event(run_id, current.event_seq, event_payload(event))
+    current.event_seq += 1
     return event
 
 
