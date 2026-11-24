@@ -17,6 +17,10 @@
 - **durable**: checkpoint exact tool inputs and outputs, plus predictor inputs,
   plain prediction fields, and raw LM responses. `Run.steps()` now loads
   outputs by default and the event stream carries summarized inputs/outputs.
+- **durable**: record the full agent/function workflow input and result in
+  `run.started`/`run.completed`, and write events directly to the DBOS stream
+  with deterministic IDs so `DBOS.writeStream` no longer appears as an empty
+  step.
 
 ## v0.1.18 (2026-11-22)
 
