@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### 🚀 Enhancements
+
+- **durable**: add a DBOS-backed `Durable` layer for agents, tools, and
+  functions, with checkpointed predictions and tool calls, crash recovery,
+  persisted `Human` approvals/questions, `Run` control and event streams,
+  queues, schedules, and allowlisted worker tools. Install with
+  `dspy-agent-tools[dbos]`.
+
 ## v0.1.18 (2026-11-22)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.17...v0.1.18)
