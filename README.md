@@ -158,6 +158,46 @@ agent = Durable(agent_module, name="researcher", verbose=True)
 An explicit `log_level=` passed to `Durable.configure` takes precedence over
 the quiet default.
 
+### Captured inputs and outputs
+
+Tool and predictor steps checkpoint what went in and what came out.
+`run.steps()` loads the outputs by default:
+
+```python
+for step in run.steps():
+    print(step["function_name"], step["output"])
+```
+
+A tool step's output contains the exact positional and keyword arguments plus
+the returned value:
+
+```python
+{
+    "__durable_tool_checkpoint__": True,
+    "tool": "get_weather",
+    "input": {"args": (), "kwargs": {"city": "Paris"}},
+    "output": "sunny",
+}
+```
+
+A predictor step contains its inputs, the parsed `dspy.Prediction`, and the raw
+LM responses captured while the prediction ran:
+
+```python
+{
+    "__durable_llm_checkpoint__": True,
+    "predictor": "react",
+    "input": {"args": (), "kwargs": {"question": "...", "trajectory": ""}},
+    "output": dspy.Prediction(...),
+    "llm": [["[[ ## next_thought ## ]] ..."]],
+}
+```
+
+Values that DBOS cannot serialize are replaced by a readable summary instead
+of failing the step. The persisted event stream carries the same inputs and
+outputs in summarized form (`tool.started`, `tool.completed`, `llm.started`,
+`llm.completed`), so a live UI can render progress without loading step rows.
+
 ### Two-line wrapping
 
 ```python
