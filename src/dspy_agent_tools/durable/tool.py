@@ -42,6 +42,12 @@ def summarize(value: Any, *, limit: int = 500) -> Any:
             str(key): summarize(item, limit=limit)
             for key, item in list(value.items())[:20]
         }
+    to_dict = getattr(value, "toDict", None)
+    if callable(to_dict):
+        try:
+            return summarize(to_dict(), limit=limit)
+        except Exception:  # noqa: BLE001 - fall back to the type name
+            return f"<{type(value).__name__}>"
     return f"<{type(value).__name__}>"
 
 
@@ -79,6 +85,31 @@ def _step_options(name: str, retries: int) -> Any:
     )
 
 
+_TOOL_CHECKPOINT = "__durable_tool_checkpoint__"
+
+
+def checkpoint_value(value: Any) -> Any:
+    """Return *value* when DBOS can serialize it, otherwise a safe summary."""
+    try:
+        from .serializer import _dumps
+
+        _dumps(value)
+    except Exception:  # noqa: BLE001 - capture the readable shape instead
+        return summarize(value)
+    return value
+
+
+def _tool_checkpoint(tool: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    return {
+        _TOOL_CHECKPOINT: True,
+        "tool": tool,
+        "input": {
+            "args": checkpoint_value(args),
+            "kwargs": checkpoint_value(kwargs),
+        },
+    }
+
+
 def call_tool(
     fn: Callable[..., Any],
     *args: Any,
@@ -93,30 +124,41 @@ def call_tool(
 
     step_name = name or tool_name(fn)
     operation_id = next_operation_id()
-    emit(EventType.TOOL_STARTED, tool=step_name, arguments=summarize(kwargs))
+    input_data = {"args": args, "kwargs": kwargs}
+    emit(
+        EventType.TOOL_STARTED,
+        tool=step_name,
+        input=summarize(input_data),
+        arguments=summarize(kwargs),
+    )
     try:
         if inspect.iscoroutinefunction(fn):
 
             async def body() -> Any:
                 with operation_scope(operation_id):
-                    return await fn(*args, **kwargs)
+                    output = await fn(*args, **kwargs)
+                return {**_tool_checkpoint(step_name, args, kwargs), "output": output}
 
             result = _run_async_step(step_name, body, retries)
         else:
 
             def body() -> Any:
                 with operation_scope(operation_id):
-                    return fn(*args, **kwargs)
+                    output = fn(*args, **kwargs)
+                return {**_tool_checkpoint(step_name, args, kwargs), "output": output}
 
             result = _run_sync_step(step_name, body, retries)
     except BaseException as exc:
         emit(
             EventType.TOOL_FAILED,
             tool=step_name,
+            input=summarize(input_data),
             error=f"{type(exc).__name__}: {exc}",
         )
         raise
-    emit(EventType.TOOL_COMPLETED, tool=step_name)
+    if isinstance(result, dict) and result.get(_TOOL_CHECKPOINT) is True:
+        result = result["output"]
+    emit(EventType.TOOL_COMPLETED, tool=step_name, output=summarize(result))
     return result
 
 
