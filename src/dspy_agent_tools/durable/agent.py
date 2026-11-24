@@ -32,6 +32,7 @@ from .schedule import Schedule
 from .tool import (
     checkpoint_value,
     is_durable_tool,
+    jsonable,
     summarize,
     tool_name,
     wrap_tool,
@@ -293,17 +294,28 @@ class DurableAgent:
                     else:
                         with dspy.context(lm=capture):
                             output = function(*args, **kwargs)
+                if isinstance(output, dspy.Prediction):
+                    # A Prediction is a custom class; DBOS's viewer cannot
+                    # decode it as plain data. Checkpoint its fields instead
+                    # and rebuild the Prediction on read.
+                    rendered = jsonable(output.toDict())
+                    output_type = "prediction"
+                    usage = jsonable(output.get_lm_usage())
+                else:
+                    rendered = checkpoint_value(output)
+                    output_type = "value"
+                    usage = None
                 return {
                     _LLM_CHECKPOINT: True,
                     "predictor": path,
                     "input": {
-                        "args": checkpoint_value(args),
-                        "kwargs": checkpoint_value(kwargs),
+                        "args": jsonable(args),
+                        "kwargs": jsonable(kwargs),
                     },
-                    "output": output,
-                    "llm": checkpoint_value(
-                        capture.responses if capture is not None else []
-                    ),
+                    "output": rendered,
+                    "output_type": output_type,
+                    "usage": usage,
+                    "llm": jsonable(capture.responses if capture is not None else []),
                 }
 
             result = DBOS.run_step(
@@ -319,7 +331,18 @@ class DurableAgent:
             )
             raise
         if isinstance(result, dict) and result.get(_LLM_CHECKPOINT) is True:
-            output = result["output"]
+            value = result["output"]
+            if result.get("output_type") == "prediction":
+                import dspy
+
+                output = dspy.Prediction(**value)
+                usage = result.get("usage")
+                if usage is not None:
+                    output.set_lm_usage(usage)
+            else:
+                # Older envelopes stored the object itself; unknown values
+                # are returned as-is.
+                output = value
             raw = result.get("llm", [])
         else:
             # Existing workflows can replay pre-envelope step results.

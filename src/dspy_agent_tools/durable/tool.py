@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import inspect
 import threading
@@ -99,13 +100,45 @@ def checkpoint_value(value: Any) -> Any:
     return value
 
 
+def jsonable(value: Any) -> Any:
+    """Render *value* as plain data the DBOS viewer can decode.
+
+    Inputs and raw model responses are diagnostic payloads: replay never reads
+    them, so converting DSPy objects (History, Tool, Prediction) to plain
+    fields is safe and keeps the step output inspectable instead of pickled.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, bytes):
+        return f"<bytes:{len(value)}>"
+    if isinstance(value, (list, tuple, set)):
+        return [jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): jsonable(item) for key, item in value.items()}
+    for attribute in ("toDict", "model_dump", "dict"):
+        method = getattr(value, attribute, None)
+        if callable(method):
+            try:
+                converted = method()
+            except Exception:  # noqa: BLE001 - try the next representation
+                converted = None
+            if converted is not None and converted is not value:
+                return jsonable(converted)
+    if dataclasses.is_dataclass(value):
+        return jsonable(dataclasses.asdict(value))
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name:
+        return f"<{type(value).__name__}:{name}>"
+    return f"<{type(value).__name__}>"
+
+
 def _tool_checkpoint(tool: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     return {
         _TOOL_CHECKPOINT: True,
         "tool": tool,
         "input": {
-            "args": checkpoint_value(args),
-            "kwargs": checkpoint_value(kwargs),
+            "args": jsonable(args),
+            "kwargs": jsonable(kwargs),
         },
     }
 
