@@ -24,6 +24,9 @@
 - **durable**: publish `agent.input`/`agent.output`/`agent.error` workflow
   events (and `function.*` equivalents) without step rows, so DBOS Argus shows
   workflow arguments and results in its Events panel.
+- **durable**: add `@Durable.workflow` and `@Durable.step` as the DBOS-style
+  decorator spelling of `Durable(fn)` and `Durable.tool(fn)`, for wrapping
+  plain scripts and their side effects.
 
 ## v0.1.18 (2026-11-22)
 
