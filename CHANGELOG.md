@@ -9,6 +9,11 @@
   persisted `Human` approvals/questions, `Run` control and event streams,
   queues, schedules, and allowlisted worker tools. Install with
   `dspy-agent-tools[dbos]`.
+- **durable**: type the public API (`Durable(...)` overloads,
+  `DurableAgent`/`DurableFunction`/`Run` returns, `WorkerHandle`) and add code
+  examples to the class docstrings.
+- **durable**: quiet logging by default. `Durable.configure(verbose=True)` or
+  `Durable(..., verbose=True)` restores DBOS INFO output and DSPy warnings.
 
 ## v0.1.18 (2026-11-22)
 
