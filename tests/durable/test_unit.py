@@ -886,3 +886,93 @@ def test_llm_checkpoint_fallback_and_legacy(monkeypatch):
         cast(Any, fake_self), lambda: "unused", "predictor", "step", (), {}
     )
     assert result == "legacy"
+
+
+def test_llm_checkpoint_restores_prediction_usage(monkeypatch):
+    monkeypatch.setattr(agent_module, "in_workflow_body", lambda: True)
+    monkeypatch.setattr(agent_module, "next_operation_id", lambda: "op")
+    monkeypatch.setattr(
+        "dbos.DBOS.run_step",
+        staticmethod(
+            lambda options, body: {
+                agent_module._LLM_CHECKPOINT: True,
+                "output": {"answer": "ok"},
+                "output_type": "prediction",
+                "usage": {"tokens": 3},
+                "llm": [],
+            }
+        ),
+    )
+    output = agent_module.DurableAgent._llm_call(
+        cast(Any, SimpleNamespace(retries=0)),
+        lambda: "unused",
+        "predictor",
+        "step",
+        (),
+        {},
+    )
+    assert output.answer == "ok"
+    assert output.get_lm_usage() == {"tokens": 3}
+
+
+def test_jsonable_renders_diagnostic_data():
+    import json
+    from dataclasses import dataclass
+
+    @dataclass
+    class Point:
+        x: int
+
+    class ToDict:
+        def toDict(self) -> Any:
+            return {"ok": True}
+
+    class SelfDict:
+        def toDict(self) -> Any:
+            return self
+
+    class Named:
+        name = "tool"
+
+    class Broken:
+        def toDict(self) -> Any:
+            raise RuntimeError("no")
+
+    class ModelDump:
+        def model_dump(self) -> Any:
+            return {"model": True}
+
+    class OldDict:
+        def dict(self) -> Any:
+            return {"old": True}
+
+    rendered = tool_module.jsonable(
+        {
+            "none": None,
+            "flag": True,
+            "number": 1,
+            "float": 1.5,
+            "string": "x",
+            "bytes": b"abc",
+            "sequence": (1, 2),
+            "set": {1},
+            "point": Point(1),
+            "todict": ToDict(),
+            "selfdict": SelfDict(),
+            "named": Named(),
+            "broken": Broken(),
+            "model": ModelDump(),
+            "old": OldDict(),
+            "plain": object(),
+        }
+    )
+    json.dumps(rendered)
+    assert rendered["bytes"] == "<bytes:3>"
+    assert rendered["point"] == {"x": 1}
+    assert rendered["todict"] == {"ok": True}
+    assert rendered["model"] == {"model": True}
+    assert rendered["old"] == {"old": True}
+    assert rendered["named"] == "<Named:tool>"
+    assert rendered["selfdict"] == "<SelfDict>"
+    assert rendered["broken"] == "<Broken>"
+    assert rendered["plain"] == "<object>"

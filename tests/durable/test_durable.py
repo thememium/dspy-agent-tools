@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from typing import Any
 
 import dspy
@@ -164,7 +165,7 @@ def test_react_agent_checkpoints_llm_and_tool_calls():
     steps = run.steps()
     tool_step = next(step for step in steps if step["function_name"] == "get_weather")
     assert tool_step["output"]["input"] == {
-        "args": (),
+        "args": [],
         "kwargs": {"city": "Paris"},
     }
     assert tool_step["output"]["output"] == "sunny"
@@ -175,9 +176,12 @@ def test_react_agent_checkpoints_llm_and_tool_calls():
     assert len(llm_steps) == 3
     first_llm = llm_steps[0]["output"]
     assert first_llm["predictor"] == "react"
+    assert first_llm["output_type"] == "prediction"
     assert first_llm["input"]["kwargs"]["question"] == "What is the weather?"
-    assert first_llm["output"].next_tool_name == "get_weather"
+    assert first_llm["output"]["next_tool_name"] == "get_weather"
     assert first_llm["llm"]
+    # The DBOS viewer renders this envelope as plain data, not a Python pickle.
+    json.dumps(first_llm)
 
 
 def test_agent_call_is_synchronous():
