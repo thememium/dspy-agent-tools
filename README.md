@@ -204,6 +204,11 @@ DBOS stream with deterministic event IDs, so the DBOS step list contains only
 actual agent work (predictor and tool steps) and no empty `DBOS.writeStream`
 bookkeeping rows.
 
+DBOS Argus does not render top-level workflow arguments on its own. The durable
+layer also publishes `agent.input`, `agent.output`, and `agent.error` as
+workflow events (and `function.*` for `DurableFunction`). They show up in
+Argus's Events panel as decoded JSON, without adding a step to the timeline.
+
 Values that DBOS cannot serialize are replaced by a readable summary instead
 of failing the step. The persisted event stream carries the same inputs and
 outputs in summarized form (`tool.started`, `tool.completed`, `llm.started`,
