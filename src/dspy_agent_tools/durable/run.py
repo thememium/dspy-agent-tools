@@ -95,9 +95,17 @@ class Run:
         self._client().resume_workflow(self.id)
         return self
 
-    def steps(self) -> list[dict[str, Any]]:
-        """Return the recorded workflow steps."""
-        return list(self._client().list_workflow_steps(self.id, load_output=False))
+    def steps(self, *, load_output: bool = True) -> list[dict[str, Any]]:
+        """Return the recorded workflow steps.
+
+        Each step's ``output`` is its checkpoint. Tool steps contain
+        ``input`` (positional args and keyword args) and ``output``; predictor
+        steps contain the predictor ``input``, the parsed ``output``, and the
+        raw ``llm`` responses.
+        """
+        return list(
+            self._client().list_workflow_steps(self.id, load_output=load_output)
+        )
 
     def pending(self) -> list[ApprovalRequest | QuestionRequest]:
         """Return this run's outstanding human requests."""
