@@ -198,6 +198,12 @@ LM responses captured while the prediction ran:
 A `dspy.Prediction` is stored as plain fields for the DBOS viewer and rebuilt
 on read, so step output stays readable instead of a pickled custom class.
 
+The run itself is tracked as well: `run.started` carries the workflow input and
+`run.completed` carries the final result. Events are written directly to the
+DBOS stream with deterministic event IDs, so the DBOS step list contains only
+actual agent work (predictor and tool steps) and no empty `DBOS.writeStream`
+bookkeeping rows.
+
 Values that DBOS cannot serialize are replaced by a readable summary instead
 of failing the step. The persisted event stream carries the same inputs and
 outputs in summarized form (`tool.started`, `tool.completed`, `llm.started`,
