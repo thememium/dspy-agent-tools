@@ -145,6 +145,19 @@ Durable.configure(
 )
 ```
 
+Logging is quiet by default: DBOS INFO output and DSPy's direct-`forward`
+warning are hidden. Pass `verbose=True` to see them:
+
+```python
+Durable.configure(name="my-agents", verbose=True)
+
+# or per agent
+agent = Durable(agent_module, name="researcher", verbose=True)
+```
+
+An explicit `log_level=` passed to `Durable.configure` takes precedence over
+the quiet default.
+
 ### Two-line wrapping
 
 ```python
@@ -180,6 +193,11 @@ for event in Run.get(run.id).events():
 
 Workflow arguments and results are serialized with cloudpickle, so
 `dspy.Prediction` round-trips with its attributes intact.
+
+The public surface is typed for type checkers: `Durable(module)` returns
+`DurableAgent`, `Durable(fn)` returns `DurableFunction`, `Durable.tool(fn)`
+preserves the callable's signature, `Human(fn)` preserves its name/signature,
+and `Worker(...)` returns a `WorkerHandle` with `start`/`enqueue`/`result`.
 
 ### Human approvals and questions
 
