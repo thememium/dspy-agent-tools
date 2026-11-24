@@ -16,6 +16,7 @@ from dspy_agent_tools import (
     Durable,
     EventType,
     Human,
+    Patch,
     QuestionRequest,
     Run,
     Worker,
@@ -130,6 +131,22 @@ def test_rlm_tools_are_instrumented_in_place():
     assert wrapped is not original
     assert wrapped.func.__durable_tool__ is True
     assert module.tools["lookup"] is wrapped
+
+
+def test_patch_accepts_durable_rlm_and_reinstruments():
+    def lookup(query: str) -> str:
+        """Look up a query."""
+        return query
+
+    agent = Durable(
+        dspy.RLM("question -> answer", tools=[]),
+        name=unique_name("patched-rlm"),
+    )
+    returned = Patch(agent, tools=lookup)
+    assert returned is agent
+    assert "lookup" in agent.module.tools
+    assert agent.module.tools["lookup"].func.__durable_tool__ is True
+    assert getattr(agent.module.generate_action, "__durable_predictor__", False)
 
 
 def test_react_agent_checkpoints_llm_and_tool_calls():

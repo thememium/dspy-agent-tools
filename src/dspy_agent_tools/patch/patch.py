@@ -205,7 +205,9 @@ def Patch(
 
     Adding accumulates and dropping is explicit: two call sites that patch the
     same agent both keep their tools, and ``drop`` revokes a capability without
-    having to reconstruct the agent.
+    having to reconstruct the agent. A :class:`~dspy_agent_tools.Durable`
+    wrapper is accepted too; its inner module is patched and durable
+    instrumentation is reapplied.
 
     Args:
         agent: The agent to extend.
@@ -257,6 +259,15 @@ def Patch(
         >>> agent = dspy.RLM("task -> report")
         >>> Patch(agent, guide="Never edit files under vendor/.")
     """
+    if not hasattr(agent, "signature"):
+        module = getattr(agent, "module", None)
+        if module is not None and callable(getattr(agent, "_instrument", None)):
+            wrapper = agent
+            agent = module
+        else:
+            wrapper = None
+    else:
+        wrapper = None
     if not hasattr(agent, "signature"):
         raise TypeError(
             f"Patch() needs a dspy module with a signature, got {type(agent).__name__}"
@@ -313,7 +324,7 @@ def Patch(
     if [tool.name for tool in kept] == list(existing) and (
         instructions == agent.signature.instructions
     ):
-        return agent
+        return wrapper or agent
 
     demos = _demos(agent)
     if demos:
@@ -331,6 +342,9 @@ def Patch(
         kept,
     )
     _copy_module_state(agent, rebuilt)
+    if wrapper is not None:
+        wrapper._instrument()
+        return wrapper
     return agent
 
 
