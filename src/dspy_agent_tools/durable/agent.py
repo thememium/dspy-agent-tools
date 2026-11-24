@@ -7,7 +7,7 @@ import functools
 import logging
 from collections.abc import Callable, Iterable
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, overload
 
 from ._dbos import load_dbos
 from .context import (
@@ -30,7 +30,15 @@ from .runtime import runtime
 from .schedule import Schedule
 from .tool import is_durable_tool, tool_name, wrap_tool
 
+if TYPE_CHECKING:
+    from dspy import Module, Tool
+
+    from .function import DurableFunction
+    from .run import Run
+
 logger = logging.getLogger(__name__)
+
+_F = TypeVar("_F", bound=Callable[..., Any])
 
 _AGENTS: dict[str, DurableAgent] = {}
 _AUTO_COUNTS: dict[str, int] = {}
@@ -67,11 +75,22 @@ def _step_options(name: str, retries: int) -> Any:
 
 
 class DurableAgent:
-    """A DSPy module whose predictions and tool calls are checkpointed."""
+    """A DSPy module whose predictions and tool calls are checkpointed.
+
+    Example:
+        >>> import dspy
+        >>> from dspy_agent_tools import Durable
+        >>> agent = Durable(
+        ...     dspy.ReAct("question -> answer", tools=[]),
+        ...     name="researcher",
+        ... )
+        >>> result = agent(question="What is new in DBOS?")
+        >>> result.answer
+    """
 
     def __init__(
         self,
-        module: Any,
+        module: Module,
         *,
         name: str | None = None,
         queue: str | None = None,
@@ -206,7 +225,7 @@ class DurableAgent:
                     )
             return tools
 
-        self.module._prepare_execution_tools = prepare_durable
+        vars(self.module)["_prepare_execution_tools"] = prepare_durable
         vars(self.module)["__durable_rlm__"] = True
 
     def _wrap_llm_helper(
@@ -301,7 +320,7 @@ class DurableAgent:
         run = self.start(**inputs)
         return await asyncio.to_thread(run.result)
 
-    def start(self, **inputs: Any) -> Any:
+    def start(self, **inputs: Any) -> Run:
         """Start the agent in the background and return its :class:`Run`."""
         runtime().ensure_launched()
         handle = load_dbos().DBOS.start_workflow(self._run_workflow, **inputs)
@@ -309,7 +328,7 @@ class DurableAgent:
 
         return Run(handle.get_workflow_id(), agent=self.name)
 
-    def enqueue(self, *, queue: str | None = None, **inputs: Any) -> Any:
+    def enqueue(self, *, queue: str | None = None, **inputs: Any) -> Run:
         """Enqueue the agent on a persistent DBOS queue."""
         queue_name = queue or self.queue
         if not queue_name:
@@ -360,7 +379,80 @@ class Durable:
     :class:`DurableAgent`; a plain callable becomes
     :class:`DurableFunction`. The class also holds the process-wide runtime
     configuration and the small wrapping helpers.
+
+    Example:
+        >>> import dspy
+        >>> from dspy_agent_tools import Durable, Human, bash_exec, web_search
+        >>> Durable.configure(name="my-agents")
+        >>> agent = Durable(
+        ...     dspy.ReAct(
+        ...         "question -> answer",
+        ...         tools=[web_search, Human(bash_exec)],
+        ...     ),
+        ...     name="researcher",
+        ... )
+        >>> result = agent(question="What is new in DBOS?")
+        >>> run = agent.start(question="What is new in DBOS?")
+        >>> run.status()
+        'SUCCESS'
     """
+
+    if TYPE_CHECKING:  # pragma: no cover - type-only overloads
+
+        @overload
+        def __new__(
+            cls,
+            target: Module,
+            *,
+            name: str | None = ...,
+            queue: str | None = ...,
+            retries: int = ...,
+            approvals: Iterable[Any] | None = ...,
+            lm: Any = ...,
+        ) -> DurableAgent: ...
+
+        @overload
+        def __new__(
+            cls,
+            target: Callable[..., Any],
+            *,
+            name: str | None = ...,
+            queue: str | None = ...,
+            retries: int = ...,
+            concurrency: int | None = ...,
+            worker: bool = ...,
+        ) -> DurableFunction: ...
+
+        @overload
+        def __new__(cls, target: None = None, **kwargs: Any) -> NoReturn: ...
+
+        @classmethod
+        @overload
+        def tool(cls, fn: None = None, **options: Any) -> Callable[[_F], _F]: ...
+
+        @classmethod
+        @overload
+        def tool(
+            cls, fn: _F, *, approval: None = None, when: None = None, **options: Any
+        ) -> _F: ...
+
+        @classmethod
+        @overload
+        def tool(cls, fn: Tool, **options: Any) -> Tool: ...
+
+        @classmethod
+        @overload
+        def tool(cls, fn: _F, **options: Any) -> Callable[..., Any]: ...
+
+        @classmethod
+        @overload
+        def worker(
+            cls, fn: None = None, **options: Any
+        ) -> Callable[[_F], DurableFunction]: ...
+
+        @classmethod
+        @overload
+        def worker(cls, fn: _F, **options: Any) -> DurableFunction: ...
 
     def __new__(
         cls,
@@ -381,7 +473,7 @@ class Durable:
         )
 
     @classmethod
-    def agent(cls, agent: Any, **kwargs: Any) -> DurableAgent:
+    def agent(cls, agent: Module, **kwargs: Any) -> DurableAgent:
         """Explicit alias for ``Durable(agent)``."""
         return DurableAgent(agent, **kwargs)
 
@@ -419,14 +511,30 @@ class Durable:
 
     @classmethod
     def tool(cls, fn: Any = None, **options: Any) -> Any:
-        """Checkpoint a single tool, usable directly or as a decorator."""
+        """Checkpoint a single tool, usable directly or as a decorator.
+
+        Example:
+            >>> from dspy_agent_tools import Durable, bash_exec
+            >>> shell = Durable.tool(bash_exec, retries=2)
+            >>> @Durable.tool
+            ... def lookup(customer_id: str) -> dict:
+            ...     return {"id": customer_id}
+        """
         if fn is None:
             return lambda target: wrap_tool(target, **options)
         return wrap_tool(fn, **options)
 
     @classmethod
     def worker(cls, fn: Any = None, **options: Any) -> Any:
-        """Turn a Python function into a queued durable worker."""
+        """Turn a Python function into a queued durable worker.
+
+        Example:
+            >>> from dspy_agent_tools import Durable
+            >>> @Durable.worker(queue="indexing", concurrency=5)
+            ... def index(repo: str) -> dict:
+            ...     return {"repo": repo}
+            >>> run = index.enqueue(repo="thememium/dspy-agent-tools")
+        """
         from .function import DurableFunction
 
         if fn is None:
@@ -439,7 +547,9 @@ class Durable:
         return [wrap_tool(tool, **options) for tool in tools]
 
     @classmethod
-    def schedule(cls, target: Any, **options: Any) -> Schedule:
+    def schedule(
+        cls, target: DurableAgent | DurableFunction, **options: Any
+    ) -> Schedule:
         """Create a schedule from any durable agent or worker."""
         return target.schedule(**options)
 
@@ -461,7 +571,7 @@ class Durable:
         runtime().register_queue(name, concurrency=concurrency, **options)
 
     @classmethod
-    def get_run(cls, run_id: str) -> Any:
+    def get_run(cls, run_id: str) -> Run:
         """Reconnect to a run by workflow ID."""
         from .run import Run
 
@@ -481,7 +591,7 @@ class Durable:
         return operation_id
 
     @classmethod
-    def worker_tools(cls, allowed: Iterable[Any], **options: Any) -> list[Any]:
+    def worker_tools(cls, allowed: Iterable[Any], **options: Any) -> list[Tool]:
         """Expose registered workers to an LLM through orchestration tools."""
         from .worker import worker_tools
 

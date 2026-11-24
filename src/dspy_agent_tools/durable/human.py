@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, overload
 
 from .context import (
     PENDING_EVENT,
@@ -26,7 +26,12 @@ from .exceptions import HumanInputRequired, HumanTimeout, NotInWorkflow
 from .runtime import runtime
 from .tool import call_tool, summarize, tool_name
 
+if TYPE_CHECKING:
+    from dspy import Tool
+
 logger = logging.getLogger(__name__)
+
+_F = TypeVar("_F", bound=Callable[..., Any])
 _INTERACTIVE: ContextVar[bool | None] = ContextVar("durable_interactive", default=None)
 _DEFAULT_TIMEOUT = 86_400.0
 
@@ -241,10 +246,49 @@ class Human:
     """Wrap a tool so each call waits for a human decision.
 
     ``Human(tool)`` preserves the tool's name, signature, and docstring. Use it
-    anywhere a tool is accepted::
+    anywhere a tool is accepted.
 
-        tools = [read_file, Human(bash_exec), Human.ask]
+    Example:
+        >>> from dspy_agent_tools import Human, bash_exec, read_file
+        >>> tools = [read_file, Human(bash_exec), Human.ask]
+        >>> approved = Human.approve("Deploy to production?")
+        >>> branch = Human.ask("Which branch?", choices=["main", "develop"])
     """
+
+    if TYPE_CHECKING:  # pragma: no cover - type-only overloads
+
+        @overload
+        def __new__(
+            cls,
+            tool: Tool,
+            *,
+            when: Callable[..., bool] | None = ...,
+            message: str | None = ...,
+            timeout: float = ...,
+            _already_durable: bool = ...,
+        ) -> Tool: ...
+
+        @overload
+        def __new__(
+            cls,
+            tool: _F,
+            *,
+            when: Callable[..., bool] | None = ...,
+            message: str | None = ...,
+            timeout: float = ...,
+            _already_durable: bool = ...,
+        ) -> Callable[..., Any]: ...
+
+        @overload
+        def __new__(
+            cls,
+            tool: None,
+            *,
+            when: Callable[..., bool] | None = ...,
+            message: str | None = ...,
+            timeout: float = ...,
+            _already_durable: bool = ...,
+        ) -> NoReturn: ...
 
     def __new__(
         cls,

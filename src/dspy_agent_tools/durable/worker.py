@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import inspect
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Protocol, cast
 
 from .agent import DurableAgent
 from .exceptions import DurableError
@@ -14,7 +14,26 @@ from .run import Run
 from .schedule import Schedule
 
 
-def _target_signature(target: Any) -> inspect.Signature:
+class WorkerHandle(Protocol):
+    """A callable worker plus the control surface it exposes."""
+
+    name: str
+    target: DurableAgent | DurableFunction
+
+    def __call__(self, **inputs: Any) -> Any: ...
+
+    def start(self, **inputs: Any) -> Run: ...
+
+    def enqueue(self, *, queue: str | None = ..., **inputs: Any) -> Run: ...
+
+    def schedule(self, **options: Any) -> Schedule: ...
+
+    def result(self, run_id: str) -> Any: ...
+
+
+def _target_signature(
+    target: DurableAgent | DurableFunction,
+) -> inspect.Signature:
     if isinstance(target, DurableFunction):
         return inspect.signature(target.function)
     if isinstance(target, DurableAgent):
@@ -28,11 +47,17 @@ def _target_signature(target: Any) -> inspect.Signature:
     return inspect.signature(target)  # pragma: no cover - Worker wraps callables
 
 
-def Worker(target: Any, *, name: str | None = None) -> Any:
+def Worker(target: Any, *, name: str | None = None) -> WorkerHandle:
     """Return a callable that runs *target* durably.
 
     The returned function also exposes ``start``, ``enqueue``, ``schedule``,
     and ``result``, so it can be used either as a normal tool or as a handle.
+
+    Example:
+        >>> from dspy_agent_tools import Worker
+        >>> research = Worker(researcher_agent)
+        >>> run = research.start(question="What is new in DBOS?")
+        >>> research.result(run.id)
     """
     if getattr(target, "__durable_worker__", False):
         return target
@@ -53,16 +78,16 @@ def Worker(target: Any, *, name: str | None = None) -> Any:
 
     run.__name__ = worker_name.replace(".", "_")
     run.__qualname__ = run.__name__
-    vars(run)["__signature__"] = _target_signature(durable)  # type: ignore[attr-defined]
+    vars(run)["__signature__"] = _target_signature(durable)
     run.__doc__ = f"Run the {worker_name} worker durably and return its result."
-    vars(run)["target"] = durable  # type: ignore[attr-defined]
-    vars(run)["name"] = worker_name  # type: ignore[attr-defined]
-    vars(run)["start"] = durable.start  # type: ignore[attr-defined]
-    vars(run)["enqueue"] = durable.enqueue  # type: ignore[attr-defined]
-    vars(run)["schedule"] = durable.schedule  # type: ignore[attr-defined]
+    vars(run)["target"] = durable
+    vars(run)["name"] = worker_name
+    vars(run)["start"] = durable.start
+    vars(run)["enqueue"] = durable.enqueue
+    vars(run)["schedule"] = durable.schedule
     vars(run)["result"] = lambda run_id: Run.get(run_id).result()
-    vars(run)["__durable_worker__"] = True  # type: ignore[attr-defined]
-    return run
+    vars(run)["__durable_worker__"] = True
+    return cast(WorkerHandle, run)
 
 
 def _dspy_tool(function: Any) -> Any:

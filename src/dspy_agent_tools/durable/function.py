@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._dbos import load_dbos
 from .context import emit, in_workflow_body, workflow_state
@@ -16,21 +17,37 @@ from .runtime import runtime
 from .schedule import Schedule
 from .tool import tool_name
 
+if TYPE_CHECKING:
+    from .run import Run
+
 _FUNCTIONS: dict[str, DurableFunction] = {}
 
 
-def _function_name(function: Any, name: str | None) -> str:
+def _function_name(function: Callable[..., Any], name: str | None) -> str:
     if name:
         return name
     return f"{getattr(function, '__module__', 'function')}.{getattr(function, '__qualname__', tool_name(function))}"
 
 
 class DurableFunction:
-    """A plain callable executed as a DBOS workflow with one durable step."""
+    """A plain callable executed as a DBOS workflow.
+
+    The function body runs at the workflow level, so it can call ``Human``,
+    start child agents, or schedule work. Wrap individual side effects with
+    :meth:`Durable.tool` when each one needs its own checkpoint.
+
+    Example:
+        >>> from dspy_agent_tools import Durable
+        >>> @Durable.worker(queue="indexing", concurrency=5)
+        ... def index_repository(repo: str) -> dict:
+        ...     return {"repo": repo}
+        >>> run = index_repository.enqueue(repo="thememium/dspy-agent-tools")
+        >>> run.result()
+    """
 
     def __init__(
         self,
-        function: Any,
+        function: Callable[..., Any],
         *,
         name: str | None = None,
         queue: str | None = None,
@@ -43,7 +60,7 @@ class DurableFunction:
                 f"Durable() expected a callable, got {type(function).__name__}"
             )
         load_dbos()
-        self.function = function
+        self.function: Callable[..., Any] = function
         self.name = _function_name(function, name)
         self.queue = queue or (self.name if worker else None)
         self.retries = max(0, int(retries))
@@ -112,14 +129,14 @@ class DurableFunction:
         run = self.start(**inputs)
         return await asyncio.to_thread(run.result)
 
-    def start(self, **inputs: Any) -> Any:
+    def start(self, **inputs: Any) -> Run:
         runtime().ensure_launched()
         handle = load_dbos().DBOS.start_workflow(self._run_workflow, **inputs)
         from .run import Run
 
         return Run(handle.get_workflow_id(), agent=self.name)
 
-    def enqueue(self, *, queue: str | None = None, **inputs: Any) -> Any:
+    def enqueue(self, *, queue: str | None = None, **inputs: Any) -> Run:
         queue_name = queue or self.queue
         if not queue_name:
             raise DurableError(
@@ -143,14 +160,17 @@ class DurableFunction:
         name: str | None = None,
         timezone: str | None = None,
         queue: str | None = None,
+        **schedule_inputs: Any,
     ) -> Schedule:
+        """Register a recurring durable execution."""
         runtime().ensure_launched()
         schedule_name = name or f"{self.name}:schedule"
+        context = {**(inputs or {}), **schedule_inputs}
         load_dbos().DBOS.create_schedule(
             schedule_name=schedule_name,
             workflow_fn=self._scheduled_workflow,
             schedule=cron,
-            context=dict(inputs or {}),
+            context=context,
             cron_timezone=timezone,
             queue_name=queue or self.queue,
         )

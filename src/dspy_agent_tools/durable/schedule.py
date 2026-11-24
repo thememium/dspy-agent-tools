@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .exceptions import DurableError
 from .runtime import runtime
 
+if TYPE_CHECKING:
+    from .run import Run
+
 
 class Schedule:
-    """A recurring durable execution registered with DBOS."""
+    """A recurring durable execution registered with DBOS.
+
+    Example:
+        >>> from dspy_agent_tools import Durable
+        >>> agent = Durable(dspy.ReAct("question -> answer", tools=[]), name="research")
+        >>> schedule = agent.schedule(cron="0 8 * * *", question="What is new?")
+        >>> schedule.pause()
+        >>> schedule.trigger().result()
+        >>> schedule.delete()
+    """
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -42,7 +54,7 @@ class Schedule:
         self._client().resume_schedule(self.name)
         return self
 
-    def trigger(self) -> Any:
+    def trigger(self) -> Run:
         """Run the schedule once now and return its :class:`Run`."""
         handle = self._client().trigger_schedule(self.name)
         from .run import Run

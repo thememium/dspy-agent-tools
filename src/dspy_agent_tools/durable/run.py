@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Generator, Iterator
+from collections.abc import AsyncGenerator, Generator, Iterator
 from typing import Any
 
 from .context import EVENTS_STREAM, PENDING_EVENT
@@ -19,7 +19,18 @@ ACTIVE_STATUSES = frozenset(
 
 
 class Run:
-    """A durable execution that can be inspected and controlled by ID."""
+    """A durable execution that can be inspected and controlled by ID.
+
+    Example:
+        >>> from dspy_agent_tools import Run
+        >>> run = Run.get(workflow_id)
+        >>> run.status()
+        'PENDING'
+        >>> for event in run.events():
+        ...     if isinstance(event, ApprovalRequest):
+        ...         event.approve()
+        >>> run.result().answer
+    """
 
     def __init__(self, run_id: str, *, agent: str | None = None) -> None:
         self.id = run_id
@@ -158,7 +169,7 @@ class Run:
                     yield event_from_payload(payload)
                 return
 
-    def aevents(self, *, offset: int = 0) -> Any:
+    def aevents(self, *, offset: int = 0) -> AsyncGenerator[Event]:
         """Async iterator over :meth:`events`."""
 
         def step(iterator: Iterator[Event]) -> tuple[bool, Event | None]:
