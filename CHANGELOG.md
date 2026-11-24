@@ -21,6 +21,9 @@
   `run.started`/`run.completed`, and write events directly to the DBOS stream
   with deterministic IDs so `DBOS.writeStream` no longer appears as an empty
   step.
+- **durable**: publish `agent.input`/`agent.output`/`agent.error` workflow
+  events (and `function.*` equivalents) without step rows, so DBOS Argus shows
+  workflow arguments and results in its Events panel.
 
 ## v0.1.18 (2026-11-22)
 
