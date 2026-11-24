@@ -241,8 +241,8 @@ class DurableAgent:
             return
 
         @functools.wraps(prepare)
-        def prepare_durable(budget: Any = None) -> dict[str, Any]:
-            tools = prepare(budget)
+        def prepare_durable(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            tools = prepare(*args, **kwargs)
             for helper in ("llm_query", "llm_query_batched"):
                 function = tools.get(helper)
                 if function is not None and not is_durable_tool(function):

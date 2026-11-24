@@ -133,6 +133,24 @@ def test_rlm_tools_are_instrumented_in_place():
     assert module.tools["lookup"] is wrapped
 
 
+def test_rlm_prepare_forwards_newer_signature():
+    calls: list[bool] = []
+
+    def prepare(budget: Any = None, typed: bool = True) -> dict[str, Any]:
+        calls.append(typed)
+        return {
+            "llm_query": lambda prompt: prompt,
+            "llm_query_batched": lambda prompts: prompts,
+        }
+
+    module = dspy.RLM("question -> answer", tools=[])
+    vars(module)["_prepare_execution_tools"] = prepare
+    Durable(module, name=unique_name("rlm-prepare"))
+    tools = module._prepare_execution_tools(None, False)
+    assert calls == [False]
+    assert tools["llm_query"].__durable_tool__ is True
+
+
 def test_patch_accepts_durable_rlm_and_reinstruments():
     def lookup(query: str) -> str:
         """Look up a query."""
