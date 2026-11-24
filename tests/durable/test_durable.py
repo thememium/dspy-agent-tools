@@ -143,6 +143,42 @@ def test_react_agent_checkpoints_llm_and_tool_calls():
         event.data["tool"] for event in events if event.type == EventType.TOOL_STARTED
     ] == ["get_weather"]
 
+    tool_started = next(
+        event for event in events if event.type == EventType.TOOL_STARTED
+    )
+    assert tool_started.data["input"] == {
+        "args": [],
+        "kwargs": {"city": "Paris"},
+    }
+    tool_completed = next(
+        event for event in events if event.type == EventType.TOOL_COMPLETED
+    )
+    assert tool_completed.data["output"] == "sunny"
+
+    llm_completed = next(
+        event for event in events if event.type == EventType.LLM_COMPLETED
+    )
+    assert llm_completed.data["output"]["next_tool_name"] == "get_weather"
+    assert llm_completed.data["llm"]
+
+    steps = run.steps()
+    tool_step = next(step for step in steps if step["function_name"] == "get_weather")
+    assert tool_step["output"]["input"] == {
+        "args": (),
+        "kwargs": {"city": "Paris"},
+    }
+    assert tool_step["output"]["output"] == "sunny"
+
+    llm_steps = [
+        step for step in steps if step["function_name"].startswith(f"{agent.name}:llm:")
+    ]
+    assert len(llm_steps) == 3
+    first_llm = llm_steps[0]["output"]
+    assert first_llm["predictor"] == "react"
+    assert first_llm["input"]["kwargs"]["question"] == "What is the weather?"
+    assert first_llm["output"].next_tool_name == "get_weather"
+    assert first_llm["llm"]
+
 
 def test_agent_call_is_synchronous():
     lm = KeyedLM(DIRECT_ANSWERS)

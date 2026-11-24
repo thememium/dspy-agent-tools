@@ -6,13 +6,15 @@ import asyncio
 import inspect
 import logging
 import pickle
+import threading
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import dspy
 import pytest
 from dspy.utils.dummies import DummyLM
 
+import dspy_agent_tools.durable.agent as agent_module
 import dspy_agent_tools.durable.human as human_module
 import dspy_agent_tools.durable.runtime as runtime_module
 from dspy_agent_tools import (
@@ -818,3 +820,69 @@ def test_verbose_logging_controls(caplog):
         if "Calling module.forward" in record.getMessage()
     ]
     runtime_module.runtime().set_verbose(False)
+
+
+def test_capturing_lm():
+    from dspy.clients.base_lm import BaseLM
+
+    from dspy_agent_tools.durable.lm import CapturingLM, capture_lm
+
+    class FakeLM(BaseLM):
+        def __init__(self) -> None:
+            super().__init__(model="fake")
+            self.extra = "delegated"
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            return ["sync"]
+
+        async def acall(self, *args: Any, **kwargs: Any) -> Any:
+            return ["async"]
+
+    lm = FakeLM()
+    capture = capture_lm(lm)
+    assert isinstance(capture, CapturingLM)
+    assert capture("prompt") == ["sync"]
+    assert asyncio.run(capture.acall("prompt")) == ["async"]
+    assert capture.responses == [["sync"], ["async"]]
+    assert capture.extra == "delegated"
+    assert repr(capture) == "CapturingLM(fake)"
+    with pytest.raises(AttributeError):
+        CapturingLM.__getattr__(capture, "_lm")
+    assert capture_lm(None) is None
+    assert capture_lm(object()) is None
+    assert capture_lm(capture) is None
+
+
+def test_summarize_and_checkpoint_value():
+    class Broken:
+        def toDict(self) -> Any:
+            raise RuntimeError("no")
+
+    assert tool_module.summarize(Broken()) == "<Broken>"
+    lock = threading.Lock()
+    assert tool_module.checkpoint_value({"lock": lock}) == {"lock": "<lock>"}
+    assert tool_module.checkpoint_value({"value": 1}) == {"value": 1}
+
+
+def test_llm_checkpoint_fallback_and_legacy(monkeypatch):
+    monkeypatch.setattr(agent_module, "in_workflow_body", lambda: True)
+    monkeypatch.setattr(agent_module, "next_operation_id", lambda: "op")
+    dspy.configure(lm=None)
+    fake_self = SimpleNamespace(retries=0)
+    monkeypatch.setattr(
+        "dbos.DBOS.run_step",
+        staticmethod(lambda options, body: body()),
+    )
+    result = agent_module.DurableAgent._llm_call(
+        cast(Any, fake_self), lambda: "direct", "predictor", "step", (), {}
+    )
+    assert result == "direct"
+
+    monkeypatch.setattr(
+        "dbos.DBOS.run_step",
+        staticmethod(lambda options, body: "legacy"),
+    )
+    result = agent_module.DurableAgent._llm_call(
+        cast(Any, fake_self), lambda: "unused", "predictor", "step", (), {}
+    )
+    assert result == "legacy"
