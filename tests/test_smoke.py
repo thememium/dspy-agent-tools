@@ -14,6 +14,13 @@ import sys
 import dspy_agent_tools
 
 EXPECTED_EXPORTS = {
+    "ApprovalRequest",
+    "Durable",
+    "DurableAgent",
+    "DurableFunction",
+    "Event",
+    "EventType",
+    "Human",
     "Argument",
     "Browser",
     "BrowserSession",
@@ -28,6 +35,7 @@ EXPECTED_EXPORTS = {
     "SkillTools",
     "Skills",
     "Toolbox",
+    "Worker",
     "bash_curl",
     "bash_exec",
     "bash_fetch",
@@ -56,6 +64,9 @@ EXPECTED_EXPORTS = {
     "delete_file",
     "edit_file",
     "Patch",
+    "QuestionRequest",
+    "Run",
+    "Schedule",
     "read_file",
     "web_news",
     "web_search",
