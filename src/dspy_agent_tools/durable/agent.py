@@ -555,6 +555,24 @@ class Durable:
         @overload
         def worker(cls, fn: _F, **options: Any) -> DurableFunction: ...
 
+        @classmethod
+        @overload
+        def workflow(
+            cls, fn: None = None, **options: Any
+        ) -> Callable[[_F], DurableFunction]: ...
+
+        @classmethod
+        @overload
+        def workflow(cls, fn: _F, **options: Any) -> DurableFunction: ...
+
+        @classmethod
+        @overload
+        def step(cls, fn: None = None, **options: Any) -> Callable[[_F], _F]: ...
+
+        @classmethod
+        @overload
+        def step(cls, fn: _F, **options: Any) -> _F: ...
+
     def __new__(
         cls,
         target: Any = None,
@@ -641,6 +659,22 @@ class Durable:
         return wrap_tool(fn, **options)
 
     @classmethod
+    def step(cls, fn: Any = None, **options: Any) -> Any:
+        """Checkpoint a plain function as a DBOS step.
+
+        The decorator spelling of :meth:`tool` for code that is not a DSPy
+        tool. Inside a durable workflow each call records its inputs and
+        output; outside one the function runs normally.
+
+        Example:
+            >>> from dspy_agent_tools import Durable
+            >>> @Durable.step
+            ... def lookup(customer_id: str) -> dict:
+            ...     return {"id": customer_id}
+        """
+        return cls.tool(fn, **options)
+
+    @classmethod
     def worker(cls, fn: Any = None, **options: Any) -> Any:
         """Turn a Python function into a queued durable worker.
 
@@ -656,6 +690,29 @@ class Durable:
         if fn is None:
             return lambda target: DurableFunction(target, worker=True, **options)
         return DurableFunction(fn, worker=True, **options)
+
+    @classmethod
+    def workflow(cls, fn: Any = None, **options: Any) -> Any:
+        """Turn a Python function into a durable workflow.
+
+        The decorator spelling of ``Durable(fn)``. Returns a
+        :class:`DurableFunction`, so ``start``, ``enqueue``, ``schedule``, and
+        ``Run`` work exactly as they do for ``Durable(fn)``.
+
+        Workflow arguments are keyword arguments: ``main(url=...)``.
+
+        Example:
+            >>> from dspy_agent_tools import Durable
+            >>> @Durable.workflow(name="pipeline")
+            ... def main(*, url: str) -> str:
+            ...     return url
+            >>> main(url="https://example.com")
+        """
+        from .function import DurableFunction
+
+        if fn is None:
+            return lambda target: DurableFunction(target, **options)
+        return DurableFunction(fn, **options)
 
     @classmethod
     def tools(cls, tools: Iterable[Any], **options: Any) -> list[Any]:
