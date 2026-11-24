@@ -198,29 +198,33 @@ class DurableAgent:
         vars(predictor)["__durable_predictor__"] = True
 
     def _patch_tools(self) -> None:
-        for attribute in ("tools", "_user_tools"):
+        # RLM exposes ``tools`` as a read-only property that returns a copy;
+        # its mutable mapping is ``_user_tools``. Prefer that backing store so
+        # instrumentation does not try to assign through the property.
+        for attribute in ("_user_tools", "tools"):
             tools = getattr(self.module, attribute, None)
-            if not isinstance(tools, dict):
+            if isinstance(tools, dict):
+                break
+        else:
+            return
+        wrapped: dict[str, Any] = {}
+        for name, tool in tools.items():
+            if (
+                name in _INTERNAL_TOOLS
+                or is_durable_tool(tool)
+                or is_durable_tool(getattr(tool, "func", None))
+                or getattr(getattr(tool, "func", tool), "__human__", None) is not None
+            ):
+                wrapped[name] = tool
                 continue
-            wrapped: dict[str, Any] = {}
-            for name, tool in tools.items():
-                if (
-                    name in _INTERNAL_TOOLS
-                    or is_durable_tool(tool)
-                    or is_durable_tool(getattr(tool, "func", None))
-                    or getattr(getattr(tool, "func", tool), "__human__", None)
-                    is not None
-                ):
-                    wrapped[name] = tool
-                    continue
-                approval = self._approval_for(name, tool)
-                wrapped[name] = wrap_tool(
-                    tool,
-                    name=name,
-                    retries=self.retries,
-                    approval=True if approval else None,
-                )
-            setattr(self.module, attribute, wrapped)
+            approval = self._approval_for(name, tool)
+            wrapped[name] = wrap_tool(
+                tool,
+                name=name,
+                retries=self.retries,
+                approval=True if approval else None,
+            )
+        setattr(self.module, attribute, wrapped)
 
     def _approval_for(self, name: str, tool: Any) -> bool:
         if name in self._approval_names:

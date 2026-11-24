@@ -118,6 +118,20 @@ def test_async_tool_outside_workflow():
     assert wrapped(4) == 8
 
 
+def test_rlm_tools_are_instrumented_in_place():
+    def lookup(query: str) -> str:
+        """Look up a query."""
+        return query
+
+    module = dspy.RLM("question -> answer", tools=[lookup])
+    original = module._user_tools["lookup"]
+    Durable(module, name=unique_name("rlm"))
+    wrapped = module._user_tools["lookup"]
+    assert wrapped is not original
+    assert wrapped.func.__durable_tool__ is True
+    assert module.tools["lookup"] is wrapped
+
+
 def test_react_agent_checkpoints_llm_and_tool_calls():
     calls: list[str] = []
 
