@@ -976,3 +976,45 @@ def test_jsonable_renders_diagnostic_data():
     assert rendered["selfdict"] == "<SelfDict>"
     assert rendered["broken"] == "<Broken>"
     assert rendered["plain"] == "<object>"
+
+
+def test_write_event_skips_existing(monkeypatch):
+    from sqlalchemy import Column, Integer, MetaData, String, Table
+
+    streams = Table(
+        "streams",
+        MetaData(),
+        Column("workflow_uuid", String),
+        Column("key", String),
+        Column("function_id", Integer),
+        Column("offset", Integer),
+    )
+
+    class Result:
+        def first(self) -> Any:
+            return (0,)
+
+    class Connection:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, statement: Any) -> Result:
+            return Result()
+
+    class Engine:
+        def connect(self) -> Connection:
+            return Connection()
+
+    class SysDB:
+        engine = Engine()
+        tables = SimpleNamespace(streams=streams)
+
+        def write_stream_from_step(self, *args: Any, **kwargs: Any) -> None:
+            raise AssertionError("existing event must not be written again")
+
+    fake = SimpleNamespace(_sys_db=SysDB())
+    monkeypatch.setattr("dbos._dbos._get_dbos_instance", lambda: fake)
+    context._write_event("run-1", 0, {"type": "run.started"})

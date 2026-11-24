@@ -139,6 +139,8 @@ def test_react_agent_checkpoints_llm_and_tool_calls():
     types = [event.type for event in events]
     assert types[0] == EventType.RUN_STARTED
     assert types[-1] == EventType.RUN_COMPLETED
+    assert events[0].data["input"]["question"] == "What is the weather?"
+    assert events[-1].data["output"]["answer"] == "Sunny in Paris"
     assert EventType.TOOL_COMPLETED in types
     assert [
         event.data["tool"] for event in events if event.type == EventType.TOOL_STARTED
@@ -163,6 +165,7 @@ def test_react_agent_checkpoints_llm_and_tool_calls():
     assert llm_completed.data["llm"]
 
     steps = run.steps()
+    assert not any(step["function_name"] == "DBOS.writeStream" for step in steps)
     tool_step = next(step for step in steps if step["function_name"] == "get_weather")
     assert tool_step["output"]["input"] == {
         "args": [],
