@@ -9,6 +9,7 @@ from typing import Any
 
 import dspy
 import pytest
+from dbos import DBOS
 
 from dspy_agent_tools import (
     ApprovalRequest,
@@ -165,7 +166,15 @@ def test_react_agent_checkpoints_llm_and_tool_calls():
     assert llm_completed.data["llm"]
 
     steps = run.steps()
-    assert not any(step["function_name"] == "DBOS.writeStream" for step in steps)
+    assert not any(
+        step["function_name"] in {"DBOS.writeStream", "DBOS.setEvent"} for step in steps
+    )
+    assert DBOS.get_event(run.id, "agent.input", timeout_seconds=0) == {
+        "question": "What is the weather?"
+    }
+    assert DBOS.get_event(run.id, "agent.output", timeout_seconds=0)["answer"] == (
+        "Sunny in Paris"
+    )
     tool_step = next(step for step in steps if step["function_name"] == "get_weather")
     assert tool_step["output"]["input"] == {
         "args": [],

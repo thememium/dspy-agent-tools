@@ -1018,3 +1018,7 @@ def test_write_event_skips_existing(monkeypatch):
     fake = SimpleNamespace(_sys_db=SysDB())
     monkeypatch.setattr("dbos._dbos._get_dbos_instance", lambda: fake)
     context._write_event("run-1", 0, {"type": "run.started"})
+
+
+def test_set_workflow_event_outside_workflow_is_noop():
+    assert context.set_workflow_event("agent.input", {"question": "?"}) is None
