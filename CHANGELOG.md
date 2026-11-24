@@ -15,8 +15,8 @@
 - **durable**: quiet logging by default. `Durable.configure(verbose=True)` or
   `Durable(..., verbose=True)` restores DBOS INFO output and DSPy warnings.
 - **durable**: checkpoint exact tool inputs and outputs, plus predictor inputs,
-  parsed predictions, and raw LM responses. `Run.steps()` now loads outputs by
-  default and the event stream carries summarized inputs/outputs.
+  plain prediction fields, and raw LM responses. `Run.steps()` now loads
+  outputs by default and the event stream carries summarized inputs/outputs.
 
 ## v0.1.18 (2026-11-22)
 
