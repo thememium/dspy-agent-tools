@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from ._dbos import load_dbos
-from .context import emit, in_workflow_body, workflow_state
+from .context import emit, in_workflow_body, set_workflow_event, workflow_state
 from .events import EventType
 from .exceptions import AgentExecutionError, DurableError
 from .runtime import runtime
@@ -103,26 +103,31 @@ class DurableFunction:
         with workflow_state(self.name):
             input_data = jsonable(inputs)
             emit(EventType.RUN_STARTED, agent=self.name, input=input_data)
+            set_workflow_event("function.input", input_data)
             try:
                 result = self._call(inputs)
             except Exception as exc:
                 if type(exc).__name__ == "DBOSWorkflowCancelledError":
                     raise  # pragma: no cover - DBOS cancellation
+                error = f"{type(exc).__name__}: {exc}"
                 emit(
                     EventType.RUN_FAILED,
                     agent=self.name,
                     input=input_data,
-                    error=f"{type(exc).__name__}: {exc}",
+                    error=error,
                 )
+                set_workflow_event("function.error", {"error": error})
                 raise AgentExecutionError(
                     self.name, type(exc).__name__, str(exc)
                 ) from None
+            output_data = jsonable(result)
             emit(
                 EventType.RUN_COMPLETED,
                 agent=self.name,
                 input=input_data,
-                output=jsonable(result),
+                output=output_data,
             )
+            set_workflow_event("function.output", output_data)
             return result
 
     def _call(self, inputs: dict[str, Any]) -> Any:

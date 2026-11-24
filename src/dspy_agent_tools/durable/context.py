@@ -34,6 +34,14 @@ class WorkflowState:
 
 
 _EVENT_FUNCTION_BASE = -1_000_000
+_IO_EVENT_IDS = {
+    "agent.input": -2_000_001,
+    "agent.output": -2_000_002,
+    "agent.error": -2_000_003,
+    "function.input": -2_000_004,
+    "function.output": -2_000_005,
+    "function.error": -2_000_006,
+}
 
 
 def _write_event(run_id: str, seq: int, payload: dict[str, Any]) -> None:
@@ -70,6 +78,29 @@ def _write_event(run_id: str, seq: int, payload: dict[str, Any]) -> None:
         EVENTS_STREAM,
         payload,
         serialization_type=WorkflowSerializationFormat.DEFAULT,
+    )
+
+
+def set_workflow_event(key: str, value: Any) -> None:
+    """Publish a top-level workflow event without creating a step row.
+
+    DBOS's public ``set_event`` records a ``DBOS.setEvent`` operation (an empty
+    step) and is only valid in a workflow body. The sys-db writer updates the
+    same event tables without the operation record, so Argus shows the data in
+    its Events panel while the step list stays limited to real work.
+    """
+    run_id = current_run_id()
+    if run_id is None:
+        return
+    from dbos._dbos import _get_dbos_instance
+    from dbos._serialization import WorkflowSerializationFormat
+
+    _get_dbos_instance()._sys_db.set_event_from_step(
+        run_id,
+        _IO_EVENT_IDS[key],
+        key,
+        value,
+        serialization_type=WorkflowSerializationFormat.PORTABLE,
     )
 
 

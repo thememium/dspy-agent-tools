@@ -18,6 +18,7 @@ from .context import (
     in_workflow_body,
     next_operation_id,
     operation_scope,
+    set_workflow_event,
     workflow_state,
 )
 from .events import EventType
@@ -365,27 +366,32 @@ class DurableAgent:
         with workflow_state(self.name):
             input_data = jsonable(inputs)
             emit(EventType.RUN_STARTED, agent=self.name, input=input_data)
+            set_workflow_event("agent.input", input_data)
             try:
                 result = self._call_module(inputs)
             except Exception as exc:
                 if type(exc).__name__ == "DBOSWorkflowCancelledError":
                     raise  # pragma: no cover - DBOS cancellation
                 logger.exception("durable agent %s failed", self.name)
+                error = f"{type(exc).__name__}: {exc}"
                 emit(
                     EventType.RUN_FAILED,
                     agent=self.name,
                     input=input_data,
-                    error=f"{type(exc).__name__}: {exc}",
+                    error=error,
                 )
+                set_workflow_event("agent.error", {"error": error})
                 raise AgentExecutionError(
                     self.name, type(exc).__name__, str(exc)
                 ) from None
+            output_data = jsonable(result)
             emit(
                 EventType.RUN_COMPLETED,
                 agent=self.name,
                 input=input_data,
-                output=jsonable(result),
+                output=output_data,
             )
+            set_workflow_event("agent.output", output_data)
             return result
 
     def _call_module(self, inputs: dict[str, Any]) -> Any:
