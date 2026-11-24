@@ -29,7 +29,13 @@ from .exceptions import (
 )
 from .runtime import runtime
 from .schedule import Schedule
-from .tool import is_durable_tool, tool_name, wrap_tool
+from .tool import (
+    checkpoint_value,
+    is_durable_tool,
+    summarize,
+    tool_name,
+    wrap_tool,
+)
 
 if TYPE_CHECKING:
     from dspy import Module, Tool
@@ -44,6 +50,7 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 _AGENTS: dict[str, DurableAgent] = {}
 _AUTO_COUNTS: dict[str, int] = {}
 _INTERNAL_TOOLS = frozenset({"finish", "submit"})
+_LLM_CHECKPOINT = "__durable_llm_checkpoint__"
 
 
 def _is_dspy_module(value: Any) -> bool:
@@ -265,13 +272,39 @@ class DurableAgent:
         if not in_workflow_body():
             return function(*args, **kwargs)
         operation_id = next_operation_id()
-        emit(EventType.LLM_STARTED, predictor=path)
+        input_data = {"args": args, "kwargs": kwargs}
+        emit(
+            EventType.LLM_STARTED,
+            predictor=path,
+            input=summarize(input_data),
+        )
         try:
             from dbos import DBOS
 
             def body() -> Any:
+                import dspy
+
+                from .lm import capture_lm
+
+                capture = capture_lm(dspy.settings.lm)
                 with operation_scope(operation_id):
-                    return function(*args, **kwargs)
+                    if capture is None:
+                        output = function(*args, **kwargs)
+                    else:
+                        with dspy.context(lm=capture):
+                            output = function(*args, **kwargs)
+                return {
+                    _LLM_CHECKPOINT: True,
+                    "predictor": path,
+                    "input": {
+                        "args": checkpoint_value(args),
+                        "kwargs": checkpoint_value(kwargs),
+                    },
+                    "output": output,
+                    "llm": checkpoint_value(
+                        capture.responses if capture is not None else []
+                    ),
+                }
 
             result = DBOS.run_step(
                 _step_options(step_name, self.retries),
@@ -281,11 +314,24 @@ class DurableAgent:
             emit(
                 EventType.LLM_FAILED,
                 predictor=path,
+                input=summarize(input_data),
                 error=f"{type(exc).__name__}: {exc}",
             )
             raise
-        emit(EventType.LLM_COMPLETED, predictor=path)
-        return result
+        if isinstance(result, dict) and result.get(_LLM_CHECKPOINT) is True:
+            output = result["output"]
+            raw = result.get("llm", [])
+        else:
+            # Existing workflows can replay pre-envelope step results.
+            output = result
+            raw = []
+        emit(
+            EventType.LLM_COMPLETED,
+            predictor=path,
+            output=summarize(output),
+            llm=summarize(raw),
+        )
+        return output
 
     # ------------------------------------------------------------------
     # Execution
