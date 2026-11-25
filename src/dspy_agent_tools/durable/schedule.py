@@ -62,6 +62,13 @@ class Schedule:
 
         return Run(handle.get_workflow_id())
 
+    def backfill(self, start: Any, end: Any) -> list[Run]:
+        """Queue runs for schedule fire times in ``[start, end)``."""
+        handles = self._client().backfill_schedule(self.name, start, end)
+        from .run import Run
+
+        return [Run(handle.get_workflow_id()) for handle in handles]
+
     def delete(self) -> None:
         """Delete the schedule."""
         self._client().delete_schedule(self.name)
