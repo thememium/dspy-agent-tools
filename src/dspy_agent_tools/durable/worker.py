@@ -12,6 +12,7 @@ from .exceptions import DurableError
 from .function import DurableFunction
 from .run import Run
 from .schedule import Schedule
+from .tool import mark_workflow_tool
 
 
 class WorkerHandle(Protocol):
@@ -87,6 +88,7 @@ def Worker(target: Any, *, name: str | None = None) -> WorkerHandle:
     vars(run)["schedule"] = durable.schedule
     vars(run)["result"] = lambda run_id: Run.get(run_id).result()
     vars(run)["__durable_worker__"] = True
+    mark_workflow_tool(run)
     return cast(WorkerHandle, run)
 
 
@@ -95,7 +97,7 @@ def _dspy_tool(function: Any) -> Any:
         from dspy import Tool
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError("worker_tools() needs DSPy; install dspy>=3.4.1") from exc
-    return Tool(function)
+    return mark_workflow_tool(Tool(function))
 
 
 def worker_tools(
