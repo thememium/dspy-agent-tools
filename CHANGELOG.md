@@ -28,6 +28,16 @@
   decorator spelling of `Durable(fn)` and `Durable.tool(fn)`, for wrapping
   plain scripts and their side effects.
 
+### 🐛 Bug Fixes
+
+- **durable**: run `Worker` handles and orchestration tools at workflow level
+  instead of inside a DBOS step, so `worker_tools` can start child workflows
+  without tripping DBOS's "not in a step" assertion.
+- **durable**: reject `Durable.sleep()` inside a checkpointed step with an
+  actionable error instead of reaching DBOS's workflow-only sleep assertion.
+- **durable**: treat `MAX_RECOVERY_ATTEMPTS_EXCEEDED` as terminal so
+  `Run.is_active()` and `Run.events()` stop instead of polling forever.
+
 ## v0.1.18 (2026-11-22)
 
 [Compare changes](https://github.com/thememium/dspy-agent-tools/compare/v0.1.17...v0.1.18)
