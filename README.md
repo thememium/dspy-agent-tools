@@ -409,6 +409,49 @@ agent = Durable(
 )
 ```
 
+### Versioning, factories, and run control
+
+Use `version=` to pin the workflow name, and `@Durable.agent` to build a fresh
+module per run (important for agents that own browser or MCP sessions):
+
+```python
+@Durable.agent(name="coder", version="v3")
+def make_coder():
+    session = BrowserSession(state_path="./coder-state.json")
+    return dspy.RLM("task -> summary", tools=[*Browser(session=session)])
+
+
+# pin a workflow ID or deadline
+run = make_coder.start(task="Review the PR", workflow_id="pr-42", timeout=900)
+
+# queue controls
+run = make_coder.enqueue(
+    task="Review the PR", delay=60, priority=5, deduplication_id="pr-42"
+)
+```
+
+`Run` exposes `result(timeout=...)`, `pause()`, `resume()`, `fork(...)`,
+`retry()`, `steps()`, and `events()`. Pauses happen before the next predictor
+or tool step; call `Durable.pause_point()` inside a plain workflow for an
+explicit boundary. `Durable.list_runs(...)` and `Durable.list_schedules(...)`
+cover the control plane. Gate human decisions with an authorizer:
+
+```python
+Durable.configure(authorizer=lambda action, run_id, tenant, request: tenant == "team-a")
+```
+
+Run workers with:
+
+```bash
+dspy-durable worker app:durable --queue research --processes 4
+```
+
+RLM sandbox sub-agent calls and each `llm_query_batched` prompt are
+checkpointed individually. Toolbox discovery checkpoints the resolved catalog
+tool, not the generic `call_tool` dispatcher. Give a tool a recovery hook with
+`Durable.tool(..., recover=...)` or `Durable(..., recover=...)`; Browser and MCP
+tools register their session reconnects automatically.
+
 ### What is durable, and what is not
 
 - **LLM predictions** and **tool calls** are steps. `Durable.tool` can wrap a
@@ -416,8 +459,15 @@ agent = Durable(
   automatically.
 - **ReAct, ReActV2, RLM**: the loop itself is deterministic replay. RLM
   regenerates the code from recorded predictions, re-executes it, and reuses
-  recorded host tool and `llm_query` results. Interpreter state is *not*
-  snapshotted; replay requires the generated code to be deterministic.
+  recorded host tool and `llm_query` results. Sandbox sub-agent predictors and
+  tools are instrumented individually, and each `llm_query_batched` prompt is
+  its own step. Interpreter state is *not* snapshotted; replay requires the
+  generated code to be deterministic.
+- **Stateful tools**: Browser and MCP tools expose recovery hooks. Use
+  `BrowserSession(state_path=...)` to checkpoint tab URLs, cookies, and
+  local/session storage; DOM mutations and in-memory JavaScript state are not
+  captured. MCP restarts a closed transport, but any state held privately by
+  the server still has to be reconstructed by that server.
 - **Side effects are not exactly-once.** DBOS records a completed step, but a
   crash between the external effect and the checkpoint can repeat it. Mark
   non-idempotent tools with `idempotent=False` and use
