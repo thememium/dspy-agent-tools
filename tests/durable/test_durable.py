@@ -425,6 +425,44 @@ def test_worker_runs_and_exposes_tools():
     assert listed() == [worker.name]
 
 
+def test_worker_tools_start_child_workflow_from_agent():
+    @Durable.worker(name=unique_name("child"), queue=unique_name("child-queue"))
+    def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        return a + b
+
+    tools = {tool.name: tool for tool in Durable.worker_tools([Worker(add)])}
+    start = tools["start_worker"]
+    assert getattr(start.func, "__durable_workflow_tool__", False) is True
+
+    class Orchestrator(dspy.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tools = {"start_worker": start}
+
+        def forward(self, question: str) -> str:
+            return self.tools["start_worker"](name=add.name, inputs={"a": 2, "b": 3})
+
+    agent = Durable(Orchestrator(), name=unique_name("orchestrator"))
+    run = agent.start(question="?")
+    child_id = run.result()
+    assert not any(step["function_name"] == "start_worker" for step in run.steps())
+    assert Run.get(child_id).result() == 5
+
+
+def test_sleep_rejects_step_context():
+    @Durable.step()
+    def sleeper() -> None:
+        Durable.sleep(0.001)
+
+    @Durable.workflow(name=unique_name("sleep-step"))
+    def main() -> None:
+        sleeper()
+
+    with pytest.raises(DurableError, match="workflow level"):
+        main()
+
+
 def test_workflow_and_step_decorators():
     @Durable.step()
     def increment(value: int) -> int:
