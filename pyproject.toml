@@ -23,6 +23,9 @@ dependencies = [
   "tree-sitter-language-pack>=1.22.1",
 ]
 
+[project.scripts]
+dspy-durable = "dspy_agent_tools.durable.cli:main"
+
 [project.optional-dependencies]
 browser = ["dspy>=3.1", "pydoll-python>=3.0.1"]
 # Durable execution. dbos brings dspy because agents need it; plain durable
