@@ -321,3 +321,24 @@ def wrap_tool(
 def is_durable_tool(value: Any) -> bool:
     """Return whether *value* is already checkpointed."""
     return bool(getattr(value, "__durable_tool__", False))
+
+
+def mark_workflow_tool(value: Any) -> Any:
+    """Mark a tool as workflow-level so instrumentation does not wrap it in a step.
+
+    Starting a child workflow is only legal in a workflow body; DBOS asserts if
+    ``start_workflow`` runs inside ``run_step``. Worker and orchestration tools
+    therefore carry this marker and are called directly by the agent loop.
+    """
+    target = getattr(value, "func", value)
+    vars(target)["__durable_workflow_tool__"] = True
+    return value
+
+
+def is_workflow_tool(value: Any) -> bool:
+    """Return whether *value* must execute at workflow level, not in a step."""
+    target = getattr(value, "func", value)
+    return bool(
+        getattr(value, "__durable_workflow_tool__", False)
+        or getattr(target, "__durable_workflow_tool__", False)
+    )
