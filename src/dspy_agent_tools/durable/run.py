@@ -13,9 +13,7 @@ from .runtime import runtime
 
 logger = logging.getLogger(__name__)
 
-ACTIVE_STATUSES = frozenset(
-    {"PENDING", "ENQUEUED", "DELAYED", "SUSPENDED", "MAX_RECOVERY_ATTEMPTS_EXCEEDED"}
-)
+ACTIVE_STATUSES = frozenset({"PENDING", "ENQUEUED", "DELAYED", "SUSPENDED"})
 
 
 class Run:
