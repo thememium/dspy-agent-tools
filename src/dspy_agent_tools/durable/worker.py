@@ -38,7 +38,8 @@ def _target_signature(
     if isinstance(target, DurableFunction):
         return inspect.signature(target.function)
     if isinstance(target, DurableAgent):
-        fields = getattr(target.module.signature, "input_fields", {})
+        module = target.module
+        fields = getattr(module.signature, "input_fields", {}) if module else {}
         return inspect.Signature(
             [
                 inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=Any)
@@ -141,16 +142,33 @@ def worker_tools(
         return {run_id: Run.get(run_id).result() for run_id in run_ids}
 
     def schedule_worker(
-        name: str, cron: str, inputs: dict[str, Any] | None = None
+        name: str,
+        cron: str,
+        inputs: dict[str, Any] | None = None,
+        timezone: str | None = None,
+        queue: str | None = None,
     ) -> str:
         """Create a recurring run for a worker and return the schedule name."""
-        return _lookup(registry, name).schedule(cron=cron, inputs=inputs or {}).name
+        return (
+            _lookup(registry, name)
+            .schedule(
+                cron=cron,
+                inputs=inputs or {},
+                timezone=timezone,
+                queue=queue,
+            )
+            .name
+        )
 
     def list_schedules() -> list[dict[str, Any]]:
-        """List registered schedules."""
+        """List schedules belonging to the workers in this allowlist."""
         from .runtime import runtime
 
-        return [dict(row) for row in runtime().client().list_schedules()]
+        allowed_names = {
+            _scheduled_workflow_name(worker.target) for worker in registry.values()
+        }
+        rows = [dict(row) for row in runtime().client().list_schedules()]
+        return [row for row in rows if row.get("workflow_name") in allowed_names]
 
     tools = [
         list_workers,
@@ -172,6 +190,17 @@ def _lookup(registry: dict[str, Any], name: str) -> Any:
             f"worker {name!r} is not in the allowlist; available: {sorted(registry)}"
         )
     return worker
+
+
+def _scheduled_workflow_name(target: Any) -> str:
+    version = getattr(target, "version", None)
+    if isinstance(target, DurableAgent):
+        base = f"dspy-agent:{target.name}"
+    else:
+        base = f"dspy-agent:fn:{target.name}"
+    if version:
+        base = f"{base}@{version}"
+    return f"{base}:scheduled"
 
 
 __all__ = ["Schedule", "Worker", "worker_tools"]
