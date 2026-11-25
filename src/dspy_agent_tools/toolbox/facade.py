@@ -106,6 +106,7 @@ def build_facade(
         async def call(name: str, arguments: dict[str, Any] | None = None) -> Any:
             return await run(name, arguments)
 
+        vars(call)["__durable_toolbox_catalog__"] = by_name
         return [
             _facade_tool(Tool, search, "search_tools", _SEARCH_DESC, name_prefix),
             _facade_tool(Tool, details, "get_tool_details", _DETAILS_DESC, name_prefix),
@@ -121,6 +122,7 @@ def build_facade(
     async def call_record(name: str, arguments: dict[str, Any] | None = None) -> Any:
         return await run(name, arguments)
 
+    vars(call_record)["__durable_toolbox_catalog__"] = by_name
     return [
         _facade_tool(
             Tool, search_records, "search_tools", _CODE_SEARCH_DESC, name_prefix
