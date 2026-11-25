@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import inspect
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ._dbos import load_dbos
-from .context import emit, in_workflow_body, set_workflow_event, workflow_state
+from .context import (
+    check_pause,
+    emit,
+    in_workflow_body,
+    set_workflow_event,
+    workflow_state,
+)
 from .events import EventType
 from .exceptions import AgentExecutionError, DurableError
 from .runtime import runtime
@@ -50,6 +56,8 @@ class DurableFunction:
         function: Callable[..., Any],
         *,
         name: str | None = None,
+        version: str | None = None,
+        tenant: str | None = None,
         queue: str | None = None,
         retries: int = 0,
         concurrency: int | None = None,
@@ -66,18 +74,21 @@ class DurableFunction:
         )
         self.function: Callable[..., Any] = function
         self.name = _function_name(function, name)
+        self.version = version
+        self.tenant = tenant
         self.queue = queue or (self.name if worker else None)
         self.retries = max(0, int(retries))
         self.concurrency = concurrency
         self.worker = worker
         functools.update_wrapper(self, function)
 
-        existing = _FUNCTIONS.get(self.name)
+        key = f"{self.name}@{self.version}" if self.version else self.name
+        existing = _FUNCTIONS.get(key)
         if existing is not None and existing is not self:
             raise DurableError(
                 f"a durable function named {self.name!r} already exists; pass name=..."
             )
-        _FUNCTIONS[self.name] = self
+        _FUNCTIONS[key] = self
 
         self._register_workflows()
         if self.queue:
@@ -86,11 +97,15 @@ class DurableFunction:
     def _register_workflows(self) -> None:
         from dbos import DBOS
 
-        @DBOS.workflow(name=f"dspy-agent:fn:{self.name}")
+        base = f"dspy-agent:fn:{self.name}"
+        if self.version:
+            base = f"{base}@{self.version}"
+
+        @DBOS.workflow(name=base)
         def run(**inputs: Any) -> Any:
             return self._execute(**inputs)
 
-        @DBOS.workflow(name=f"dspy-agent:fn:{self.name}:scheduled")
+        @DBOS.workflow(name=f"{base}:scheduled")
         def scheduled(_scheduled_at: datetime, context: dict[str, Any]) -> Any:
             return self._execute(**(context or {}))
 
@@ -100,7 +115,8 @@ class DurableFunction:
     def _execute(self, **inputs: Any) -> Any:
         if not in_workflow_body():
             return self._call(inputs)
-        with workflow_state(self.name):
+        with workflow_state(self.name, self.tenant):
+            check_pause()
             input_data = jsonable(inputs)
             emit(EventType.RUN_STARTED, agent=self.name, input=input_data)
             set_workflow_event("function.input", input_data)
@@ -142,17 +158,51 @@ class DurableFunction:
         return self.start(**inputs).result()
 
     async def acall(self, **inputs: Any) -> Any:
-        run = self.start(**inputs)
-        return await asyncio.to_thread(run.result)
+        run = await self.astart(**inputs)
+        return await run.aresult()
 
-    def start(self, **inputs: Any) -> Run:
+    async def astart(
+        self,
+        *,
+        workflow_id: str | None = None,
+        timeout: float | None = None,
+        **inputs: Any,
+    ) -> Run:
+        return self.start(workflow_id=workflow_id, timeout=timeout, **inputs)
+
+    def start(
+        self,
+        *,
+        workflow_id: str | None = None,
+        timeout: float | None = None,
+        **inputs: Any,
+    ) -> Run:
         runtime().ensure_launched()
-        handle = load_dbos().DBOS.start_workflow(self._run_workflow, **inputs)
+        from dbos import SetWorkflowID, SetWorkflowTimeout
+
+        with ExitStack() as stack:
+            if workflow_id is not None:
+                stack.enter_context(SetWorkflowID(workflow_id))
+            if timeout is not None:
+                stack.enter_context(SetWorkflowTimeout(timeout))
+            handle = load_dbos().DBOS.start_workflow(self._run_workflow, **inputs)
         from .run import Run
 
-        return Run(handle.get_workflow_id(), agent=self.name)
+        return Run(handle.get_workflow_id(), agent=self.name, tenant=self.tenant)
 
-    def enqueue(self, *, queue: str | None = None, **inputs: Any) -> Run:
+    def enqueue(
+        self,
+        *,
+        queue: str | None = None,
+        delay: float | None = None,
+        priority: int | None = None,
+        deduplication_id: str | None = None,
+        duplication_policy: Literal["reject", "return-existing"] | None = None,
+        workflow_id: str | None = None,
+        queue_partition_key: str | None = None,
+        timeout: float | None = None,
+        **inputs: Any,
+    ) -> Run:
         queue_name = queue or self.queue
         if not queue_name:
             raise DurableError(
@@ -161,12 +211,38 @@ class DurableFunction:
             )
         runtime().ensure_launched()
         runtime().register_queue(queue_name)
-        handle = load_dbos().DBOS.enqueue_workflow(
-            queue_name, self._run_workflow, **inputs
-        )
+        from dbos import SetEnqueueOptions, SetWorkflowID, SetWorkflowTimeout
+
+        with ExitStack() as stack:
+            if any(
+                value is not None
+                for value in (
+                    delay,
+                    priority,
+                    deduplication_id,
+                    duplication_policy,
+                    queue_partition_key,
+                )
+            ):
+                stack.enter_context(
+                    SetEnqueueOptions(
+                        delay_seconds=delay,
+                        priority=priority,
+                        deduplication_id=deduplication_id,
+                        duplication_policy=duplication_policy,
+                        queue_partition_key=queue_partition_key,
+                    )
+                )
+            if workflow_id is not None:
+                stack.enter_context(SetWorkflowID(workflow_id))
+            if timeout is not None:
+                stack.enter_context(SetWorkflowTimeout(timeout))
+            handle = load_dbos().DBOS.enqueue_workflow(
+                queue_name, self._run_workflow, **inputs
+            )
         from .run import Run
 
-        return Run(handle.get_workflow_id(), agent=self.name)
+        return Run(handle.get_workflow_id(), agent=self.name, tenant=self.tenant)
 
     def schedule(
         self,
