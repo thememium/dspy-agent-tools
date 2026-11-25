@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -23,6 +24,9 @@ class RuntimeConfig:
     executor_id: str | None = None
     log_level: str | None = None
     verbose: bool = False
+    authorizer: Callable[[str, str, str | None, dict[str, Any] | None], bool] | None = (
+        None
+    )
 
 
 @dataclass
@@ -44,6 +48,9 @@ class _Runtime:
         executor_id: str | None = None,
         log_level: str | None = None,
         verbose: bool | None = None,
+        authorizer: (
+            Callable[[str, str, str | None, dict[str, Any] | None], bool] | None
+        ) = None,
     ) -> None:
         """Set the runtime configuration before the first execution."""
         incoming = RuntimeConfig(
@@ -66,6 +73,9 @@ class _Runtime:
             ),
             log_level=log_level or self.config.log_level,
             verbose=verbose if verbose is not None else self.config.verbose,
+            authorizer=(
+                authorizer if authorizer is not None else self.config.authorizer
+            ),
         )
         with self.lock:
             if (
