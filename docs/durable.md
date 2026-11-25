@@ -46,8 +46,8 @@ for step in run.steps():
     print(step["function_name"], step["output"])
 ```
 
-A tool step's output contains the exact positional and keyword arguments plus
-the returned value:
+A tool step's output contains diagnostic representations of the positional and
+keyword arguments plus the returned value:
 
 ```python
 {
@@ -73,8 +73,8 @@ LM responses captured while the prediction ran:
 }
 ```
 
-A `dspy.Prediction` is stored as plain fields for the DBOS viewer and rebuilt
-on read, so step output stays readable instead of a pickled custom class.
+A predictor checkpoint includes plain prediction fields for the DBOS viewer
+and the original prediction for lossless replay, including its completions.
 
 The run itself is tracked as well: `run.started` carries the workflow input and
 `run.completed` carries the final result. Events are written directly to the
@@ -87,9 +87,10 @@ layer also publishes `agent.input`, `agent.output`, and `agent.error` as
 workflow events (and `function.*` for `DurableFunction`). They show up in
 Argus's Events panel as decoded JSON, without adding a step to the timeline.
 
-Values that DBOS cannot serialize are replaced by a readable summary instead
-of failing the step. The persisted event stream carries the same inputs and
-outputs in summarized form (`tool.started`, `tool.completed`, `llm.started`,
+Checkpointed results must be serializable. An unserializable result raises a
+clear error; it is never replaced with a summary for replay. Diagnostic inputs
+and event payloads are rendered separately and may be summarized. The persisted
+event stream carries inputs and outputs in summarized form (`tool.started`, `tool.completed`, `llm.started`,
 `llm.completed`), so a live UI can render progress without loading step rows.
 
 ## Two-line wrapping
@@ -242,7 +243,7 @@ researcher.schedule(
 Plain functions become queued workers:
 
 ```python
-@Durable.worker(queue="indexing", concurrency=5, retries=3)
+@Durable.worker(queue="indexing", concurrency=5)
 def index_repository(repo: str) -> dict:
     return {"repo": repo}
 
@@ -251,7 +252,11 @@ index_repository(repo="thememium/dspy-agent-tools")  # run and wait
 run = index_repository.enqueue(repo="thememium/dspy-agent-tools")
 ```
 
-Worker bodies execute at the workflow level, so they can call `Human.ask`,
+Worker bodies execute at the workflow level. Workflow-level `retries` are not
+supported; wrap retryable operations in `Durable.step(retries=...)`. A failed
+operation may already have performed an external side effect.
+
+Worker bodies can call `Human.ask`,
 start other runs, or schedule work. Wrap individual side effects with
 `Durable.tool` when they need their own checkpoint.
 
@@ -312,11 +317,16 @@ run = make_coder.enqueue(
 `retry()`, `steps()`, and `events()`. Pauses happen before the next predictor
 or tool step; call `Durable.pause_point()` inside a plain workflow for an
 explicit boundary. `Durable.list_runs(...)` and `Durable.list_schedules(...)`
-cover the control plane. Gate human decisions with an authorizer:
+cover the control plane. An optional authorizer can gate human decisions:
 
 ```python
-Durable.configure(authorizer=lambda action, run_id, tenant, request: tenant == "team-a")
+Durable.configure(authorizer=my_application_authorizer)
 ```
+
+The authorizer receives the tenant recorded on the pending request, not an
+authenticated caller identity. The application must authenticate callers and
+perform its own access checks for runs, events, results, and control operations;
+the authorizer alone is not a multi-tenant security boundary.
 
 Run workers with:
 
@@ -361,3 +371,17 @@ tools register their session reconnects automatically.
   and message, so `Run.result()` works even when the underlying exception is
   not picklable. Inspect `run.steps()` for the failing operation.
 - `Run.cancel()` stops a run; `Run.resume()` resumes an interrupted one.
+
+## Data and operations
+
+Workflow arguments, results, tool inputs and outputs, model responses, and human
+requests can be persisted in the DBOS system database and visible in Argus.
+Avoid passing secrets as tool arguments and control database and viewer access.
+Apply retention and redaction in your application where needed. Replay data is
+serialized with cloudpickle: only use a trusted database, since deserializing
+untrusted pickle data can execute code.
+
+Keep old workflow versions registered until their runs finish. A name or
+version change creates a different workflow identity; test upgrades against
+in-flight runs before deploying. Durable currently supports DBOS 3.6.x because
+the event integration uses DBOS internals.
