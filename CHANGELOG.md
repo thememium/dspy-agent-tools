@@ -28,6 +28,29 @@
   decorator spelling of `Durable(fn)` and `Durable.tool(fn)`, for wrapping
   plain scripts and their side effects.
 
+- **durable**: instrument RLM sandbox sub-agent predictors and tools instead
+  of wrapping the whole sub-agent in one step, so nested predictions, tool
+  calls, and approvals keep independent checkpoints. Each `llm_query_batched`
+  prompt is also its own step; async predictor paths use DBOS async steps, and
+  speculation is disabled when `dspy-rlm-hooks` is present.
+- **durable**: add cooperative `Run.pause()`/`Run.resume()` and
+  `Durable.pause_point()`; every predictor and tool boundary checks for a
+  persisted pause message.
+- **durable**: add tenant-scoped human requests and a
+  `Durable.configure(..., authorizer=...)` control-plane hook that gates
+  approve/reject/respond.
+- **durable**: browser sessions can checkpoint tabs, cookies, and local/session
+  storage to `state_path` and restore them on recovery; MCP connections can
+  restart a closed transport session.
+- **durable**: Toolbox discovery runs the resolved catalog tool as the step
+  instead of checkpointing the generic `call_tool` dispatcher.
+- **durable**: add opt-in session recovery for browser tabs and MCP
+  connections, plus `recover=` hooks on `Durable.tool` and `Durable.agent`.
+- **durable**: add agent/function `version=` names, `@Durable.agent` factories,
+  enqueue delay/priority/deduplication/workflow-ID options, `Run` timeouts,
+  fork/retry/listing, configurable retry classifiers, and the `dspy-durable`
+  worker CLI. Worker tool schedules are scoped to the allowlist.
+
 ### 🐛 Bug Fixes
 
 - **durable**: run `Worker` handles and orchestration tools at workflow level
