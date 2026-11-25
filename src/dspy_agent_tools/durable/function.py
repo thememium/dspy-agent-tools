@@ -77,7 +77,12 @@ class DurableFunction:
         self.version = version
         self.tenant = tenant
         self.queue = queue or (self.name if worker else None)
-        self.retries = max(0, int(retries))
+        if retries:
+            raise DurableError(
+                "workflow retries are not supported; wrap retryable operations "
+                "with Durable.step(retries=...) instead"
+            )
+        self.retries = 0
         self.concurrency = concurrency
         self.worker = worker
         functools.update_wrapper(self, function)

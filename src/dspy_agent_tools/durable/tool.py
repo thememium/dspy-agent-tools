@@ -98,13 +98,17 @@ _TOOL_CHECKPOINT = "__durable_tool_checkpoint__"
 
 
 def checkpoint_value(value: Any) -> Any:
-    """Return *value* when DBOS can serialize it, otherwise a safe summary."""
+    """Validate a replay value without replacing it with lossy diagnostics."""
     try:
         from .serializer import _dumps
 
         _dumps(value)
-    except Exception:  # noqa: BLE001 - capture the readable shape instead
-        return summarize(value)
+    except Exception as exc:
+        from .exceptions import DurableError
+
+        raise DurableError(
+            f"durable checkpoint cannot serialize {type(value).__name__}: {exc}"
+        ) from exc
     return value
 
 
@@ -153,11 +157,12 @@ def _tool_checkpoint(tool: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -
 
 def call_tool(
     fn: Callable[..., Any],
-    *args: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
     name: str | None = None,
     retries: int = 0,
     retry_on: Callable[[BaseException], bool] | None = None,
-    **kwargs: Any,
 ) -> Any:
     """Execute *fn*, checkpointing it when a durable workflow is active."""
     if not in_workflow_body():
@@ -180,7 +185,10 @@ def call_tool(
             async def body() -> Any:
                 with operation_scope(operation_id):
                     output = await fn(*args, **kwargs)
-                return {**_tool_checkpoint(step_name, args, kwargs), "output": output}
+                return {
+                    **_tool_checkpoint(step_name, args, kwargs),
+                    "output": checkpoint_value(output),
+                }
 
             result = _run_async_step(step_name, body, retries, retry_on)
         else:
@@ -188,7 +196,10 @@ def call_tool(
             def body() -> Any:
                 with operation_scope(operation_id):
                     output = fn(*args, **kwargs)
-                return {**_tool_checkpoint(step_name, args, kwargs), "output": output}
+                return {
+                    **_tool_checkpoint(step_name, args, kwargs),
+                    "output": checkpoint_value(output),
+                }
 
             result = _run_sync_step(step_name, body, retries, retry_on)
     except BaseException as exc:
@@ -241,11 +252,11 @@ def _wrap_callable(
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         return call_tool(
             fn,
-            *args,
+            args,
+            kwargs,
             name=exposed,
             retries=retries,
             retry_on=retry_on,
-            **kwargs,
         )
 
     vars(wrapper)["__durable_tool__"] = True
@@ -307,11 +318,11 @@ def wrap_tool(
         wrapped = functools.wraps(target.func)(
             lambda *args, **kwargs: call_tool(
                 target.func,
-                *args,
+                args,
+                kwargs,
                 name=exposed,
                 retries=0 if not idempotent else retries,
                 retry_on=retry_on,
-                **kwargs,
             )
         )
         vars(wrapped)["__durable_tool__"] = True

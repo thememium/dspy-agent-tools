@@ -436,7 +436,7 @@ def _execute(
 ) -> Any:
     if already_durable:
         return fn(*args, **kwargs)
-    return call_tool(fn, *args, name=name, **kwargs)
+    return call_tool(fn, args, kwargs, name=name)
 
 
 def _matches(

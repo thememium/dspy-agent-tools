@@ -180,7 +180,6 @@ class DurableAgent:
         self._approval_names = {tool_name(item) for item in (approvals or ())}
         self._approval_targets = tuple(approvals or ())
         self._base_recover_callbacks = _callbacks(recover)
-        self._recover_callbacks = list(self._base_recover_callbacks)
 
         owner = getattr(module, "__durable_agent__", None)
         if owner is not None and owner != self.name:
@@ -223,10 +222,12 @@ class DurableAgent:
     def _instrument(self, module: Module | None = None) -> None:
         module = module or self.module
         assert module is not None
+        callbacks = list(self._base_recover_callbacks)
         self._patch_predictors(module)
-        self._patch_tools(module)
+        self._patch_tools(module, callbacks)
         self._patch_rlm_helpers(module)
-        self._collect_recovery(module)
+        self._collect_recovery(module, callbacks)
+        vars(module)["__durable_recovery_callbacks__"] = callbacks
 
     def _patch_predictors(self, module: Module | None = None) -> None:
         module = module or self.module
@@ -276,7 +277,11 @@ class DurableAgent:
 
         vars(predictor)["__durable_predictor__"] = True
 
-    def _patch_tools(self, module: Module | None = None) -> None:
+    def _patch_tools(
+        self, module: Module | None = None, callbacks: list[Any] | None = None
+    ) -> None:
+        if callbacks is None:
+            callbacks = []
         module = module or self.module
         assert module is not None
         # RLM exposes ``tools`` as a read-only property that returns a copy;
@@ -294,7 +299,7 @@ class DurableAgent:
                 getattr(tool, "func", tool), "__durable_toolbox_catalog__", None
             )
             if isinstance(catalog, dict):
-                wrapped[name] = self._wrap_toolbox_tool(tool, catalog)
+                wrapped[name] = self._wrap_toolbox_tool(tool, catalog, callbacks)
                 continue
             if (
                 name in _INTERNAL_TOOLS
@@ -315,11 +320,13 @@ class DurableAgent:
             )
         setattr(module, attribute, wrapped)
 
-    def _wrap_toolbox_tool(self, tool: Any, catalog: dict[str, Any]) -> Any:
+    def _wrap_toolbox_tool(
+        self, tool: Any, catalog: dict[str, Any], callbacks: list[Any]
+    ) -> Any:
         original = tool.func
         for entry in catalog.values():
             _add_unique(
-                self._recover_callbacks,
+                callbacks,
                 getattr(entry.tool.func, "__durable_recover__", None),
             )
 
@@ -344,10 +351,11 @@ class DurableAgent:
                 return target(**args)
             return call_tool(
                 target,
+                (),
+                args,
                 name=entry.name,
                 retries=self.retries,
                 retry_on=self.retry_on,
-                **args,
             )
 
         vars(dispatch)["__durable_tool__"] = True
@@ -365,14 +373,14 @@ class DurableAgent:
             for target in self._approval_targets
         )
 
-    def _collect_recovery(self, module: Module) -> None:
+    def _collect_recovery(self, module: Module, callbacks: list[Any]) -> None:
         for attribute in ("_user_tools", "tools"):
             tools = getattr(module, attribute, None)
             if isinstance(tools, dict):
                 for tool in tools.values():
                     function = getattr(tool, "func", tool)
                     _add_unique(
-                        self._recover_callbacks,
+                        callbacks,
                         getattr(function, "__durable_recover__", None),
                     )
                 return
@@ -387,7 +395,6 @@ class DurableAgent:
                 f"agent factory returned {type(module).__name__}, expected dspy.Module"
             )
         vars(module)["__durable_agent__"] = self.name
-        self._recover_callbacks = list(self._base_recover_callbacks)
         self._instrument(module)
         return module
 
@@ -550,6 +557,9 @@ class DurableAgent:
                         "kwargs": jsonable(kwargs),
                     },
                     "output": rendered,
+                    "replay_value": runtime().serializer.serialize(
+                        checkpoint_value(output)
+                    ),
                     "output_type": output_type,
                     "usage": usage,
                     "llm": jsonable(capture.responses if capture is not None else []),
@@ -569,7 +579,9 @@ class DurableAgent:
             raise
         if isinstance(result, dict) and result.get(_LLM_CHECKPOINT) is True:
             value = result["output"]
-            if result.get("output_type") == "prediction":
+            if "replay_value" in result:
+                output = runtime().serializer.deserialize(result["replay_value"])
+            elif result.get("output_type") == "prediction":
                 import dspy
 
                 output = dspy.Prediction(**value)
@@ -642,6 +654,9 @@ class DurableAgent:
                         "kwargs": jsonable(kwargs),
                     },
                     "output": rendered,
+                    "replay_value": runtime().serializer.serialize(
+                        checkpoint_value(output)
+                    ),
                     "output_type": output_type,
                     "usage": usage,
                     "llm": jsonable(capture.responses if capture is not None else []),
@@ -661,7 +676,9 @@ class DurableAgent:
             raise
         if isinstance(result, dict) and result.get(_LLM_CHECKPOINT) is True:
             value = result["output"]
-            if result.get("output_type") == "prediction":
+            if "replay_value" in result:
+                output = runtime().serializer.deserialize(result["replay_value"])
+            elif result.get("output_type") == "prediction":
                 import dspy
 
                 output = dspy.Prediction(**value)
@@ -695,7 +712,7 @@ class DurableAgent:
             set_workflow_event("agent.input", input_data)
             try:
                 module = self._module_for_run()
-                for recovery in self._recover_callbacks:
+                for recovery in vars(module)["__durable_recovery_callbacks__"]:
                     recovery()
                 with facade_agent_scope(self.name):
                     result = self._call_module(module, inputs)

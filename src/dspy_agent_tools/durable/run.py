@@ -139,10 +139,14 @@ class Run:
         return True
 
     def _authorize(self, action: str, request: dict[str, Any] | None) -> None:
+        if request is None:
+            raise DurableExecutionError(self.id, "human request is not pending")
+        tenant = request.get("tenant")
+        if self.tenant is not None and self.tenant != tenant:
+            raise PermissionError(f"tenant does not match run {self.id!r}")
         authorizer = getattr(runtime().config, "authorizer", None)
         if authorizer is None:
             return
-        tenant = self.tenant or (request or {}).get("tenant")
         if not authorizer(action, self.id, tenant, request):
             raise PermissionError(f"{action} is not authorized for run {self.id!r}")
 
@@ -216,12 +220,7 @@ class Run:
 
     def pending(self) -> list[ApprovalRequest | QuestionRequest]:
         """Return this run's outstanding human requests."""
-        try:
-            payloads = self._client().get_event(
-                self.id, PENDING_EVENT, timeout_seconds=0
-            )
-        except Exception:  # noqa: BLE001 - missing event means nothing pending
-            return []
+        payloads = self._client().get_event(self.id, PENDING_EVENT, timeout_seconds=0)
         requests: list[ApprovalRequest | QuestionRequest] = []
         for request in payloads or []:
             event = event_from_payload(
