@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import json
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -129,6 +130,8 @@ class BrowserSession:
         dialog_policy: config.DialogPolicy = config._DEFAULT_DIALOG_POLICY,
         user_data_dir: str | Path | None = None,
         cookie_state: str | Path | None = None,
+        tabs_state: str | Path | None = None,
+        state_path: str | Path | None = None,
         humanize: bool = False,
         stealth: bool = False,
         fingerprint: dict[str, Any] | None = None,
@@ -153,6 +156,12 @@ class BrowserSession:
         )
         self.cookie_state = (
             Path(cookie_state).expanduser().resolve() if cookie_state else None
+        )
+        self.tabs_state = (
+            Path(tabs_state).expanduser().resolve() if tabs_state else None
+        )
+        self.state_path = (
+            Path(state_path).expanduser().resolve() if state_path else None
         )
         if allowed_schemes is None:
             self.allowed_schemes = config._DEFAULT_ALLOWED_SCHEMES
@@ -344,11 +353,126 @@ class BrowserSession:
                 result = operation(tab)
             if isinstance(result, dict):
                 result.update(self.take_diagnostics())
+            if self.state_path is not None:
+                try:
+                    self.save_state()
+                except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+                    config.logger.warning(
+                        "Could not save browser state: %s", errors._format_error(exc)
+                    )
             return result
+
+    def _storage_state(self, tab: Any) -> dict[str, Any]:
+        try:
+            response = tab.execute_script(
+                "JSON.stringify({local: Object.fromEntries(Object.entries(localStorage)),"
+                " session: Object.fromEntries(Object.entries(sessionStorage))})",
+                return_by_value=True,
+                await_promise=True,
+                allow_unsafe_eval_blocked_by_csp=True,
+            )
+            value = actions._remote_value(response)
+            return json.loads(value) if isinstance(value, str) else {}
+        except Exception:  # noqa: BLE001 - storage is best-effort
+            return {}
+
+    def capture_state(self) -> dict[str, Any]:
+        """Capture tabs, URLs, cookies, and per-tab local/session storage."""
+        with self._lock:
+            tabs: list[dict[str, Any]] = []
+            for index, tab in enumerate(self._tab_list()):
+                entry = self._tab_entry(index, tab)
+                tabs.append(
+                    {
+                        "url": entry.get("url"),
+                        "active": entry.get("active", False),
+                        "storage": self._storage_state(tab),
+                    }
+                )
+            cookie_rows = (
+                cookies._cookie_state(self._tab)["cookies"] if self._tab else []
+            )
+        return {"version": 1, "tabs": tabs, "cookies": cookie_rows}
+
+    def save_state(self, path: str | Path | None = None) -> dict[str, Any]:
+        """Write the serializable browser state to ``state_path`` or *path*."""
+        target = Path(path).expanduser() if path is not None else self.state_path
+        if target is None:
+            raise ValueError("save_state() needs a path or state_path=")
+        state = self.capture_state()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        return {"status": "ok", "action": "save_state", "path": str(target)}
+
+    def restore_state(self, path: str | Path | None = None) -> dict[str, Any]:
+        """Restore tabs, cookies, and storage from a captured state file."""
+        target = Path(path).expanduser() if path is not None else self.state_path
+        if target is None:
+            raise ValueError("restore_state() needs a path or state_path=")
+        state = json.loads(target.read_text(encoding="utf-8"))
+        tabs = state.get("tabs")
+        if state.get("version") != 1 or not isinstance(tabs, list) or not tabs:
+            raise ValueError("invalid browser state")
+        for entry in tabs:
+            url = entry.get("url") if isinstance(entry, dict) else None
+            if not isinstance(url, str):
+                raise TypeError("invalid browser tab state")
+            self._check_url(url)
+        cookie_rows = state.get("cookies") or []
+        with self._lock:
+            self._get_tab()
+            browser = self._browser
+            if browser is None:
+                raise RuntimeError("browser failed to start")
+            opened = []
+            for entry in tabs:
+                tab = browser.new_tab()
+                self._install_watch(tab)
+                opened.append(tab)
+                tab.go_to(entry["url"], timeout=max(1, int(self.timeout)))
+                if cookie_rows:
+                    tab.set_cookies(cookie_rows)
+                storage = entry.get("storage") or {}
+                local = json.dumps(storage.get("local") or {})
+                session = json.dumps(storage.get("session") or {})
+                tab.execute_script(
+                    f"Object.entries({local}).forEach(([k,v])=>localStorage.setItem(k,v));"
+                    f"Object.entries({session}).forEach(([k,v])=>sessionStorage.setItem(k,v));",
+                    await_promise=True,
+                )
+            active = next(
+                (
+                    index
+                    for index, entry in enumerate(tabs)
+                    if entry.get("active") is True
+                ),
+                0,
+            )
+            self._tab = opened[active]
+        return {"status": "ok", "action": "restore_state", "count": len(opened)}
+
+    def recover(self) -> dict[str, Any]:
+        """Re-open the browser and restore the last captured state."""
+        with self._lock:
+            if self.state_path is not None and self.state_path.exists():
+                return self.restore_state()
+            if self.tabs_state is not None and self.tabs_state.exists():
+                return self.restore_tabs(str(self.tabs_state))
+            self._get_tab()
+        return {"status": "ok", "action": "recover", "browser": True}
 
     def close(self) -> bool:
         """Stop the browser if it is running; return whether one was open."""
         with self._lock:
+            if self.state_path is not None and self._tab is not None:
+                try:
+                    self.save_state()
+                except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+                    config.logger.warning(
+                        "Could not save browser state: %s", errors._format_error(exc)
+                    )
+            if self.tabs_state is not None and self._tab is not None:
+                self.save_tabs(str(self.tabs_state))
             recorder, self._recorder = self._recorder, None
             if recorder is not None:
                 if recorder.tab is not None:

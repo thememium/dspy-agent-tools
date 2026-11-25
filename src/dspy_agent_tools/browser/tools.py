@@ -331,6 +331,9 @@ def _bind(
     def bound(*args: Any, **kwargs: Any) -> Any:
         return method(*args, **kwargs)
 
+    recover = getattr(getattr(method, "__self__", None), "recover", None)
+    if callable(recover):
+        vars(bound)["__durable_recover__"] = recover
     return bound
 
 
@@ -339,6 +342,7 @@ def _bind_close(session: session_module.BrowserSession) -> Callable[..., Any]:
     def bound() -> dict:
         return _close_payload(session)
 
+    vars(bound)["__durable_recover__"] = session.recover
     return bound
 
 
