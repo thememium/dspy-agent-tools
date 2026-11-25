@@ -785,6 +785,18 @@ def test_async_llm_checkpoint_branches(monkeypatch):
     )
     assert predicted.answer == "ok"
 
+    async def legacy_envelope(_options: Any, _body: Any) -> dict[str, Any]:
+        return {
+            agent_module._LLM_CHECKPOINT: True,
+            "output": {"nested": (1, 2)},
+            "output_type": "value",
+        }
+
+    monkeypatch.setattr(DBOS, "run_step_async", staticmethod(legacy_envelope))
+    assert asyncio.run(
+        agent_module.DurableAgent._llm_call_async(fake, value, "p", "s", (), {})
+    ) == {"nested": (1, 2)}
+
     async def legacy(_options: Any, _body: Any) -> str:
         return "legacy"
 
@@ -953,6 +965,18 @@ def test_tenant_scoped_pending_and_authorizer(monkeypatch):
         Run(run.id, tenant="beta").respond(request.id, "wrong")
     with pytest.raises(DurableExecutionError, match="not pending"):
         Run(run.id, tenant="alpha").respond("unknown", "wrong")
+    monkeypatch.setattr(
+        runtime_module.runtime(),
+        "config",
+        replace(runtime_module.runtime().config, authorizer=lambda *_: False),
+    )
+    with pytest.raises(PermissionError, match="not authorized"):
+        run.respond(request.id, "denied")
+    monkeypatch.setattr(
+        runtime_module.runtime(),
+        "config",
+        replace(runtime_module.runtime().config, authorizer=authorizer),
+    )
     run.respond(request.id, "alpha")
     assert run.result() == "alpha"
     assert ("respond", "alpha") in calls
@@ -1206,6 +1230,21 @@ def test_llm_checkpoint_fallback_and_legacy(monkeypatch):
         cast(Any, fake_self), lambda: "direct", "predictor", "step", (), {}
     )
     assert result == "direct"
+
+    monkeypatch.setattr(
+        "dbos.DBOS.run_step",
+        staticmethod(
+            lambda options, body: {
+                agent_module._LLM_CHECKPOINT: True,
+                "output": {"nested": (1, 2)},
+                "output_type": "value",
+            }
+        ),
+    )
+    result = agent_module.DurableAgent._llm_call(
+        cast(Any, fake_self), lambda: "unused", "predictor", "step", (), {}
+    )
+    assert result == {"nested": (1, 2)}
 
     monkeypatch.setattr(
         "dbos.DBOS.run_step",
