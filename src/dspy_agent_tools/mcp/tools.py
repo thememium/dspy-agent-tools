@@ -55,6 +55,11 @@ class MCPTools(list):
         # that this list did not catalogue.
         self.entries: tuple[CatalogEntry, ...] = tuple(entries)
 
+    def recover(self) -> None:
+        """Reconnect every closed server owned by this list."""
+        for connection in self._connections:
+            connection.recover()
+
     def close(self) -> None:
         """Stop every server owned by this list. Safe to call repeatedly."""
         for connection in self._connections:
@@ -153,6 +158,7 @@ def _build_tools(
                 )
             seen_cursors.add(cursor)
         proxy = _SessionProxy(connection)
+        recover = getattr(connection, "recover", None)
         entries: list[CatalogEntry] = []
         for advertised in advertised_tools:
             tool = Tool.from_mcp_tool(
@@ -165,6 +171,8 @@ def _build_tools(
             if _read_only(advertised):
                 func = _retrying(func, timeout=retry_timeout)
             tool = _as_sync_capable(tool, signature, func=func, renames=renames)
+            if recover is not None:
+                vars(tool.func)["__durable_recover__"] = recover
             if name_prefix:
                 tool.name = f"{name_prefix}{tool.name}"
             schema = getattr(advertised, "input_schema", None) or getattr(

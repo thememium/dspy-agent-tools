@@ -124,6 +124,10 @@ class _Connection:
         failures: _HTTPFailures | None = None,
     ) -> None:
         self._label = label
+        self._transport = transport
+        self._client_session = client_session
+        self._startup_timeout = startup_timeout
+        self._failures = failures
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=_run_loop,
@@ -179,6 +183,33 @@ class _Connection:
         except concurrent.futures.TimeoutError:
             future.cancel()
             raise
+
+    def recover(self) -> bool:
+        """Reconnect the session after this object was closed."""
+        if not self._closed and self._session is not None:
+            return True
+        if not self._closed:
+            raise RuntimeError(f"MCP connection {self._label!r} lost its session")
+        self._closed = False
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=_run_loop,
+            args=(self._loop,),
+            name=f"mcp:{self._label}",
+            daemon=True,
+        )
+        self._state = _ServeState(
+            self._transport,
+            self._client_session,
+            concurrent.futures.Future(),
+            self._failures,
+        )
+        self._serve_future = None
+        self._session = None
+        self._thread.start()
+        self._start(startup_timeout=self._startup_timeout)
+        _CONNECTIONS.add(self)
+        return True
 
     def close(self) -> None:
         """Stop the session, the transport, and the loop thread."""
