@@ -33,6 +33,7 @@ from .schedule import Schedule
 from .tool import (
     checkpoint_value,
     is_durable_tool,
+    is_workflow_tool,
     jsonable,
     summarize,
     tool_name,
@@ -211,6 +212,7 @@ class DurableAgent:
         for name, tool in tools.items():
             if (
                 name in _INTERNAL_TOOLS
+                or is_workflow_tool(tool)
                 or is_durable_tool(tool)
                 or is_durable_tool(getattr(tool, "func", None))
                 or getattr(getattr(tool, "func", tool), "__human__", None) is not None
@@ -728,10 +730,20 @@ class Durable:
 
     @classmethod
     def sleep(cls, seconds: float) -> None:
-        """Sleep durably inside a workflow; plain sleep elsewhere."""
-        if in_workflow():
+        """Sleep durably at workflow level; plain sleep elsewhere.
+
+        DBOS only records a durable sleep in a workflow body. Sleeping inside a
+        checkpointed step is rejected because it would create a nested
+        operation and break replay boundaries.
+        """
+        if in_workflow_body():
             load_dbos().DBOS.sleep(seconds)
             return
+        if in_workflow():
+            raise DurableError(
+                "Durable.sleep() must run at workflow level, not inside a "
+                "checkpointed step; move the sleep out of the tool body"
+            )
         import time
 
         time.sleep(seconds)
