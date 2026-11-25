@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import dataclasses
 import functools
 import inspect
@@ -11,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .context import (
+    check_pause,
     emit,
     in_workflow_body,
     next_operation_id,
@@ -61,10 +63,11 @@ def run_coroutine(coro: Any) -> Any:
 
     result: list[Any] = []
     error: list[BaseException] = []
+    context = contextvars.copy_context()
 
     def target() -> None:
         try:
-            result.append(asyncio.run(coro))
+            result.append(context.run(asyncio.run, coro))
         except BaseException as exc:  # noqa: BLE001 - re-raised in the caller
             error.append(exc)
 
@@ -76,13 +79,18 @@ def run_coroutine(coro: Any) -> Any:
     return result[0]
 
 
-def _step_options(name: str, retries: int) -> Any:
+def _step_options(
+    name: str,
+    retries: int,
+    retry_on: Callable[[BaseException], bool] | None = None,
+) -> Any:
     from dbos import StepOptions
 
     return StepOptions(
         name=name,
         retries_allowed=retries > 0,
         max_attempts=retries + 1,
+        should_retry=retry_on,
     )
 
 
@@ -148,6 +156,7 @@ def call_tool(
     *args: Any,
     name: str | None = None,
     retries: int = 0,
+    retry_on: Callable[[BaseException], bool] | None = None,
     **kwargs: Any,
 ) -> Any:
     """Execute *fn*, checkpointing it when a durable workflow is active."""
@@ -156,6 +165,7 @@ def call_tool(
         return run_coroutine(result) if inspect.iscoroutine(result) else result
 
     step_name = name or tool_name(fn)
+    check_pause()
     operation_id = next_operation_id()
     input_data = {"args": args, "kwargs": kwargs}
     emit(
@@ -172,7 +182,7 @@ def call_tool(
                     output = await fn(*args, **kwargs)
                 return {**_tool_checkpoint(step_name, args, kwargs), "output": output}
 
-            result = _run_async_step(step_name, body, retries)
+            result = _run_async_step(step_name, body, retries, retry_on)
         else:
 
             def body() -> Any:
@@ -180,7 +190,7 @@ def call_tool(
                     output = fn(*args, **kwargs)
                 return {**_tool_checkpoint(step_name, args, kwargs), "output": output}
 
-            result = _run_sync_step(step_name, body, retries)
+            result = _run_sync_step(step_name, body, retries, retry_on)
     except BaseException as exc:
         emit(
             EventType.TOOL_FAILED,
@@ -195,16 +205,26 @@ def call_tool(
     return result
 
 
-def _run_sync_step(name: str, body: Callable[[], Any], retries: int) -> Any:
+def _run_sync_step(
+    name: str,
+    body: Callable[[], Any],
+    retries: int,
+    retry_on: Callable[[BaseException], bool] | None = None,
+) -> Any:
     from dbos import DBOS
 
-    return DBOS.run_step(_step_options(name, retries), body)
+    return DBOS.run_step(_step_options(name, retries, retry_on), body)
 
 
-def _run_async_step(name: str, body: Callable[[], Any], retries: int) -> Any:
+def _run_async_step(
+    name: str,
+    body: Callable[[], Any],
+    retries: int,
+    retry_on: Callable[[BaseException], bool] | None = None,
+) -> Any:
     from dbos import DBOS
 
-    return DBOS.run_step(_step_options(name, retries), body)
+    return DBOS.run_step(_step_options(name, retries, retry_on), body)
 
 
 def _wrap_callable(
@@ -212,15 +232,26 @@ def _wrap_callable(
     *,
     name: str | None = None,
     retries: int = 0,
+    retry_on: Callable[[BaseException], bool] | None = None,
+    recover: Callable[..., Any] | None = None,
 ) -> Callable[..., Any]:
     exposed = name or tool_name(fn)
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return call_tool(fn, *args, name=exposed, retries=retries, **kwargs)
+        return call_tool(
+            fn,
+            *args,
+            name=exposed,
+            retries=retries,
+            retry_on=retry_on,
+            **kwargs,
+        )
 
     vars(wrapper)["__durable_tool__"] = True
     vars(wrapper)["__durable_name__"] = exposed
+    if recover is not None:
+        vars(wrapper)["__durable_recover__"] = recover
     return wrapper
 
 
@@ -237,6 +268,8 @@ def wrap_tool(
     *,
     name: str | None = None,
     retries: int = 0,
+    retry_on: Callable[[BaseException], bool] | None = None,
+    recover: Callable[..., Any] | None = None,
     approval: bool | Callable[..., bool] | None = None,
     when: Callable[..., bool] | None = None,
     message: str | None = None,
@@ -253,6 +286,8 @@ def wrap_tool(
         return target
     if is_durable_tool(getattr(target, "func", None)):
         return target
+    if recover is None:
+        recover = getattr(getattr(target, "func", target), "__durable_recover__", None)
 
     from .human import Human
 
@@ -275,6 +310,7 @@ def wrap_tool(
                 *args,
                 name=exposed,
                 retries=0 if not idempotent else retries,
+                retry_on=retry_on,
                 **kwargs,
             )
         )
@@ -297,6 +333,8 @@ def wrap_tool(
 
         result = copy.copy(target)
         result.func = wrapped
+        if recover is not None:
+            vars(result.func)["__durable_recover__"] = recover
         return result
 
     if not callable(target):
@@ -305,7 +343,11 @@ def wrap_tool(
         )
 
     wrapped_fn = _wrap_callable(
-        target, name=exposed, retries=0 if not idempotent else retries
+        target,
+        name=exposed,
+        retries=0 if not idempotent else retries,
+        retry_on=retry_on,
+        recover=recover,
     )
     if policy is not None:
         wrapped_fn = Human(
@@ -315,6 +357,8 @@ def wrap_tool(
             timeout=timeout,
             _already_durable=True,
         )
+        if recover is not None:
+            vars(wrapped_fn)["__durable_recover__"] = recover
     return wrapped_fn
 
 
