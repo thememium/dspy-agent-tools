@@ -30,14 +30,14 @@ dspy-durable = "dspy_agent_tools.durable.cli:main"
 browser = ["dspy>=3.1", "pydoll-python>=3.0.1"]
 # Durable execution. dbos brings dspy because agents need it; plain durable
 # functions and tools work with dbos alone.
-dbos = ["cloudpickle>=3.0.0", "dbos>=3.6.0", "dspy>=3.4.1"]
+dbos = ["cloudpickle>=3.0.0", "dbos>=3.6.0,<3.7", "dspy>=3.4.1"]
 ffmpeg = ["imageio-ffmpeg>=0.8.1"]
 mcp = ["dspy>=3.4.1", "httpx2>=2.10", "mcp>=2"]
 # Every optional bridge in one install. Extras cannot reference each other,
 # so the dependencies are the union of browser, dbos, ffmpeg, and mcp.
 all = [
   "cloudpickle>=3.0.0",
-  "dbos>=3.6.0",
+  "dbos>=3.6.0,<3.7",
   "dspy>=3.4.1",
   "httpx2>=2.10",
   "imageio-ffmpeg>=0.8.1",
@@ -52,7 +52,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
   "bandit>=1.9.4",
-  "dbos>=3.6.0",
+  "dbos>=3.6.0,<3.7",
   "deptry>=0.25.1",
   "dspy>=3.4.1",
   "httpx2>=2.10",

@@ -823,8 +823,8 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "cloudpickle", marker = "extra == 'all'", specifier = ">=3.0.0" },
     { name = "cloudpickle", marker = "extra == 'dbos'", specifier = ">=3.0.0" },
-    { name = "dbos", marker = "extra == 'all'", specifier = ">=3.6.0" },
-    { name = "dbos", marker = "extra == 'dbos'", specifier = ">=3.6.0" },
+    { name = "dbos", marker = "extra == 'all'", specifier = ">=3.6.0,<3.7" },
+    { name = "dbos", marker = "extra == 'dbos'", specifier = ">=3.6.0,<3.7" },
     { name = "ddgs", specifier = ">=9.16.0" },
     { name = "dspy", marker = "extra == 'all'", specifier = ">=3.4.1" },
     { name = "dspy", marker = "extra == 'browser'", specifier = ">=3.1" },
@@ -850,7 +850,7 @@ provides-extras = ["browser", "dbos", "ffmpeg", "mcp", "all"]
 [package.metadata.requires-dev]
 dev = [
     { name = "bandit", specifier = ">=1.9.4" },
-    { name = "dbos", specifier = ">=3.6.0" },
+    { name = "dbos", specifier = ">=3.6.0,<3.7" },
     { name = "deptry", specifier = ">=0.25.1" },
     { name = "dspy", specifier = ">=3.4.1" },
     { name = "httpx2", specifier = ">=2.10" },
