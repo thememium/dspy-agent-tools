@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, overload
 from .context import (
     PENDING_EVENT,
     current_run_id,
+    current_tenant,
     emit,
     in_workflow_body,
     next_human_id,
@@ -71,6 +72,7 @@ def _request(
     return {
         "id": request_id or uuid.uuid4().hex,
         "run_id": run_id or current_run_id() or "",
+        "tenant": current_tenant(),
         "kind": kind,
         "event": str(event),
         "message": message,
@@ -211,13 +213,21 @@ vars(ask_human_approval)["__durable_tool__"] = True
 vars(ask_human_approval)["__durable_name__"] = "ask_human_approval"
 
 
-def _pending(run_id: str | None = None) -> list[ApprovalRequest | QuestionRequest]:
-    """Return outstanding human requests, optionally scoped to one run."""
+def _pending(
+    run_id: str | None = None,
+    *,
+    tenant: str | None = None,
+    limit: int = 500,
+    offset: int = 0,
+) -> list[ApprovalRequest | QuestionRequest]:
+    """Return outstanding human requests, optionally scoped to one run/tenant."""
+    if limit < 1 or offset < 0:
+        raise ValueError("limit must be positive and offset non-negative")
     client = runtime().client()
     if run_id is not None:
         rows = [run_id]
     else:
-        workflows = client.list_workflows(status="PENDING", limit=500)
+        workflows = client.list_workflows(status="PENDING", limit=limit, offset=offset)
         rows = [workflow.workflow_id for workflow in workflows]
     requests: list[ApprovalRequest | QuestionRequest] = []
     for workflow_id in rows:
@@ -229,6 +239,8 @@ def _pending(run_id: str | None = None) -> list[ApprovalRequest | QuestionReques
             )  # pragma: no cover
             continue  # pragma: no cover
         for request in pending or []:
+            if tenant is not None and request.get("tenant") != tenant:
+                continue
             requests.append(_request_object(request, workflow_id))
     return requests
 
@@ -341,6 +353,9 @@ def _wrap_human(
         )
         result = copy.copy(tool)
         result.func = wrapped
+        recover = getattr(tool.func, "__durable_recover__", None)
+        if recover is not None:
+            vars(result.func)["__durable_recover__"] = recover
         return result
 
     if not callable(tool):
