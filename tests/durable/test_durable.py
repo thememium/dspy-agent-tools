@@ -870,3 +870,74 @@ def test_human_tools_wraps_a_collection():
     wrapped = Human.tools([first, second], when=lambda: False)
     assert [item() for item in wrapped] == ["first", "second"]
     assert all(item.__name__ in {"first", "second"} for item in wrapped)
+
+
+def test_tool_keyword_names_do_not_collide_with_wrapper_options():
+    @Durable.tool
+    def identify(name: str, retries: int, retry_on: str) -> tuple[str, int, str]:
+        return name, retries, retry_on
+
+    assert identify(name="Ada", retries=2, retry_on="failure") == ("Ada", 2, "failure")
+
+    @Durable.workflow(name=unique_name("tool-keywords"))
+    def workflow() -> tuple[str, int, str]:
+        return identify(name="Ada", retries=2, retry_on="failure")
+
+    assert workflow() == ("Ada", 2, "failure")
+
+
+def test_factory_recovery_callbacks_belong_to_each_module():
+    callbacks: list[Any] = []
+
+    @Durable.agent(name=unique_name("factory-isolation"))
+    def factory():
+        def recover() -> None:
+            pass
+
+        callbacks.append(recover)
+
+        @Durable.tool(recover=recover)
+        def lookup() -> str:
+            """Look up a value."""
+            return "ok"
+
+        class Module(dspy.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.tools = {"lookup": dspy.Tool(lookup)}
+
+        return Module()
+
+    first = factory._module_for_run()
+    second = factory._module_for_run()
+    assert vars(first)["__durable_recovery_callbacks__"] == [callbacks[-2]]
+    assert vars(second)["__durable_recovery_callbacks__"] == [callbacks[-1]]
+
+
+def test_worker_retries_are_rejected_instead_of_ignored():
+    with pytest.raises(DurableError, match="workflow retries are not supported"):
+        Durable.worker(lambda: None, name=unique_name("worker-retries"), retries=3)
+
+
+def test_dspy_tool_keyword_names_do_not_collide():
+    def identify(name: str, retries: int, retry_on: str) -> str:
+        """Identify an item."""
+        return f"{name}:{retries}:{retry_on}"
+
+    wrapped = Durable.tool(dspy.Tool(identify))
+    assert wrapped(name="Ada", retries=2, retry_on="failure") == "Ada:2:failure"
+
+
+def test_unserializable_tool_result_fails_explicitly():
+    import threading
+
+    @Durable.tool
+    def get_lock() -> Any:
+        return threading.Lock()
+
+    @Durable.workflow(name=unique_name("unserializable-output"))
+    def workflow() -> Any:
+        return get_lock()
+
+    with pytest.raises(Exception, match="cannot serialize"):
+        workflow()

@@ -951,6 +951,8 @@ def test_tenant_scoped_pending_and_authorizer(monkeypatch):
 
     with pytest.raises(PermissionError):
         Run(run.id, tenant="beta").respond(request.id, "wrong")
+    with pytest.raises(DurableExecutionError, match="not pending"):
+        Run(run.id, tenant="alpha").respond("unknown", "wrong")
     run.respond(request.id, "alpha")
     assert run.result() == "alpha"
     assert ("respond", "alpha") in calls
@@ -1003,7 +1005,9 @@ def test_run_control_helpers(monkeypatch):
     monkeypatch.setattr(Run, "_client", lambda self: DurableFake())
     with pytest.raises(DurableExecutionError):
         Run("x").result()
-    assert Run("x").pending() == []
+    monkeypatch.setattr(Run, "_client", lambda self: Fake())
+    with pytest.raises(ValueError, match="missing"):
+        Run("x").pending()
 
     class CancelFake(Fake):
         def cancel_workflow(self, _run_id: str) -> None:
@@ -1184,7 +1188,8 @@ def test_summarize_and_checkpoint_value():
 
     assert tool_module.summarize(Broken()) == "<Broken>"
     lock = threading.Lock()
-    assert tool_module.checkpoint_value({"lock": lock}) == {"lock": "<lock>"}
+    with pytest.raises(DurableError, match="cannot serialize"):
+        tool_module.checkpoint_value({"lock": lock})
     assert tool_module.checkpoint_value({"value": 1}) == {"value": 1}
 
 
@@ -1346,3 +1351,25 @@ def test_write_event_skips_existing(monkeypatch):
 
 def test_set_workflow_event_outside_workflow_is_noop():
     assert context.set_workflow_event("agent.input", {"question": "?"}) is None
+
+
+def test_prediction_checkpoint_preserves_completions_and_field_types(monkeypatch):
+    from dspy_agent_tools.durable.serializer import _dumps, _loads
+
+    monkeypatch.setattr(agent_module, "in_workflow_body", lambda: True)
+    monkeypatch.setattr(agent_module, "next_operation_id", lambda: "op")
+    monkeypatch.setattr(
+        "dbos.DBOS.run_step",
+        staticmethod(lambda options, body: _loads(_dumps(body()))),
+    )
+    prediction = dspy.Prediction.from_completions({"answer": [(1, 2), (3, 4)]})
+    result = agent_module.DurableAgent._llm_call(
+        cast(Any, SimpleNamespace(retries=0)),
+        lambda: prediction,
+        "predictor",
+        "step",
+        (),
+        {},
+    )
+    assert result.answer == (1, 2)
+    assert result.completions.answer == [(1, 2), (3, 4)]
