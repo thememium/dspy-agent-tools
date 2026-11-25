@@ -15,10 +15,12 @@ from .exceptions import NotInWorkflow
 
 EVENTS_STREAM = "events"
 PENDING_EVENT = "human.pending"
+CONTROL_TOPIC = "durable.control"
 _STATE: ContextVar[WorkflowState | None] = ContextVar(
     "durable_workflow_state", default=None
 )
 _OPERATION_ID: ContextVar[str | None] = ContextVar("durable_operation_id", default=None)
+_FACADE_AGENT: ContextVar[str | None] = ContextVar("durable_facade_agent", default=None)
 
 
 @dataclass
@@ -27,6 +29,8 @@ class WorkflowState:
 
     agent_name: str
     run_id: str
+    tenant: str | None = None
+    paused: bool = False
     human_seq: int = 0
     operation_seq: int = 0
     event_seq: int = 0
@@ -139,12 +143,14 @@ def current_operation_id() -> str | None:
 
 
 @contextmanager
-def workflow_state(agent_name: str) -> Generator[WorkflowState]:
+def workflow_state(
+    agent_name: str, tenant: str | None = None
+) -> Generator[WorkflowState]:
     """Install per-run state for the duration of a workflow body."""
     run_id = current_run_id()
     if run_id is None:
         raise NotInWorkflow("workflow state requires a DBOS workflow")
-    state = WorkflowState(agent_name=agent_name, run_id=run_id)
+    state = WorkflowState(agent_name=agent_name, run_id=run_id, tenant=tenant)
     token = _STATE.set(state)
     try:
         yield state
@@ -158,6 +164,61 @@ def state() -> WorkflowState:
     if current is None:
         raise NotInWorkflow("no durable workflow is active")
     return current
+
+
+def current_tenant() -> str | None:
+    """Return the tenant attached to the current workflow, if any."""
+    current = _STATE.get()
+    return None if current is None else current.tenant
+
+
+def check_pause() -> None:
+    """Pause at a safe boundary until a resume message arrives.
+
+    DBOS has no native pause, so the workflow consumes a control message before
+    its next checkpoint. The pause and resume messages are durable, so a crash
+    while paused resumes the wait on replay.
+    """
+    current = _STATE.get()
+    if current is None or not in_workflow_body():
+        return
+    from ._dbos import load_dbos
+
+    dbos = load_dbos().DBOS
+    if not current.paused:
+        message = dbos.recv(CONTROL_TOPIC, timeout_seconds=0)
+        if not (isinstance(message, dict) and message.get("control") == "pause"):
+            return
+        current.paused = True
+        emit(EventType.RUN_PAUSED, agent=current.agent_name)
+    while True:
+        message = dbos.recv(CONTROL_TOPIC, timeout_seconds=86_400)
+        if isinstance(message, dict) and message.get("control") == "resume":
+            current.paused = False
+            emit(EventType.RUN_RESUMED, agent=current.agent_name)
+            return
+
+
+async def check_pause_async() -> None:
+    """Async version of :func:`check_pause` for async workflow bodies."""
+    current = _STATE.get()
+    if current is None or not in_workflow_body():
+        return
+    from ._dbos import load_dbos
+
+    dbos = load_dbos().DBOS
+    if not current.paused:
+        message = await dbos.recv_async(CONTROL_TOPIC, timeout_seconds=0)
+        if not (isinstance(message, dict) and message.get("control") == "pause"):
+            return
+        current.paused = True
+        emit(EventType.RUN_PAUSED, agent=current.agent_name)
+    while True:
+        message = await dbos.recv_async(CONTROL_TOPIC, timeout_seconds=86_400)
+        if isinstance(message, dict) and message.get("control") == "resume":
+            current.paused = False
+            emit(EventType.RUN_RESUMED, agent=current.agent_name)
+            return
 
 
 def next_operation_id() -> str:
@@ -182,6 +243,21 @@ def operation_scope(operation_id: str) -> Generator[str]:
         yield operation_id
     finally:
         _OPERATION_ID.reset(token)
+
+
+def current_facade_agent() -> str | None:
+    """Return the durable agent whose RLM sandbox is executing, if any."""
+    return _FACADE_AGENT.get()
+
+
+@contextmanager
+def facade_agent_scope(agent_name: str) -> Generator[str]:
+    """Mark sandbox facade calls made during one durable agent execution."""
+    token = _FACADE_AGENT.set(agent_name)
+    try:
+        yield agent_name
+    finally:
+        _FACADE_AGENT.reset(token)
 
 
 def emit(event_type: EventType | str, **data: Any) -> Event | None:
