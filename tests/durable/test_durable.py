@@ -20,6 +20,7 @@ from dspy_agent_tools import (
     Patch,
     QuestionRequest,
     Run,
+    Toolbox,
     Worker,
 )
 from dspy_agent_tools.durable import human as human_module
@@ -150,6 +151,35 @@ def test_rlm_prepare_forwards_newer_signature():
     tools = module._prepare_execution_tools(None, False)
     assert calls == [False]
     assert tools["llm_query"].__durable_tool__ is True
+
+
+def test_rlm_batched_queries_checkpoint_each_prompt():
+    class FakeRLM(dspy.Module):
+        def __init__(self) -> None:
+            super().__init__()
+
+        def _prepare_execution_tools(self, budget: Any = None) -> dict[str, Any]:
+            return {
+                "llm_query": lambda prompt: f"echo:{prompt}",
+                "llm_query_batched": lambda prompts: list(prompts),
+            }
+
+    fake = FakeRLM()
+    Durable(fake, name=unique_name("batched-rlm"))
+    assert fake._prepare_execution_tools()["llm_query_batched"](["outside"]) == [
+        "outside"
+    ]
+
+    @Durable.workflow(name=unique_name("batched-run"))
+    def main() -> list[str]:
+        tools = fake._prepare_execution_tools()
+        return tools["llm_query_batched"](["one", "two"])
+
+    run = main.start()
+    assert run.result() == ["one", "two"]
+    names = [step["function_name"] for step in run.steps()]
+    assert any(name.endswith("llm_query_batched:0") for name in names)
+    assert any(name.endswith("llm_query_batched:1") for name in names)
 
 
 def test_patch_accepts_durable_rlm_and_reinstruments():
@@ -404,6 +434,111 @@ def test_operation_id_is_stable_inside_a_step():
     assert seen[0].startswith(run.id)
 
 
+def test_start_and_enqueue_control_options():
+    workflow_id = unique_name("explicit-run")
+
+    @Durable.workflow(name=unique_name("control"), version="v2")
+    def echo(*, value: int) -> int:
+        return value
+
+    assert echo.version == "v2"
+    run = echo.start(workflow_id=workflow_id, timeout=5, value=1)
+    assert run.id == workflow_id
+    assert run.result() == 1
+
+    @Durable.worker(name=unique_name("delayed"), queue=unique_name("delay-queue"))
+    def delayed(*, value: int) -> int:
+        return value
+
+    queued = delayed.enqueue(
+        workflow_id=unique_name("delayed-run"),
+        delay=60,
+        timeout=5,
+        value=2,
+    )
+    assert queued.status() == "DELAYED"
+    queued.cancel()
+
+    dspy.configure(lm=KeyedLM(DIRECT_ANSWERS))
+    agent = Durable(
+        dspy.Predict("question -> answer"),
+        name=unique_name("queued-agent"),
+        queue=unique_name("agent-queue"),
+    )
+    assert (
+        agent.start(
+            workflow_id=unique_name("agent-start"),
+            timeout=5,
+            question="?",
+        )
+        .result()
+        .answer
+        == "Sunny in Paris"
+    )
+    agent_run = agent.enqueue(
+        delay=60,
+        timeout=5,
+        workflow_id=unique_name("queued-agent-run"),
+        question="?",
+    )
+    assert agent_run.status() == "DELAYED"
+    agent_run.cancel()
+
+
+def test_pause_and_resume_at_boundary():
+    import time
+
+    @Durable.workflow(name=unique_name("pausable"))
+    def main() -> str:
+        Durable.sleep(0.2)
+        Durable.pause_point()
+        return "ok"
+
+    run = main.start()
+    run.pause()
+    time.sleep(0.4)
+    assert run.is_active()
+    run.resume()
+    assert run.result(timeout=10) == "ok"
+    types = [event.type for event in run.events()]
+    assert EventType.RUN_PAUSED in types
+    assert EventType.RUN_RESUMED in types
+
+
+def test_run_timeout_and_list_runs():
+    timeout_name = unique_name("timeout")
+
+    @Durable.workflow(name=timeout_name)
+    def blocked() -> str:
+        return Human.ask("blocked?")
+
+    run = blocked.start()
+    request = wait_for_pending(run)[0]
+    with pytest.raises(TimeoutError, match="did not finish"):
+        run.result(timeout=0.01)
+    run.respond(request.id, "done")
+    assert run.result() == "done"
+
+    runs = Durable.list_runs(name=f"dspy-agent:fn:{timeout_name}", limit=10)
+    assert any(item.id == run.id for item in runs)
+
+
+def test_async_predictor_is_checkpointed_in_async_workflow():
+    dspy.configure(lm=KeyedLM(DIRECT_ANSWERS))
+    module = dspy.Predict("question -> answer")
+    agent = Durable(module, name=unique_name("async-predictor"))
+    name = unique_name("async-workflow")
+
+    @Durable.workflow(name=name)
+    async def main(*, question: str) -> Any:
+        return await module.acall(question=question)
+
+    run = main.start(question="?")
+    assert run.result().answer == "Sunny in Paris"
+    names = [step["function_name"] for step in run.steps()]
+    assert any(item.startswith(f"{agent.name}:llm:") for item in names)
+
+
 def test_worker_runs_and_exposes_tools():
     @Durable.worker(name=unique_name("worker"))
     def add(a: int, b: int) -> int:
@@ -423,6 +558,173 @@ def test_worker_runs_and_exposes_tools():
     }
     listed = next(tool for tool in tools if tool.name == "list_workers")
     assert listed() == [worker.name]
+
+
+def test_agent_factory_builds_a_fresh_module_per_run():
+    calls: list[int] = []
+
+    @Durable.agent(name=unique_name("factory"), version="v1")
+    def make_agent():
+        calls.append(1)
+        return dspy.Predict("question -> answer")
+
+    assert len(calls) == 1
+    assert make_agent.version == "v1"
+    dspy.configure(lm=KeyedLM(DIRECT_ANSWERS))
+    assert make_agent(question="?").answer == "Sunny in Paris"
+    assert len(calls) == 2
+
+
+def test_agent_factory_validation_and_recovery_list():
+    from dspy_agent_tools import DurableAgent
+
+    with pytest.raises(TypeError, match="requires"):
+        DurableAgent()
+    with pytest.raises(TypeError, match="either"):
+        DurableAgent(
+            dspy.Predict("question -> answer"),
+            factory=lambda: dspy.Predict("question -> answer"),
+        )
+    with pytest.raises(TypeError, match="expected a dspy.Module"):
+        Durable.agent(name=unique_name("bad-factory"))(lambda: 42)
+
+    recovered: list[int] = []
+    callback = lambda: recovered.append(1)
+
+    @Durable.agent(name=unique_name("factory-recover"), recover=[callback])
+    def make_agent():
+        return dspy.Predict("question -> answer")
+
+    dspy.configure(lm=KeyedLM(DIRECT_ANSWERS))
+    assert make_agent(question="?").answer == "Sunny in Paris"
+    assert recovered == [1]
+
+
+def test_toolbox_dispatches_the_actual_tool():
+    calls: list[tuple[int, int]] = []
+
+    def add(a: int, b: int) -> int:
+        """Add two numbers."""
+        calls.append((a, b))
+        return a + b
+
+    toolbox = Toolbox([add], mode="search")
+    call_tool = next(tool for tool in toolbox if tool.name == "call_tool")
+
+    class Dispatch(dspy.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tools = {"call_tool": call_tool}
+
+        def forward(self, question: str) -> int:
+            with pytest.raises(ValueError, match="Unknown tool"):
+                self.tools["call_tool"](name="missing")
+            return self.tools["call_tool"](name="ADD", arguments={"a": 2, "b": 3})
+
+    agent = Durable(Dispatch(), name=unique_name("toolbox"))
+    run = agent.start(question="?")
+    assert run.result() == 5
+    assert calls == [(2, 3)]
+    names = [step["function_name"] for step in run.steps()]
+    assert "add" in names
+    assert "call_tool" not in names
+
+
+def test_agent_factory_can_fail_after_registration():
+    calls: list[int] = []
+
+    def factory():
+        calls.append(1)
+        return dspy.Predict("question -> answer") if len(calls) == 1 else 42
+
+    agent = Durable.agent(name=unique_name("bad-later"))(factory)
+    with pytest.raises(DurableError, match="factory returned"):
+        agent(question="?")
+
+
+def test_rlm_prepare_skips_missing_and_durable_helpers():
+    durable = Durable.tool(lambda prompt: prompt)
+
+    class FakeRLM(dspy.Module):
+        def _prepare_execution_tools(self, budget: Any = None) -> dict[str, Any]:
+            return {"llm_query": durable, "llm_query_batched": None}
+
+    fake = FakeRLM()
+    Durable(fake, name=unique_name("prepare-skip"))
+    tools = fake._prepare_execution_tools()
+    assert tools == {"llm_query": durable, "llm_query_batched": None}
+
+
+def test_toolbox_dispatch_preserves_wrapped_targets():
+    def human_target() -> str:
+        """Human target."""
+        return "human"
+
+    def durable_target() -> str:
+        """Durable target."""
+        return "durable"
+
+    toolbox = Toolbox(
+        [
+            Human(human_target, when=lambda: False),
+            Durable.tool(durable_target),
+        ],
+        mode="search",
+    )
+    call_tool = next(tool for tool in toolbox if tool.name == "call_tool")
+
+    class Dispatch(dspy.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tools = {"call_tool": call_tool}
+
+        def forward(self, question: str) -> list[str]:
+            return [
+                self.tools["call_tool"](name="human_target", arguments={}),
+                self.tools["call_tool"](name="durable_target", arguments={}),
+            ]
+
+    agent = Durable(Dispatch(), name=unique_name("toolbox-wrapped"))
+    assert agent(question="?") == ["human", "durable"]
+
+
+def test_tool_retry_classifier_controls_attempts():
+    attempts: list[int] = []
+
+    @Durable.tool(retries=2, retry_on=lambda exc: isinstance(exc, ValueError))
+    def flaky() -> str:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise ValueError("retry me")
+        return "ok"
+
+    @Durable.workflow(name=unique_name("retry-classifier"))
+    def main() -> str:
+        return flaky()
+
+    assert main() == "ok"
+    assert len(attempts) == 2
+
+
+def test_tool_recovery_hook_runs_at_workflow_start():
+    recovered: list[int] = []
+
+    @Durable.tool(recover=lambda: recovered.append(1))
+    def lookup() -> str:
+        """Look up a value."""
+        return "ok"
+
+    class Module(dspy.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tools = {"lookup": dspy.Tool(lookup)}
+
+        def forward(self, question: str) -> str:
+            return self.tools["lookup"]()
+
+    agent = Durable(Module(), name=unique_name("recovery-hook"))
+    assert agent(question="?") == "ok"
+    assert recovered == [1]
 
 
 def test_worker_tools_start_child_workflow_from_agent():

@@ -31,7 +31,17 @@ CRASHED = HERE / "crashed"
 
 # Keyed by the iteration field so replay generates the same Python again.
 ANSWERS = {
-    "1/4": {"reasoning": "seed", "code": "seed = seed_tool()\nprint(seed)"},
+    "1/4": {
+        "reasoning": "seed",
+        "code": (
+            'q = "subagent" + "-question"\n'
+            'sub = dspy.Predict("question -> answer")\n'
+            "answer = sub(question=q)\n"
+            "seed = seed_tool()\n"
+            "print(answer.answer, seed)"
+        ),
+    },
+    "subagent-question": {"answer": "sub-answer"},
     "2/4": {"reasoning": "crash", "code": "print(seed)\ncrash_tool(seed)"},
     "3/4": {
         "reasoning": "submit",

@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import logging
 import pickle
+import sys
 import threading
 from types import SimpleNamespace
 from typing import Any, cast
@@ -19,10 +20,12 @@ import dspy_agent_tools.durable.human as human_module
 import dspy_agent_tools.durable.runtime as runtime_module
 from dspy_agent_tools import (
     ApprovalRequest,
+    BrowserSession,
     Durable,
     Event,
     EventType,
     Human,
+    MCPTools,
     QuestionRequest,
     Run,
     Schedule,
@@ -666,6 +669,293 @@ def test_human_in_workflow_and_timeout():
         timed()
 
 
+def test_browser_and_mcp_recovery_hooks(monkeypatch):
+    browser = BrowserSession()
+    started: list[int] = []
+    monkeypatch.setattr(browser, "_get_tab", lambda: started.append(1))
+    assert browser.recover()["status"] == "ok"
+    assert started == [1]
+
+    recovered: list[int] = []
+
+    class Connection:
+        def recover(self) -> None:
+            recovered.append(1)
+
+    tools = MCPTools([], [Connection()])
+    tools.recover()
+    assert recovered == [1]
+
+
+def test_facade_call_passes_through_outside_workflow(monkeypatch):
+    from dspy.primitives import facade
+
+    monkeypatch.setattr(
+        facade.FacadeInvocation,
+        "call",
+        lambda invocation, handle, inputs=None: "original",
+    )
+
+    class FakeRLM(dspy.Module):
+        def _prepare_execution_tools(self, budget: Any = None) -> dict[str, Any]:
+            return {}
+
+    Durable(FakeRLM(), name=unique_name("facade-pass"))
+    assert (
+        facade.FacadeInvocation.call(cast(Any, SimpleNamespace()), "handle")
+        == "original"
+    )
+    assert getattr(facade.FacadeInvocation.call, "__durable_patched__", False)
+
+    monkeypatch.setattr(agent_module, "current_facade_agent", lambda: "agent")
+    monkeypatch.setattr(agent_module, "in_workflow_body", lambda: True)
+    instrumented: list[Any] = []
+    fake_agent = SimpleNamespace(_instrument=instrumented.append)
+    monkeypatch.setattr(agent_module, "_agent_for_name", lambda name: fake_agent)
+    invocation = SimpleNamespace(_predictors={"handle": "predictor"})
+    assert facade.FacadeInvocation.call(cast(Any, invocation), "handle") == "original"
+    assert instrumented == ["predictor"]
+
+
+def test_durable_private_helpers_and_schedules(monkeypatch):
+    callback = lambda: None
+    assert agent_module._callbacks(callback) == [callback]
+    assert context.current_facade_agent() is None
+    asyncio.run(context.check_pause_async())
+
+    class Client:
+        def list_schedules(self, **filters: Any) -> list[dict[str, Any]]:
+            return [{"schedule_name": "nightly", **filters}]
+
+    monkeypatch.setattr(runtime_module.runtime(), "client", lambda: Client())
+    assert Durable.list_schedules(status="ACTIVE") == [
+        {"schedule_name": "nightly", "status": "ACTIVE"}
+    ]
+    asyncio.run(Durable.pause_point_async())
+
+
+def test_async_llm_checkpoint_branches(monkeypatch):
+    from dbos import DBOS
+
+    async def no_pause() -> None:
+        return None
+
+    monkeypatch.setattr(agent_module, "check_pause_async", no_pause)
+    monkeypatch.setattr(agent_module, "next_operation_id", lambda: "op")
+    monkeypatch.setattr(agent_module, "emit", lambda *args, **kwargs: None)
+    dspy.configure(lm=None)
+    fake = cast(Any, SimpleNamespace(retries=0, retry_on=None))
+
+    async def value() -> str:
+        return "value"
+
+    monkeypatch.setattr(agent_module, "in_workflow_body", lambda: False)
+    assert (
+        asyncio.run(
+            agent_module.DurableAgent._llm_call_async(fake, value, "p", "s", (), {})
+        )
+        == "value"
+    )
+
+    monkeypatch.setattr(agent_module, "in_workflow_body", lambda: True)
+
+    async def run_body(_options: Any, body: Any) -> Any:
+        return await body()
+
+    monkeypatch.setattr(DBOS, "run_step_async", staticmethod(run_body))
+    assert (
+        asyncio.run(
+            agent_module.DurableAgent._llm_call_async(fake, value, "p", "s", (), {})
+        )
+        == "value"
+    )
+
+    async def prediction(_options: Any, _body: Any) -> dict[str, Any]:
+        return {
+            agent_module._LLM_CHECKPOINT: True,
+            "output": {"answer": "ok"},
+            "output_type": "prediction",
+            "usage": {"tokens": 1},
+            "llm": [],
+        }
+
+    monkeypatch.setattr(DBOS, "run_step_async", staticmethod(prediction))
+    predicted = asyncio.run(
+        agent_module.DurableAgent._llm_call_async(fake, value, "p", "s", (), {})
+    )
+    assert predicted.answer == "ok"
+
+    async def legacy(_options: Any, _body: Any) -> str:
+        return "legacy"
+
+    monkeypatch.setattr(DBOS, "run_step_async", staticmethod(legacy))
+    assert (
+        asyncio.run(
+            agent_module.DurableAgent._llm_call_async(fake, value, "p", "s", (), {})
+        )
+        == "legacy"
+    )
+
+    async def failed(_options: Any, _body: Any) -> Any:
+        raise ValueError("boom")
+
+    monkeypatch.setattr(DBOS, "run_step_async", staticmethod(failed))
+    with pytest.raises(ValueError, match="boom"):
+        asyncio.run(
+            agent_module.DurableAgent._llm_call_async(fake, value, "p", "s", (), {})
+        )
+
+
+def test_async_pause_branches(monkeypatch):
+    from dspy_agent_tools.durable import context as context_module
+
+    messages = [
+        None,
+        {"control": "resume"},
+        {"control": "pause"},
+        {"control": "resume"},
+    ]
+
+    class DBOS:
+        async def recv_async(self, *_args: Any, **_kwargs: Any) -> Any:
+            return messages.pop(0)
+
+    events: list[Any] = []
+    monkeypatch.setattr(
+        "dspy_agent_tools.durable._dbos.load_dbos",
+        lambda: SimpleNamespace(DBOS=DBOS()),
+    )
+    monkeypatch.setattr(context_module, "in_workflow_body", lambda: True)
+    monkeypatch.setattr(
+        context_module, "emit", lambda event, **data: events.append(event)
+    )
+    state = context_module.WorkflowState("agent", "run")
+    token = context_module._STATE.set(state)
+    try:
+        asyncio.run(context_module.check_pause_async())
+        state.paused = True
+        asyncio.run(context_module.check_pause_async())
+        state.paused = False
+        asyncio.run(context_module.check_pause_async())
+    finally:
+        context_module._STATE.reset(token)
+    assert EventType.RUN_PAUSED in events
+    assert EventType.RUN_RESUMED in events
+
+
+def test_human_recovery_marker_and_limit(monkeypatch):
+    recover = lambda: None
+
+    def lookup() -> str:
+        """Look up."""
+        return "ok"
+
+    vars(lookup)["__durable_recover__"] = recover
+    wrapped = Human(dspy.Tool(lookup))
+    assert getattr(wrapped.func, "__durable_recover__", None) is recover
+    with pytest.raises(ValueError, match="limit"):
+        Human.pending(limit=0)
+
+
+def test_tool_recovery_markers():
+    recover = lambda: None
+
+    def lookup() -> str:
+        """Look up."""
+        return "ok"
+
+    vars(lookup)["__durable_recover__"] = recover
+    wrapped = Durable.tool(dspy.Tool(lookup))
+    assert getattr(wrapped.func, "__durable_recover__", None) is recover
+    guarded = Durable.tool(lookup, approval=True, recover=recover)
+    assert getattr(guarded, "__durable_recover__", None) is recover
+
+
+def test_run_pause_without_control_and_missing_request(monkeypatch):
+    class Client:
+        def retrieve_workflow(self, _run_id: str) -> Any:
+            raise ValueError("missing")
+
+    monkeypatch.setattr(Run, "_client", lambda self: Client())
+    with pytest.raises(DurableExecutionError, match="control"):
+        Run("x").pause()
+    monkeypatch.setattr(Run, "pending", lambda self: [])
+    assert Run("x")._request_payload("missing") is None
+
+
+def test_worker_schedule_name_for_versioned_agent():
+    from dspy_agent_tools.durable.worker import _scheduled_workflow_name
+
+    agent = Durable(_module(), name=unique_name("versioned-agent"), version="v2")
+    assert _scheduled_workflow_name(agent) == f"dspy-agent:{agent.name}@v2:scheduled"
+    assert agent_module._agent_for_name(agent.name) is agent
+    assert agent_module._agent_for_name("missing-agent") is None
+    plain = Durable(_module(), name=unique_name("plain-agent"))
+    assert agent_module._agent_for_name(plain.name) is plain
+
+
+def test_speculation_is_disabled_for_durable_rlm(monkeypatch):
+    calls: list[Any] = []
+
+    class Hooks:
+        @staticmethod
+        def disable_rlm_speculation(module: Any) -> None:
+            calls.append(module)
+
+    monkeypatch.setitem(sys.modules, "dspy_rlm_hooks", Hooks)
+
+    class FakeRLM(dspy.Module):
+        def _prepare_execution_tools(self, budget: Any = None) -> dict[str, Any]:
+            return {}
+
+    fake = FakeRLM()
+    Durable(fake, name=unique_name("spec-guard"))
+    assert calls == [fake]
+
+    monkeypatch.setitem(sys.modules, "dspy_rlm_hooks", object())
+    Durable(FakeRLM(), name=unique_name("spec-no-disable"))
+
+    class Raising:
+        @staticmethod
+        def disable_rlm_speculation(module: Any) -> None:
+            raise RuntimeError("not installed")
+
+    monkeypatch.setitem(sys.modules, "dspy_rlm_hooks", Raising)
+    Durable(FakeRLM(), name=unique_name("spec-raise"))
+
+
+def test_tenant_scoped_pending_and_authorizer(monkeypatch):
+    from dataclasses import replace
+
+    calls: list[tuple[str, str | None]] = []
+
+    def authorizer(action: str, run_id: str, tenant: str | None, request: Any) -> bool:
+        calls.append((action, tenant))
+        return tenant == "alpha"
+
+    monkeypatch.setattr(
+        runtime_module.runtime(),
+        "config",
+        replace(runtime_module.runtime().config, authorizer=authorizer),
+    )
+
+    asker = DurableFunction(
+        lambda: Human.ask("Which tenant?"),
+        name=unique_name("tenant-ask"),
+        tenant="alpha",
+    )
+    run = asker.start()
+    request = wait_for_pending(run)[0]
+    assert [item.id for item in Human.pending(tenant="alpha")] == [request.id]
+    assert Human.pending(tenant="beta") == []
+
+    with pytest.raises(PermissionError):
+        Run(run.id, tenant="beta").respond(request.id, "wrong")
+    run.respond(request.id, "alpha")
+    assert run.result() == "alpha"
+    assert ("respond", "alpha") in calls
+
+
 def test_recovery_exhausted_run_is_terminal(monkeypatch):
     monkeypatch.setattr(Run, "status", lambda self: "MAX_RECOVERY_ATTEMPTS_EXCEEDED")
     assert Run("x").is_active() is False
@@ -734,6 +1024,20 @@ def test_run_control_helpers(monkeypatch):
     assert Run("x").resume().id == "x"
 
 
+def test_run_fork_and_retry(monkeypatch):
+    class Client:
+        def fork_workflow(self, run_id: str, start_step: int, **kwargs: Any) -> Any:
+            assert (run_id, start_step) == ("parent", 2)
+            return SimpleNamespace(get_workflow_id=lambda: "child")
+
+        def resume_workflow(self, run_id: str) -> None:
+            return None
+
+    monkeypatch.setattr(Run, "_client", lambda self: Client())
+    assert Run("parent").fork(2).id == "child"
+    assert Run("parent").retry().id == "parent"
+
+
 def test_run_async_events():
     dspy.configure(lm=KeyedLM(DIRECT_ANSWERS))
     agent = Durable(_module(), name=unique_name("events"))
@@ -747,9 +1051,17 @@ def test_run_async_events():
     assert list(run)
 
 
-def test_schedule_repr():
+def test_schedule_repr_and_backfill(monkeypatch):
     assert "nightly" in repr(Schedule("nightly"))
     assert Schedule.get("nightly").name == "nightly"
+
+    class Client:
+        def backfill_schedule(self, name: str, start: Any, end: Any) -> list[Any]:
+            assert name == "nightly"
+            return [SimpleNamespace(get_workflow_id=lambda: "backfilled")]
+
+    monkeypatch.setattr(Schedule, "_client", lambda self: Client())
+    assert [run.id for run in Schedule("nightly").backfill(1, 2)] == ["backfilled"]
 
 
 def test_worker_variants_and_tools(monkeypatch):

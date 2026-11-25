@@ -66,7 +66,8 @@ def test_rlm_crash_recovery_reconstructs_interpreter_state(tmp_path: Path):
     app = f"rlm-{uuid.uuid4().hex[:10]}"
     first = _run("rlm_recovery_app.py", "first", tmp_path, app)
     assert first.returncode == 17, first.stderr
-    assert len(_lines(tmp_path / "lm_calls.txt")) == 2
+    # Two action predictions and one sandbox sub-agent prediction.
+    assert len(_lines(tmp_path / "lm_calls.txt")) == 3
     assert _lines(tmp_path / "seed_calls.txt") == ["seed"]
     assert _lines(tmp_path / "crash_calls.txt") == ["crash:seed-value"]
 
@@ -74,9 +75,9 @@ def test_rlm_crash_recovery_reconstructs_interpreter_state(tmp_path: Path):
     assert recovered.returncode == 0, recovered.stderr
     assert "seed-value" in recovered.stdout
 
-    # Both action predictions before the crash were checkpointed. Only the
+    # Replay reused both action steps and the sandbox sub-agent step. Only the
     # third action (SUBMIT) ran in the recovery process.
-    assert len(_lines(tmp_path / "lm_calls.txt")) == 3
+    assert len(_lines(tmp_path / "lm_calls.txt")) == 4
     # The completed seed tool was replayed, not called again.
     assert _lines(tmp_path / "seed_calls.txt") == ["seed"]
     # The crash tool ran before its checkpoint both times, so it is the one
