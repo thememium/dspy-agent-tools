@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import AsyncGenerator, Generator, Iterator
 from typing import Any
 
-from .context import EVENTS_STREAM, PENDING_EVENT
+from .context import CONTROL_TOPIC, EVENTS_STREAM, PENDING_EVENT
 from .events import ApprovalRequest, Event, QuestionRequest, event_from_payload
 from .exceptions import DurableExecutionError
 from .runtime import runtime
@@ -30,14 +32,21 @@ class Run:
         >>> run.result().answer
     """
 
-    def __init__(self, run_id: str, *, agent: str | None = None) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        *,
+        agent: str | None = None,
+        tenant: str | None = None,
+    ) -> None:
         self.id = run_id
         self.agent = agent
+        self.tenant = tenant
 
     @classmethod
-    def get(cls, run_id: str) -> Run:
+    def get(cls, run_id: str, *, tenant: str | None = None) -> Run:
         """Reconnect to a run from this or another process."""
-        return cls(run_id)
+        return cls(run_id, tenant=tenant)
 
     def __repr__(self) -> str:
         return f"Run(id={self.id!r}, agent={self.agent!r})"
@@ -56,8 +65,16 @@ class Run:
         """Whether the run may still make progress."""
         return self.status() in ACTIVE_STATUSES
 
-    def result(self) -> Any:
+    def result(self, *, timeout: float | None = None) -> Any:
         """Block until the run finishes and return its prediction or value."""
+        if timeout is not None:
+            deadline = time.monotonic() + timeout
+            while self.is_active():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"run {self.id} did not finish within {timeout:g}s"
+                    )
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         try:
             return self._client().retrieve_workflow(self.id).get_result()
         except DurableExecutionError:
@@ -68,6 +85,10 @@ class Run:
                 f"the recorded failure could not be restored ({exc}); "
                 "inspect run.steps() for the failing operation",
             ) from exc
+
+    async def aresult(self, *, timeout: float | None = None) -> Any:
+        """Async variant of :meth:`result`."""
+        return await asyncio.to_thread(lambda: self.result(timeout=timeout))
 
     def cancel(self) -> None:
         """Cancel the run and wake any human wait it is blocked on.
@@ -88,10 +109,98 @@ class Run:
             except Exception:  # noqa: BLE001 - the run is already cancelled
                 logger.debug("could not wake human request %s", request.id)
 
-    def resume(self) -> Run:
-        """Resume a cancelled or interrupted run."""
-        self._client().resume_workflow(self.id)
+    def pause(self) -> Run:
+        """Pause at the next checkpoint boundary."""
+        if not self._send_control("pause"):
+            raise DurableExecutionError(self.id, "control messages are unavailable")
         return self
+
+    def resume(self) -> Run:
+        """Resume a paused, cancelled, or interrupted run."""
+        self._send_control("resume")
+        try:
+            status = self.status()
+        except DurableExecutionError:
+            status = None
+        if status in (None, "CANCELLED", "MAX_RECOVERY_ATTEMPTS_EXCEEDED"):
+            self._client().resume_workflow(self.id)
+        return self
+
+    def _send_control(self, control: str) -> bool:
+        send = getattr(self._client(), "send", None)
+        if not callable(send):
+            return False
+        send(
+            self.id,
+            {"control": control},
+            topic=CONTROL_TOPIC,
+            idempotency_key=f"{self.id}:{control}:{time.time_ns()}",
+        )
+        return True
+
+    def _authorize(self, action: str, request: dict[str, Any] | None) -> None:
+        authorizer = getattr(runtime().config, "authorizer", None)
+        if authorizer is None:
+            return
+        tenant = self.tenant or (request or {}).get("tenant")
+        if not authorizer(action, self.id, tenant, request):
+            raise PermissionError(f"{action} is not authorized for run {self.id!r}")
+
+    def _request_payload(self, request_id: str) -> dict[str, Any] | None:
+        for request in self.pending():
+            if request.id == request_id:
+                return request.request
+        return None
+
+    def retry(self) -> Run:
+        """Retry an interrupted run from its recorded prefix.
+
+        Terminal application errors are not necessarily retryable; use
+        :meth:`fork` when the recorded failure must be re-executed.
+        """
+        return self.resume()
+
+    def fork(
+        self,
+        start_step: int = 1,
+        *,
+        application_version: str | None = None,
+        queue_name: str | None = None,
+    ) -> Run:
+        """Fork this run at *start_step* and return the new run."""
+        handle = self._client().fork_workflow(
+            self.id,
+            start_step,
+            application_version=application_version,
+            queue_name=queue_name,
+        )
+        return Run(handle.get_workflow_id(), agent=self.agent)
+
+    @classmethod
+    def list_runs(
+        cls,
+        *,
+        status: str | list[str] | None = None,
+        name: str | list[str] | None = None,
+        queue_name: str | list[str] | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        sort_desc: bool = True,
+    ) -> list[Run]:
+        """List runs in the system database."""
+        rows = (
+            runtime()
+            .client()
+            .list_workflows(
+                status=status,
+                name=name,
+                queue_name=queue_name,
+                limit=limit,
+                offset=offset,
+                sort_desc=sort_desc,
+            )
+        )
+        return [Run(row.workflow_id, agent=row.name) for row in rows]
 
     def steps(self, *, load_output: bool = True) -> list[dict[str, Any]]:
         """Return the recorded workflow steps.
@@ -129,10 +238,12 @@ class Run:
 
     def approve(self, request_id: str) -> None:
         """Approve a pending action."""
+        self._authorize("approve", self._request_payload(request_id))
         self._send(request_id, {"approved": True}, "approve")
 
     def reject(self, request_id: str, reason: str | None = None) -> None:
         """Reject a pending action with optional feedback for the agent."""
+        self._authorize("reject", self._request_payload(request_id))
         self._send(
             request_id,
             {"approved": False, "reason": reason},
@@ -141,6 +252,7 @@ class Run:
 
     def respond(self, request_id: str, answer: Any) -> None:
         """Answer a pending question."""
+        self._authorize("respond", self._request_payload(request_id))
         self._send(request_id, {"answer": answer}, "respond")
 
     def _send(self, request_id: str, message: dict[str, Any], action: str) -> None:
