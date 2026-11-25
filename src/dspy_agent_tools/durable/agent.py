@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
-import asyncio
+import copy
 import functools
+import importlib
 import inspect
 import logging
 from collections.abc import Callable, Iterable
+from contextlib import ExitStack
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, overload
 
 from ._dbos import load_dbos
 from .context import (
+    check_pause,
+    check_pause_async,
+    current_facade_agent,
     current_operation_id,
     emit,
+    facade_agent_scope,
     in_workflow,
     in_workflow_body,
     next_operation_id,
@@ -31,6 +37,7 @@ from .exceptions import (
 from .runtime import runtime
 from .schedule import Schedule
 from .tool import (
+    call_tool,
     checkpoint_value,
     is_durable_tool,
     is_workflow_tool,
@@ -71,17 +78,47 @@ def _auto_name(agent: Any) -> str:
     return base if count == 1 else f"{base}#{count}"
 
 
-def _workflow_name(agent_name: str) -> str:
-    return f"dspy-agent:{agent_name}"
+def _workflow_name(agent_name: str, version: str | None = None) -> str:
+    base = f"dspy-agent:{agent_name}"
+    return f"{base}@{version}" if version else base
 
 
-def _step_options(name: str, retries: int) -> Any:
+def _step_options(
+    name: str,
+    retries: int,
+    retry_on: Callable[[BaseException], bool] | None = None,
+) -> Any:
     from dbos import StepOptions
 
     return StepOptions(
         name=name,
         retries_allowed=retries > 0,
         max_attempts=retries + 1,
+        should_retry=retry_on,
+    )
+
+
+def _callbacks(value: Any) -> list[Callable[..., Any]]:
+    if value is None:
+        return []
+    if callable(value):
+        return [value]
+    return list(value)
+
+
+def _add_unique(callbacks: list[Callable[..., Any]], callback: Any) -> None:
+    if callable(callback) and all(existing is not callback for existing in callbacks):
+        callbacks.append(callback)
+
+
+def _agent_for_name(name: str) -> DurableAgent | None:
+    direct = _AGENTS.get(name)
+    if direct is not None:
+        return direct
+    prefix = f"{name}@"
+    return next(
+        (agent for key, agent in _AGENTS.items() if key.startswith(prefix)),
+        None,
     )
 
 
@@ -101,31 +138,49 @@ class DurableAgent:
 
     def __init__(
         self,
-        module: Module,
+        module: Module | None = None,
         *,
+        factory: Callable[[], Module] | None = None,
         name: str | None = None,
+        version: str | None = None,
+        tenant: str | None = None,
         queue: str | None = None,
         retries: int = 0,
+        retry_on: Callable[[BaseException], bool] | None = None,
         approvals: Iterable[Any] | None = None,
         lm: Any = None,
+        recover: Any = None,
         verbose: bool | None = None,
     ) -> None:
+        if module is None and factory is None:
+            raise TypeError("Durable() requires a dspy.Module or a factory")
+        if module is not None and factory is not None:
+            raise TypeError("pass either a dspy.Module or factory=..., not both")
+        if factory is not None:
+            module = factory()
         if not _is_dspy_module(module):
             raise TypeError(
                 f"Durable() expected a dspy.Module or a callable, got "
                 f"{type(module).__name__}"
             )
+        assert module is not None
         load_dbos()
         runtime().set_verbose(
             verbose if verbose is not None else runtime().config.verbose
         )
         self.module = module
+        self._factory = factory
         self.name = name or _auto_name(module)
+        self.version = version
+        self.tenant = tenant
         self.queue = queue
         self.retries = max(0, int(retries))
+        self.retry_on = retry_on
         self._lm = lm
         self._approval_names = {tool_name(item) for item in (approvals or ())}
         self._approval_targets = tuple(approvals or ())
+        self._base_recover_callbacks = _callbacks(recover)
+        self._recover_callbacks = list(self._base_recover_callbacks)
 
         owner = getattr(module, "__durable_agent__", None)
         if owner is not None and owner != self.name:
@@ -134,15 +189,16 @@ class DurableAgent:
             )
         vars(module)["__durable_agent__"] = self.name
 
-        existing = _AGENTS.get(self.name)
+        key = f"{self.name}@{self.version}" if self.version else self.name
+        existing = _AGENTS.get(key)
         if existing is not None and existing is not self:
             raise DuplicateAgentName(
                 f"a durable agent named {self.name!r} already exists; choose a "
                 "stable, unique name=... for each agent"
             )
-        _AGENTS[self.name] = self
+        _AGENTS[key] = self
 
-        self._instrument()
+        self._instrument(module)
         self._register_workflows()
         if queue:
             runtime().register_queue(queue)
@@ -153,25 +209,30 @@ class DurableAgent:
     def _register_workflows(self) -> None:
         from dbos import DBOS
 
-        @DBOS.workflow(name=_workflow_name(self.name))
+        @DBOS.workflow(name=_workflow_name(self.name, self.version))
         def run(**inputs: Any) -> Any:
             return self._execute(**inputs)
 
-        @DBOS.workflow(name=f"{_workflow_name(self.name)}:scheduled")
+        @DBOS.workflow(name=f"{_workflow_name(self.name, self.version)}:scheduled")
         def scheduled(_scheduled_at: datetime, context: dict[str, Any]) -> Any:
             return self._execute(**(context or {}))
 
         self._run_workflow = run
         self._scheduled_workflow = scheduled
 
-    def _instrument(self) -> None:
-        self._patch_predictors()
-        self._patch_tools()
-        self._patch_rlm_helpers()
+    def _instrument(self, module: Module | None = None) -> None:
+        module = module or self.module
+        assert module is not None
+        self._patch_predictors(module)
+        self._patch_tools(module)
+        self._patch_rlm_helpers(module)
+        self._collect_recovery(module)
 
-    def _patch_predictors(self) -> None:
+    def _patch_predictors(self, module: Module | None = None) -> None:
+        module = module or self.module
+        assert module is not None
         try:
-            predictors = list(self.module.named_predictors())
+            predictors = list(module.named_predictors())
         except AttributeError:  # pragma: no cover - non-standard Module
             return
         for path, predictor in predictors:
@@ -196,20 +257,45 @@ class DurableAgent:
             return self._llm_call(bound_forward, path, step_name, args, kwargs)
 
         predictor.forward = forward
+
+        original_aforward = inspect.getattr_static(predictor, "aforward", None)
+        if original_aforward is not None:
+            bound_aforward = (
+                original_aforward.__get__(predictor, type(predictor))
+                if hasattr(original_aforward, "__get__")
+                else original_aforward
+            )
+
+            @functools.wraps(bound_aforward)
+            async def aforward(*args: Any, **kwargs: Any) -> Any:
+                return await self._llm_call_async(
+                    bound_aforward, path, step_name, args, kwargs
+                )
+
+            predictor.aforward = aforward
+
         vars(predictor)["__durable_predictor__"] = True
 
-    def _patch_tools(self) -> None:
+    def _patch_tools(self, module: Module | None = None) -> None:
+        module = module or self.module
+        assert module is not None
         # RLM exposes ``tools`` as a read-only property that returns a copy;
         # its mutable mapping is ``_user_tools``. Prefer that backing store so
         # instrumentation does not try to assign through the property.
         for attribute in ("_user_tools", "tools"):
-            tools = getattr(self.module, attribute, None)
+            tools = getattr(module, attribute, None)
             if isinstance(tools, dict):
                 break
         else:
             return
         wrapped: dict[str, Any] = {}
         for name, tool in tools.items():
+            catalog = getattr(
+                getattr(tool, "func", tool), "__durable_toolbox_catalog__", None
+            )
+            if isinstance(catalog, dict):
+                wrapped[name] = self._wrap_toolbox_tool(tool, catalog)
+                continue
             if (
                 name in _INTERNAL_TOOLS
                 or is_workflow_tool(tool)
@@ -224,9 +310,51 @@ class DurableAgent:
                 tool,
                 name=name,
                 retries=self.retries,
+                retry_on=self.retry_on,
                 approval=True if approval else None,
             )
-        setattr(self.module, attribute, wrapped)
+        setattr(module, attribute, wrapped)
+
+    def _wrap_toolbox_tool(self, tool: Any, catalog: dict[str, Any]) -> Any:
+        original = tool.func
+        for entry in catalog.values():
+            _add_unique(
+                self._recover_callbacks,
+                getattr(entry.tool.func, "__durable_recover__", None),
+            )
+
+        @functools.wraps(original)
+        def dispatch(name: str, arguments: dict[str, Any] | None = None) -> Any:
+            entry = catalog.get(name)
+            if entry is None:
+                folded = str(name).casefold()
+                entry = next(
+                    (item for key, item in catalog.items() if key.casefold() == folded),
+                    None,
+                )
+            if entry is None:
+                raise ValueError(f"Unknown tool {name!r}")
+            target = entry.tool.func
+            args = arguments or {}
+            if (
+                getattr(target, "__human__", None) is not None
+                or is_durable_tool(target)
+                or is_workflow_tool(target)
+            ):
+                return target(**args)
+            return call_tool(
+                target,
+                name=entry.name,
+                retries=self.retries,
+                retry_on=self.retry_on,
+                **args,
+            )
+
+        vars(dispatch)["__durable_tool__"] = True
+        result = copy.copy(tool)
+        result.func = dispatch
+        vars(result)["__durable_tool__"] = True
+        return result
 
     def _approval_for(self, name: str, tool: Any) -> bool:
         if name in self._approval_names:
@@ -237,9 +365,37 @@ class DurableAgent:
             for target in self._approval_targets
         )
 
-    def _patch_rlm_helpers(self) -> None:
-        prepare = getattr(self.module, "_prepare_execution_tools", None)
-        if not callable(prepare) or getattr(self.module, "__durable_rlm__", False):
+    def _collect_recovery(self, module: Module) -> None:
+        for attribute in ("_user_tools", "tools"):
+            tools = getattr(module, attribute, None)
+            if isinstance(tools, dict):
+                for tool in tools.values():
+                    function = getattr(tool, "func", tool)
+                    _add_unique(
+                        self._recover_callbacks,
+                        getattr(function, "__durable_recover__", None),
+                    )
+                return
+
+    def _module_for_run(self) -> Module:
+        if self._factory is None:
+            assert self.module is not None
+            return self.module
+        module = self._factory()
+        if not _is_dspy_module(module):
+            raise TypeError(
+                f"agent factory returned {type(module).__name__}, expected dspy.Module"
+            )
+        vars(module)["__durable_agent__"] = self.name
+        self._recover_callbacks = list(self._base_recover_callbacks)
+        self._instrument(module)
+        return module
+
+    def _patch_rlm_helpers(self, module: Module | None = None) -> None:
+        module = module or self.module
+        assert module is not None
+        prepare = getattr(module, "_prepare_execution_tools", None)
+        if not callable(prepare) or getattr(module, "__durable_rlm__", False):
             return
 
         @functools.wraps(prepare)
@@ -247,14 +403,22 @@ class DurableAgent:
             tools = prepare(*args, **kwargs)
             for helper in ("llm_query", "llm_query_batched"):
                 function = tools.get(helper)
-                if function is not None and not is_durable_tool(function):
+                if function is None or is_durable_tool(function):
+                    continue
+                if helper == "llm_query_batched":
+                    tools[helper] = self._wrap_batched_llm_helper(
+                        function, f"{self.name}:llm:{helper}"
+                    )
+                else:
                     tools[helper] = self._wrap_llm_helper(
                         function, f"{self.name}:llm:{helper}"
                     )
             return tools
 
-        vars(self.module)["_prepare_execution_tools"] = prepare_durable
-        vars(self.module)["__durable_rlm__"] = True
+        vars(module)["_prepare_execution_tools"] = prepare_durable
+        vars(module)["__durable_rlm__"] = True
+        self._patch_facade_call()
+        self._disable_rlm_speculation(module)
 
     def _wrap_llm_helper(
         self, function: Callable[..., Any], step_name: str
@@ -265,6 +429,71 @@ class DurableAgent:
 
         vars(wrapper)["__durable_tool__"] = True
         return wrapper
+
+    def _wrap_batched_llm_helper(
+        self, function: Callable[..., Any], step_name: str
+    ) -> Callable[..., Any]:
+        @functools.wraps(function)
+        def wrapper(prompts: list[str]) -> list[str]:
+            if not in_workflow_body():
+                return function(prompts)
+            results: list[str] = []
+            for index, prompt in enumerate(prompts):
+                result = self._llm_call(
+                    function,
+                    f"{step_name}:{index}",
+                    f"{step_name}:{index}",
+                    ([prompt],),
+                    {},
+                )
+                results.append(result[0])
+            return results
+
+        vars(wrapper)["__durable_tool__"] = True
+        return wrapper
+
+    def _patch_facade_call(self) -> None:
+        """Instrument sandbox-built sub-agents instead of nesting their steps.
+
+        DSPy's RLM facade invokes a host predictor for ``dspy.Predict`` and
+        friends. Instrumenting that predictor keeps each prediction and tool
+        call as its own DBOS step, so nested approvals and checkpoints work;
+        wrapping the whole sub-agent call in one step would make them nested.
+        """
+        try:
+            from dspy.primitives import facade
+        except ImportError:  # pragma: no cover - depends on DSPy internals
+            return
+        original = getattr(facade.FacadeInvocation, "call", None)
+        if original is None or getattr(original, "__durable_patched__", False):
+            return
+
+        @functools.wraps(original)
+        def call(invocation: Any, handle: str, inputs: Any = None) -> Any:
+            name = current_facade_agent()
+            if name is None or not in_workflow_body():
+                return original(invocation, handle, inputs)
+            agent = _agent_for_name(name)
+            predictor = getattr(invocation, "_predictors", {}).get(handle)
+            if agent is not None and predictor is not None:
+                agent._instrument(predictor)
+            return original(invocation, handle, inputs)
+
+        vars(call)["__durable_patched__"] = True
+        facade.FacadeInvocation.call = call  # ty: ignore[invalid-assignment]
+
+    def _disable_rlm_speculation(self, module: Module) -> None:
+        try:
+            hooks = importlib.import_module("dspy_rlm_hooks")
+        except ImportError:
+            return
+        disable = getattr(hooks, "disable_rlm_speculation", None)
+        if disable is None:
+            return
+        try:
+            disable(module)
+        except Exception:
+            logger.debug("could not disable RLM speculation", exc_info=True)
 
     # ------------------------------------------------------------------
     # Step bodies
@@ -279,6 +508,7 @@ class DurableAgent:
     ) -> Any:
         if not in_workflow_body():
             return function(*args, **kwargs)
+        check_pause()
         operation_id = next_operation_id()
         input_data = {"args": args, "kwargs": kwargs}
         emit(
@@ -326,7 +556,7 @@ class DurableAgent:
                 }
 
             result = DBOS.run_step(
-                _step_options(step_name, self.retries),
+                _step_options(step_name, self.retries, getattr(self, "retry_on", None)),
                 body,
             )
         except BaseException as exc:
@@ -363,18 +593,112 @@ class DurableAgent:
         )
         return output
 
+    async def _llm_call_async(
+        self,
+        function: Callable[..., Any],
+        path: str,
+        step_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        if not in_workflow_body():
+            return await function(*args, **kwargs)
+        await check_pause_async()
+        operation_id = next_operation_id()
+        input_data = {"args": args, "kwargs": kwargs}
+        emit(
+            EventType.LLM_STARTED,
+            predictor=path,
+            input=summarize(input_data),
+        )
+        try:
+            from dbos import DBOS
+
+            async def body() -> Any:
+                import dspy
+
+                from .lm import capture_lm
+
+                capture = capture_lm(dspy.settings.lm)
+                with operation_scope(operation_id):
+                    if capture is None:
+                        output = await function(*args, **kwargs)
+                    else:
+                        with dspy.context(lm=capture):
+                            output = await function(*args, **kwargs)
+                if isinstance(output, dspy.Prediction):
+                    rendered = jsonable(output.toDict())
+                    output_type = "prediction"
+                    usage = jsonable(output.get_lm_usage())
+                else:
+                    rendered = checkpoint_value(output)
+                    output_type = "value"
+                    usage = None
+                return {
+                    _LLM_CHECKPOINT: True,
+                    "predictor": path,
+                    "input": {
+                        "args": jsonable(args),
+                        "kwargs": jsonable(kwargs),
+                    },
+                    "output": rendered,
+                    "output_type": output_type,
+                    "usage": usage,
+                    "llm": jsonable(capture.responses if capture is not None else []),
+                }
+
+            result = await DBOS.run_step_async(
+                _step_options(step_name, self.retries, getattr(self, "retry_on", None)),
+                body,
+            )
+        except BaseException as exc:
+            emit(
+                EventType.LLM_FAILED,
+                predictor=path,
+                input=summarize(input_data),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        if isinstance(result, dict) and result.get(_LLM_CHECKPOINT) is True:
+            value = result["output"]
+            if result.get("output_type") == "prediction":
+                import dspy
+
+                output = dspy.Prediction(**value)
+                usage = result.get("usage")
+                if usage is not None:
+                    output.set_lm_usage(usage)
+            else:
+                output = value
+            raw = result.get("llm", [])
+        else:
+            output = result
+            raw = []
+        emit(
+            EventType.LLM_COMPLETED,
+            predictor=path,
+            output=summarize(output),
+            llm=summarize(raw),
+        )
+        return output
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
     def _execute(self, **inputs: Any) -> Any:
         if not in_workflow_body():
-            return self._call_module(inputs)
-        with workflow_state(self.name):
+            return self._call_module(self._module_for_run(), inputs)
+        with workflow_state(self.name, self.tenant):
+            check_pause()
             input_data = jsonable(inputs)
             emit(EventType.RUN_STARTED, agent=self.name, input=input_data)
             set_workflow_event("agent.input", input_data)
             try:
-                result = self._call_module(inputs)
+                module = self._module_for_run()
+                for recovery in self._recover_callbacks:
+                    recovery()
+                with facade_agent_scope(self.name):
+                    result = self._call_module(module, inputs)
             except Exception as exc:
                 if type(exc).__name__ == "DBOSWorkflowCancelledError":
                     raise  # pragma: no cover - DBOS cancellation
@@ -400,14 +724,14 @@ class DurableAgent:
             set_workflow_event("agent.output", output_data)
             return result
 
-    def _call_module(self, inputs: dict[str, Any]) -> Any:
+    def _call_module(self, module: Module, inputs: dict[str, Any]) -> Any:
         import dspy
 
         with dspy.context(allow_tool_async_sync_conversion=True):
             if self._lm is None:
-                return self.module(**inputs)
+                return module(**inputs)
             with dspy.context(lm=self._lm):
-                return self.module(**inputs)
+                return module(**inputs)
 
     # ------------------------------------------------------------------
     # Public execution surface
@@ -418,18 +742,53 @@ class DurableAgent:
 
     async def acall(self, **inputs: Any) -> Any:
         """Async variant of :meth:`__call__`."""
-        run = self.start(**inputs)
-        return await asyncio.to_thread(run.result)
+        run = await self.astart(**inputs)
+        return await run.aresult()
 
-    def start(self, **inputs: Any) -> Run:
+    async def astart(
+        self,
+        *,
+        workflow_id: str | None = None,
+        timeout: float | None = None,
+        **inputs: Any,
+    ) -> Run:
+        """Async alias for :meth:`start`; starting is non-blocking."""
+        return self.start(workflow_id=workflow_id, timeout=timeout, **inputs)
+
+    def start(
+        self,
+        *,
+        workflow_id: str | None = None,
+        timeout: float | None = None,
+        **inputs: Any,
+    ) -> Run:
         """Start the agent in the background and return its :class:`Run`."""
         runtime().ensure_launched()
-        handle = load_dbos().DBOS.start_workflow(self._run_workflow, **inputs)
+        from dbos import SetWorkflowID, SetWorkflowTimeout
+
+        with ExitStack() as stack:
+            if workflow_id is not None:
+                stack.enter_context(SetWorkflowID(workflow_id))
+            if timeout is not None:
+                stack.enter_context(SetWorkflowTimeout(timeout))
+            handle = load_dbos().DBOS.start_workflow(self._run_workflow, **inputs)
         from .run import Run
 
-        return Run(handle.get_workflow_id(), agent=self.name)
+        return Run(handle.get_workflow_id(), agent=self.name, tenant=self.tenant)
 
-    def enqueue(self, *, queue: str | None = None, **inputs: Any) -> Run:
+    def enqueue(
+        self,
+        *,
+        queue: str | None = None,
+        delay: float | None = None,
+        priority: int | None = None,
+        deduplication_id: str | None = None,
+        duplication_policy: Literal["reject", "return-existing"] | None = None,
+        workflow_id: str | None = None,
+        queue_partition_key: str | None = None,
+        timeout: float | None = None,
+        **inputs: Any,
+    ) -> Run:
         """Enqueue the agent on a persistent DBOS queue."""
         queue_name = queue or self.queue
         if not queue_name:
@@ -438,12 +797,38 @@ class DurableAgent:
             )
         runtime().ensure_launched()
         runtime().register_queue(queue_name)
-        handle = load_dbos().DBOS.enqueue_workflow(
-            queue_name, self._run_workflow, **inputs
-        )
+        from dbos import SetEnqueueOptions, SetWorkflowID, SetWorkflowTimeout
+
+        with ExitStack() as stack:
+            if any(
+                value is not None
+                for value in (
+                    delay,
+                    priority,
+                    deduplication_id,
+                    duplication_policy,
+                    queue_partition_key,
+                )
+            ):
+                stack.enter_context(
+                    SetEnqueueOptions(
+                        delay_seconds=delay,
+                        priority=priority,
+                        deduplication_id=deduplication_id,
+                        duplication_policy=duplication_policy,
+                        queue_partition_key=queue_partition_key,
+                    )
+                )
+            if workflow_id is not None:
+                stack.enter_context(SetWorkflowID(workflow_id))
+            if timeout is not None:
+                stack.enter_context(SetWorkflowTimeout(timeout))
+            handle = load_dbos().DBOS.enqueue_workflow(
+                queue_name, self._run_workflow, **inputs
+            )
         from .run import Run
 
-        return Run(handle.get_workflow_id(), agent=self.name)
+        return Run(handle.get_workflow_id(), agent=self.name, tenant=self.tenant)
 
     def schedule(
         self,
@@ -506,10 +891,14 @@ class Durable:
             target: Module,
             *,
             name: str | None = ...,
+            version: str | None = ...,
+            tenant: str | None = ...,
             queue: str | None = ...,
             retries: int = ...,
+            retry_on: Callable[[BaseException], bool] | None = ...,
             approvals: Iterable[Any] | None = ...,
             lm: Any = ...,
+            recover: Any = ...,
             verbose: bool | None = ...,
         ) -> DurableAgent: ...
 
@@ -519,6 +908,8 @@ class Durable:
             target: Callable[..., Any],
             *,
             name: str | None = ...,
+            version: str | None = ...,
+            tenant: str | None = ...,
             queue: str | None = ...,
             retries: int = ...,
             concurrency: int | None = ...,
@@ -594,8 +985,19 @@ class Durable:
         )
 
     @classmethod
-    def agent(cls, agent: Module, **kwargs: Any) -> DurableAgent:
-        """Explicit alias for ``Durable(agent)``."""
+    def agent(cls, agent: Module | None = None, **kwargs: Any) -> Any:
+        """Wrap an agent, or register a factory with ``@Durable.agent``.
+
+        With a factory, each run constructs a fresh module, which is the right
+        shape for agents that own browser or MCP sessions.
+
+        Example:
+            >>> @Durable.agent(name="coder", version="v1")
+            ... def make_coder():
+            ...     return dspy.RLM("task -> summary", tools=[])
+        """
+        if agent is None:
+            return lambda factory: DurableAgent(factory=factory, **kwargs)
         return DurableAgent(agent, **kwargs)
 
     @classmethod
@@ -609,6 +1011,9 @@ class Durable:
         executor_id: str | None = None,
         log_level: str | None = None,
         verbose: bool | None = None,
+        authorizer: (
+            Callable[[str, str, str | None, dict[str, Any] | None], bool] | None
+        ) = None,
     ) -> None:
         """Configure the process-wide DBOS runtime exactly once at startup.
 
@@ -633,6 +1038,7 @@ class Durable:
             executor_id=executor_id,
             log_level=log_level,
             verbose=verbose,
+            authorizer=authorizer,
         )
 
     @classmethod
@@ -729,6 +1135,16 @@ class Durable:
         return target.schedule(**options)
 
     @classmethod
+    def pause_point(cls) -> None:
+        """Yield to a pending pause at a safe workflow boundary."""
+        check_pause()
+
+    @classmethod
+    async def pause_point_async(cls) -> None:
+        """Async variant of :meth:`pause_point`."""
+        await check_pause_async()
+
+    @classmethod
     def sleep(cls, seconds: float) -> None:
         """Sleep durably at workflow level; plain sleep elsewhere.
 
@@ -763,9 +1179,21 @@ class Durable:
         return Run.get(run_id)
 
     @classmethod
+    def list_runs(cls, **filters: Any) -> list[Run]:
+        """List runs, accepting :meth:`Run.list_runs` filters."""
+        from .run import Run
+
+        return Run.list_runs(**filters)
+
+    @classmethod
     def get_schedule(cls, name: str) -> Schedule:
         """Look up an existing schedule."""
         return Schedule.get(name)
+
+    @classmethod
+    def list_schedules(cls, **filters: Any) -> list[dict[str, Any]]:
+        """List schedule rows from the DBOS system database."""
+        return [dict(row) for row in runtime().client().list_schedules(**filters)]
 
     @classmethod
     def operation_id(cls) -> str:
