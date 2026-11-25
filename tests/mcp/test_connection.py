@@ -169,6 +169,46 @@ def _bare_connection(serve_future: Any) -> Any:
     return connection
 
 
+class TestRecovery:
+    def test_recover_open_and_lost_session(self):
+        connection = _bare_connection(_FakeFuture([]))
+        connection._label = "test"
+        assert connection.recover() is True
+        connection._session = None
+        with pytest.raises(RuntimeError, match="lost its session"):
+            connection.recover()
+        connection._loop.close()
+
+    def test_recover_restarts_closed_connection(self, monkeypatch):
+        connection: Any = object.__new__(_Connection)
+        connection._label = "test"
+        connection._transport = object()
+        connection._client_session = object()
+        connection._startup_timeout = 1.0
+        connection._failures = None
+        connection._closed = True
+        connection._session = None
+
+        class Thread:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self.started = False
+                self.daemon = False
+
+            def start(self) -> None:
+                self.started = True
+
+        monkeypatch.setattr("dspy_agent_tools.mcp.connection.threading.Thread", Thread)
+        monkeypatch.setattr(
+            _Connection,
+            "_start",
+            lambda self, startup_timeout: setattr(self, "_session", "session"),
+        )
+        assert connection.recover() is True
+        assert connection._thread.started is True
+        assert connection._session == "session"
+        connection._loop.close()
+
+
 class TestInternals:
     def test_accepted_kwargs_keeps_kwargs_for_var_keyword(self):
         def accepts_all(**kwargs):
