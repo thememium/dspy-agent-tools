@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import uuid
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -54,6 +57,34 @@ def test_crash_recovery_replays_completed_steps(tmp_path: Path):
     assert len(_lines(tmp_path / "lm_calls.txt")) == 4
     tool_calls = _lines(tmp_path / "tool_calls.txt")
     assert tool_calls == ["weather:Paris", "crash", "crash"]
+
+
+def test_rlm_crash_recovery_reconstructs_interpreter_state(tmp_path: Path):
+    if shutil.which("deno") is None:
+        pytest.skip("Deno is required to run the real dspy.RLM crash test")
+
+    app = f"rlm-{uuid.uuid4().hex[:10]}"
+    first = _run("rlm_recovery_app.py", "first", tmp_path, app)
+    assert first.returncode == 17, first.stderr
+    assert len(_lines(tmp_path / "lm_calls.txt")) == 2
+    assert _lines(tmp_path / "seed_calls.txt") == ["seed"]
+    assert _lines(tmp_path / "crash_calls.txt") == ["crash:seed-value"]
+
+    recovered = _run("rlm_recovery_app.py", "recover", tmp_path, app)
+    assert recovered.returncode == 0, recovered.stderr
+    assert "seed-value" in recovered.stdout
+
+    # Both action predictions before the crash were checkpointed. Only the
+    # third action (SUBMIT) ran in the recovery process.
+    assert len(_lines(tmp_path / "lm_calls.txt")) == 3
+    # The completed seed tool was replayed, not called again.
+    assert _lines(tmp_path / "seed_calls.txt") == ["seed"]
+    # The crash tool ran before its checkpoint both times, so it is the one
+    # expected duplicate.
+    assert _lines(tmp_path / "crash_calls.txt") == [
+        "crash:seed-value",
+        "crash:seed-value",
+    ]
 
 
 def test_queued_worker_executes(tmp_path: Path):
