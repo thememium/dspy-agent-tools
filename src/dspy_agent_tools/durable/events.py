@@ -13,6 +13,8 @@ class EventType(StrEnum):
     RUN_STARTED = "run.started"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
+    RUN_PAUSED = "run.paused"
+    RUN_RESUMED = "run.resumed"
 
     LLM_STARTED = "llm.started"
     LLM_COMPLETED = "llm.completed"
