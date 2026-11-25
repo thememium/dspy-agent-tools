@@ -666,6 +666,18 @@ def test_human_in_workflow_and_timeout():
         timed()
 
 
+def test_recovery_exhausted_run_is_terminal(monkeypatch):
+    monkeypatch.setattr(Run, "status", lambda self: "MAX_RECOVERY_ATTEMPTS_EXCEEDED")
+    assert Run("x").is_active() is False
+
+    class Client:
+        def read_stream(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            return []
+
+    monkeypatch.setattr(Run, "_client", lambda self: Client())
+    assert list(Run("x").events()) == []
+
+
 def test_run_control_helpers(monkeypatch):
     assert "Run" in repr(Run("x"))
     assert Run.get("x").id == "x"
