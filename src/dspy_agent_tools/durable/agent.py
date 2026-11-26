@@ -471,7 +471,17 @@ class DurableAgent:
             from dspy.primitives import facade
         except ImportError:  # pragma: no cover - depends on DSPy internals
             return
-        original = getattr(facade.FacadeInvocation, "call", None)
+        # DSPy 3.5 dropped ``FacadeInvocation``: ``SandboxSession`` now sends a
+        # sandbox predictor call to the host as a signature plus inputs
+        # (``_serve_lm``), so no host predictor object exists to instrument.
+        invocation_type = getattr(facade, "FacadeInvocation", None)
+        if invocation_type is None:
+            logger.debug(
+                "dspy.primitives.facade has no FacadeInvocation (DSPy >= 3.5); "
+                "sandbox sub-agent predictions stay outside DBOS steps"
+            )
+            return
+        original = getattr(invocation_type, "call", None)
         if original is None or getattr(original, "__durable_patched__", False):
             return
 
@@ -487,7 +497,7 @@ class DurableAgent:
             return original(invocation, handle, inputs)
 
         vars(call)["__durable_patched__"] = True
-        facade.FacadeInvocation.call = call  # ty: ignore[invalid-assignment]
+        invocation_type.call = call
 
     def _disable_rlm_speculation(self, module: Module) -> None:
         try:

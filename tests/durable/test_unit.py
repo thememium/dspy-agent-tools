@@ -717,6 +717,20 @@ def test_facade_call_passes_through_outside_workflow(monkeypatch):
     assert instrumented == ["predictor"]
 
 
+def test_facade_call_absent_on_newer_dspy(monkeypatch):
+    """DSPy 3.5 replaced FacadeInvocation with SandboxSession: no host predictor
+    exists to instrument, and construction must not raise."""
+    from dspy.primitives import facade
+
+    monkeypatch.delattr(facade, "FacadeInvocation", raising=False)
+
+    class FakeRLM(dspy.Module):
+        def _prepare_execution_tools(self, budget: Any = None) -> dict[str, Any]:
+            return {}
+
+    Durable(FakeRLM(), name=unique_name("facade-absent"))
+
+
 def test_durable_private_helpers_and_schedules(monkeypatch):
     callback = lambda: None
     assert agent_module._callbacks(callback) == [callback]
