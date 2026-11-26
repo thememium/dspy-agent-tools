@@ -42,6 +42,33 @@ class CapturingLM(BaseLM):
         self.responses.append(response)
         return response
 
+    # Adapters choose native tool calling, native reasoning and structured
+    # output from these hints. BaseLM's own properties answer for this proxy,
+    # not the wrapped LM, and would report none: the adapter then inlines the
+    # tools and reasoning fields into the prompt, which providers reject or
+    # misparse (gpt-oss emits Harmony tool calls the request never allowed;
+    # a text `plan` field goes missing). Answer for the wrapped model, as
+    # DSPy's own SandboxLM proxy does.
+    @property
+    def supports_function_calling(self) -> bool:
+        return bool(getattr(self._lm, "supports_function_calling", False))
+
+    @property
+    def supports_reasoning(self) -> bool:
+        return bool(getattr(self._lm, "supports_reasoning", False))
+
+    @property
+    def supports_response_schema(self) -> bool:
+        return bool(getattr(self._lm, "supports_response_schema", False))
+
+    @property
+    def supported_params(self) -> set[str]:
+        return set(getattr(self._lm, "supported_params", ()) or ())
+
+    @property
+    def supported_tool_result_media(self) -> set[str]:
+        return set(getattr(self._lm, "supported_tool_result_media", ()) or ())
+
     def __getattr__(self, name: str) -> Any:
         if name == "_lm":
             raise AttributeError(name)

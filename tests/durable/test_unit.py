@@ -1219,6 +1219,35 @@ def test_capturing_lm():
     assert capture_lm(capture) is None
 
 
+def test_capturing_lm_mirrors_capabilities():
+    from dspy.clients.base_lm import BaseLM
+
+    from dspy_agent_tools.durable.lm import capture_lm
+
+    class DeclaredLM(BaseLM):
+        supports_function_calling = True
+        supports_reasoning = True
+        supports_response_schema = True
+
+        @property
+        def supported_params(self) -> set[str]:
+            return {"tools", "reasoning_effort"}
+
+        @property
+        def supported_tool_result_media(self) -> set[str]:
+            return {"image"}
+
+    capture = capture_lm(DeclaredLM("declared"))
+    assert capture is not None
+    # The adapter reads these to decide between native tools/reasoning and
+    # inlining them into the prompt; the proxy must answer for the real LM.
+    assert capture.supports_function_calling is True
+    assert capture.supports_reasoning is True
+    assert capture.supports_response_schema is True
+    assert capture.supported_params == {"tools", "reasoning_effort"}
+    assert capture.supported_tool_result_media == {"image"}
+
+
 def test_summarize_and_checkpoint_value():
     class Broken:
         def toDict(self) -> Any:
