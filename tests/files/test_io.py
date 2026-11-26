@@ -56,6 +56,29 @@ class TestWriteFile:
         with pytest.raises(RuntimeError, match="changed since it was read"):
             write_file(str(f), "new\n", snapshot=stale)
 
+    def test_pasted_read_file_output_is_written_unnumbered(self, tmp_path):
+        f = tmp_path / "f.txt"
+        f.write_text("alpha\nbeta\n")
+        numbered, _ = read_file(str(f))
+        snap = write_file(str(f), numbered)
+        # read_file joins without a trailing newline, and stripping
+        # preserves that: only the prefixes go.
+        assert f.read_text() == "alpha\nbeta"
+        assert snap == _hash("alpha\nbeta")
+
+    def test_numbering_around_plain_text_is_stripped(self, tmp_path):
+        # The reported bug: numbered output pasted around the agent's own
+        # new lines, with the numbers written into the file.
+        f = tmp_path / "f.txt"
+        write_file(str(f), "    1 | one\n# note\n    2 | two\n")
+        assert f.read_text() == "one\n# note\ntwo\n"
+
+    def test_pipe_content_that_is_not_read_file_output_is_kept(self, tmp_path):
+        f = tmp_path / "f.txt"
+        content = "| 12 | value |\nplain\n"
+        write_file(str(f), content)
+        assert f.read_text() == content
+
     def test_snapshot_on_deleted_file_rejects_write(self, tmp_path):
         f = tmp_path / "f.txt"
         snapshot = write_file(str(f), "original\n")
