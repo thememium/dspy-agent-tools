@@ -1,12 +1,11 @@
 """File editing operations with optimistic concurrency control."""
 
 import difflib
-import re
 import textwrap
 
 from tree_sitter_language_pack import get_parser
 
-from .io import _checked, _hash
+from .io import _checked, _hash, _unnumber
 
 
 def edit_file(
@@ -36,9 +35,10 @@ def edit_file(
     most similar block of lines is replaced instead, as long as its
     similarity is at least min_similarity (0.0-1.0). This recovers
     edits whose old text drifted slightly from the real file
-    (whitespace, renamed identifiers, trailing punctuation). If the
-    agent pasted read_file's " N | " prefixes into old_text, they are
-    stripped automatically before matching.
+    (whitespace, renamed identifiers, trailing punctuation). read_file's
+    " N | " display prefixes are stripped from old_text before matching
+    and from new_text before writing, so pasted numbered output never
+    lands in the file.
 
     Returns the new snapshot.
     """
@@ -76,6 +76,7 @@ def _edit_lines(
             f"Invalid line range {start_line}-{end_line}; file has {len(lines)} lines."
         )
 
+    new_text = _unnumber(new_text)
     # Preserve normal line-oriented behavior.
     if new_text and not new_text.endswith("\n"):
         new_text += "\n"
@@ -86,24 +87,6 @@ def _edit_lines(
     edit_path.write_text(new_content)
 
     return _hash(new_content)
-
-
-_NUMBER_PREFIX = re.compile(r"^\s*\d+ \| ")
-
-
-def _unnumber(text: str) -> str:
-    """
-    Strip read_file's " N | " prefixes from every non-empty line.
-
-    Returns the text unchanged unless every non-empty line carries the
-    prefix, so real content that merely starts with digits and a pipe
-    is never mangled.
-    """
-    lines = text.splitlines()
-    non_empty = [line for line in lines if line.strip()]
-    if not non_empty or not all(_NUMBER_PREFIX.match(line) for line in non_empty):
-        return text
-    return "\n".join(_NUMBER_PREFIX.sub("", line, count=1) for line in lines)
 
 
 def _edit_text(
@@ -120,6 +103,7 @@ def _edit_text(
         raise ValueError("old_text must be non-empty")
     if not 0 <= min_similarity <= 1:
         raise ValueError("min_similarity must be between 0 and 1")
+    new_text = _unnumber(new_text)
     edit_path, content = _checked(path, snapshot)
 
     occurrences = content.count(old_text)
@@ -242,6 +226,7 @@ def _edit_block(
     if node is None:
         raise ValueError(f"{path}: no definition matching {block!r}.")
 
+    new_text = _unnumber(new_text)
     if not new_text.endswith("\n"):
         new_text += "\n"
 
