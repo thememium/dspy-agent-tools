@@ -112,18 +112,64 @@ class TestEditTextNumberedPrefix:
         assert f.read_text() == "gamma\n"
         assert new_snap == _hash("gamma\n")
 
+    def test_numbered_new_text_is_written_unnumbered(self, tmp_path):
+        f = tmp_path / "f.txt"
+        f.write_text("alpha\nbeta\n")
+        new_snap = edit_file(
+            str(f),
+            _hash("alpha\nbeta\n"),
+            old_text="alpha\n",
+            new_text="    1 | gamma\n    2 | delta\n",
+        )
+        assert f.read_text() == "gamma\ndelta\nbeta\n"
+        assert new_snap == _hash(f.read_text())
+
+    def test_numbered_line_range_replacement_is_unnumbered(self, tmp_path):
+        f = tmp_path / "f.txt"
+        f.write_text("alpha\nbeta\n")
+        edit_file(
+            str(f),
+            _hash("alpha\nbeta\n"),
+            start_line=1,
+            end_line=1,
+            new_text="    1 | gamma\n    2 | delta\n",
+        )
+        assert f.read_text() == "gamma\ndelta\nbeta\n"
+
+    def test_numbered_block_replacement_is_unnumbered(self, tmp_path):
+        f = tmp_path / "f.py"
+        original = "def alpha():\n    return 1\n"
+        f.write_text(original)
+        edit_file(
+            str(f),
+            _hash(original),
+            block="alpha",
+            new_text="    1 | def alpha():\n    2 |     return 2\n",
+        )
+        assert f.read_text() == "def alpha():\n    return 2\n"
+
 
 class TestUnnumber:
     def test_strips_prefixes_when_all_lines_prefixed(self):
         text = "    1 | alpha\n    2 | beta\n"
-        assert _unnumber(text) == "alpha\nbeta"
+        assert _unnumber(text) == "alpha\nbeta\n"
 
     def test_keeps_empty_lines(self):
         text = "    1 | alpha\n\n    2 | beta\n"
-        assert _unnumber(text) == "alpha\n\nbeta"
+        assert _unnumber(text) == "alpha\n\nbeta\n"
+
+    def test_strips_prefixes_around_plain_lines(self):
+        # Shape of an agent edit that pasted numbered output around its
+        # own new lines.
+        text = "    1 | alpha\n# note\n    2 | beta\n"
+        assert _unnumber(text) == "alpha\n# note\nbeta\n"
 
     def test_plain_text_untouched(self):
         text = "1 | x\nplain\n"
+        assert _unnumber(text) == text
+
+    def test_one_numbered_line_among_plain_lines_untouched(self):
+        text = "    1 | alpha\nplain\n"
         assert _unnumber(text) == text
 
     def test_empty_text_untouched(self):
